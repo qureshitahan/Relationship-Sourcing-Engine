@@ -1,0 +1,158 @@
+"""Stagger campaign sends inside a local business-hours window."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+# A/B time-of-day buckets (local hour, minute) the agent rotates between so we
+# learn which send time earns more replies. Both are inside business hours.
+AB_SEND_BUCKETS: list[tuple[int, int]] = [(9, 30), (13, 30)]
+
+# Lightweight US location -> IANA timezone mapping. We only need the 4 mainland
+# zones plus AK/HI; matching is done on substrings of the person's location text
+# (city, state name, or 2-letter state code) reported by Apollo/LinkedIn.
+_PACIFIC = "America/Los_Angeles"
+_MOUNTAIN = "America/Denver"
+_CENTRAL = "America/Chicago"
+_EASTERN = "America/New_York"
+
+_STATE_TZ: dict[str, str] = {
+    # Pacific
+    "ca": _PACIFIC, "california": _PACIFIC, "wa": _PACIFIC, "washington": _PACIFIC,
+    "or": _PACIFIC, "oregon": _PACIFIC, "nv": _PACIFIC, "nevada": _PACIFIC,
+    # Mountain
+    "az": _MOUNTAIN, "arizona": _MOUNTAIN, "co": _MOUNTAIN, "colorado": _MOUNTAIN,
+    "ut": _MOUNTAIN, "utah": _MOUNTAIN, "nm": _MOUNTAIN, "new mexico": _MOUNTAIN,
+    "id": _MOUNTAIN, "idaho": _MOUNTAIN, "mt": _MOUNTAIN, "montana": _MOUNTAIN,
+    "wy": _MOUNTAIN, "wyoming": _MOUNTAIN,
+    # Central
+    "tx": _CENTRAL, "texas": _CENTRAL, "il": _CENTRAL, "illinois": _CENTRAL,
+    "mn": _CENTRAL, "minnesota": _CENTRAL, "wi": _CENTRAL, "wisconsin": _CENTRAL,
+    "mo": _CENTRAL, "missouri": _CENTRAL, "ia": _CENTRAL, "iowa": _CENTRAL,
+    "ks": _CENTRAL, "kansas": _CENTRAL, "ne": _CENTRAL, "nebraska": _CENTRAL,
+    "ok": _CENTRAL, "oklahoma": _CENTRAL, "ar": _CENTRAL, "arkansas": _CENTRAL,
+    "la": _CENTRAL, "louisiana": _CENTRAL, "tn": _CENTRAL, "tennessee": _CENTRAL,
+    "al": _CENTRAL, "alabama": _CENTRAL, "ms": _CENTRAL, "mississippi": _CENTRAL,
+    "nd": _CENTRAL, "sd": _CENTRAL,
+    # Hawaii / Alaska
+    "hi": "Pacific/Honolulu", "hawaii": "Pacific/Honolulu",
+    "ak": "America/Anchorage", "alaska": "America/Anchorage",
+}
+
+_CITY_TZ: dict[str, str] = {
+    "san francisco": _PACIFIC, "los angeles": _PACIFIC, "seattle": _PACIFIC,
+    "portland": _PACIFIC, "san diego": _PACIFIC, "san jose": _PACIFIC,
+    "denver": _MOUNTAIN, "phoenix": _MOUNTAIN, "salt lake": _MOUNTAIN,
+    "chicago": _CENTRAL, "dallas": _CENTRAL, "houston": _CENTRAL,
+    "austin": _CENTRAL, "minneapolis": _CENTRAL, "nashville": _CENTRAL,
+    "new york": _EASTERN, "boston": _EASTERN, "atlanta": _EASTERN,
+    "miami": _EASTERN, "washington": _EASTERN, "philadelphia": _EASTERN,
+}
+
+
+def timezone_for_location(location: str | None, default: str = _EASTERN) -> str:
+    """Best-effort IANA timezone from a free-text US location (city/state)."""
+    if not location:
+        return default
+    text = location.lower()
+    for city, tz in _CITY_TZ.items():
+        if city in text:
+            return tz
+    # Match trailing/standalone state codes or names.
+    tokens = [t.strip(" ,.").lower() for t in text.replace(",", " ").split()]
+    for tok in tokens:
+        if tok in _STATE_TZ:
+            return _STATE_TZ[tok]
+    for name, tz in _STATE_TZ.items():
+        if len(name) > 3 and name in text:
+            return tz
+    return default
+
+
+def personalized_send_time_utc(
+    *,
+    location: str | None,
+    order_index: int,
+    ab_index: int,
+    gap_minutes: int = 7,
+    default_tz: str = _EASTERN,
+) -> datetime:
+    """Pick a UTC send time at a good local hour in the RECIPIENT'S timezone.
+
+    - The local time-of-day is chosen from ``AB_SEND_BUCKETS[ab_index]`` so the
+      agent can A/B test morning vs. afternoon sends.
+    - ``order_index`` spaces sends out (``gap_minutes`` apart) so a batch never
+      fires all at once from the same mailbox.
+    - If the local slot has already passed today, it rolls to the next day.
+    """
+    tz = ZoneInfo(timezone_for_location(location, default_tz))
+    bucket = AB_SEND_BUCKETS[ab_index % len(AB_SEND_BUCKETS)]
+    now_local = datetime.now(tz)
+    # Stagger by pushing later recipients forward in real time.
+    target = now_local.replace(
+        hour=bucket[0], minute=bucket[1], second=0, microsecond=0
+    ) + timedelta(minutes=order_index * max(1, gap_minutes))
+    # Keep inside ~business hours; if past 6pm local, move to tomorrow's bucket.
+    if target <= now_local or target.hour >= 18:
+        target = (now_local + timedelta(days=1)).replace(
+            hour=bucket[0], minute=bucket[1], second=0, microsecond=0
+        ) + timedelta(minutes=order_index * max(1, gap_minutes))
+    return target.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+
+def staggered_send_times_utc(
+    *,
+    count: int,
+    timezone: str = "America/New_York",
+    start_hour: int = 9,
+    end_hour: int = 17,
+    gap_minutes: int = 2,
+) -> list[datetime]:
+    """Return UTC datetimes for ``count`` sends, spaced ``gap_minutes`` apart.
+
+    Starts at the next slot inside [start_hour, end_hour) in the given timezone.
+    Rolls to the next business day if the window is full.
+    """
+    if count <= 0:
+        return []
+
+    tz = ZoneInfo(timezone or "America/New_York")
+    start_hour = max(0, min(23, int(start_hour)))
+    end_hour = max(start_hour + 1, min(24, int(end_hour)))
+    gap = max(1, int(gap_minutes))
+
+    now_local = datetime.now(tz)
+    slot = now_local.replace(second=0, microsecond=0)
+
+    # If before window today, start at window open.
+    if slot.hour < start_hour:
+        slot = slot.replace(hour=start_hour, minute=0)
+    elif slot.hour >= end_hour:
+        slot = (slot + timedelta(days=1)).replace(hour=start_hour, minute=0)
+
+    window_minutes = (end_hour - start_hour) * 60
+    max_per_day = max(1, window_minutes // gap)
+
+    out: list[datetime] = []
+    day_offset = 0
+    index_in_day = 0
+
+    while len(out) < count:
+        if index_in_day >= max_per_day:
+            day_offset += 1
+            index_in_day = 0
+        base = (now_local + timedelta(days=day_offset)).replace(
+            hour=start_hour, minute=0, second=0, microsecond=0
+        )
+        candidate = base + timedelta(minutes=index_in_day * gap)
+        if day_offset == 0 and candidate < now_local:
+            # First day: bump to now + small buffer if we're already in-window.
+            candidate = max(candidate, now_local + timedelta(minutes=1))
+            if candidate.hour >= end_hour:
+                day_offset += 1
+                index_in_day = 0
+                continue
+        out.append(candidate.astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
+        index_in_day += 1
+
+    return out

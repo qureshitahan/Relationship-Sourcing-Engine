@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Environment / secrets
+.env
+*.env
+!.env.example
+
+# Databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+backend/data/*.db
+backend/data/*.db-*
+
+# Principal résumés / brand docs (local only — re-upload after clone)
+backend/data/principal_docs/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+.idea/
+*.log
+
+# Deploy artifacts (rebuild with deploy/build-zips.sh)
+deploy/artifacts/
+
+# Uploaded files (resumes, imports)
+backend/uploads/

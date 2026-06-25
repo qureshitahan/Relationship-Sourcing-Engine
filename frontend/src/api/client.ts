@@ -1,0 +1,535 @@
+import axios from "axios";
+import type {
+  AgentConfig,
+  AgentPlan,
+  AgentPlaybook,
+  AgentRun,
+  AgentVariantsResponse,
+  CampaignCreatePayload,
+  CampaignDashboard,
+  CampaignDetail,
+  CampaignList,
+  CampaignProspects,
+  CampaignSummary,
+  CampaignUpdatePayload,
+  Call,
+  CallConfig,
+  DashboardStats,
+  DiscoveryRun,
+  EmailDraft,
+  IngestSummary,
+  IndexFileResult,
+  Organization,
+  Page,
+  ProviderHealth,
+  Principal,
+  PrincipalDocument,
+  Prospect,
+  RelevanceInsight,
+  SearchDefinition,
+  UploadSummary,
+} from "../types";
+
+// Dev: Vite proxies "/" to the API. Azure web app: set VITE_API_BASE_URL to the API host.
+const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") || "/";
+export const api = axios.create({ baseURL: apiBase, timeout: 30_000 });
+
+// --- Stats ---
+export const getStats = () =>
+  api.get<DashboardStats>("/api/stats").then((r) => r.data);
+
+export const getProviderHealth = (probe = false) =>
+  api
+    .get<ProviderHealth>("/api/provider-health", { params: { probe } })
+    .then((r) => r.data);
+export const resetPipeline = () =>
+  api
+    .post<{ deleted: Record<string, number>; message: string }>(
+      "/api/reset-pipeline?confirm=true"
+    )
+    .then((r) => r.data);
+
+// --- Principals ---
+export interface PrincipalPayload {
+  name: string;
+  headline?: string;
+  linkedin_url: string;
+  phone: string;
+  document_focus?: string;
+  bio?: string;
+  background?: string;
+  focus_areas?: string[];
+  target_sectors?: string[];
+  investment_themes?: string[];
+  acquisition_themes?: string[];
+  target_titles?: string[];
+  target_seniorities?: string[];
+  geographies?: string[];
+  opportunity_types?: string[];
+  value_props?: string[];
+  is_active?: boolean;
+}
+export const listPrincipals = (params: Record<string, unknown> = {}) =>
+  api.get<Page<Principal>>("/api/principals", { params }).then((r) => r.data);
+export const getPrincipal = (id: number) =>
+  api.get<Principal>(`/api/principals/${id}`).then((r) => r.data);
+export const createPrincipal = (payload: PrincipalPayload) =>
+  api.post<Principal>("/api/principals", payload).then((r) => r.data);
+export const updatePrincipal = (id: number, payload: PrincipalPayload) =>
+  api.put<Principal>(`/api/principals/${id}`, payload).then((r) => r.data);
+export const deletePrincipal = (id: number) =>
+  api.delete(`/api/principals/${id}`).then((r) => r.data);
+
+// --- Principal context documents ---
+export const listPrincipalDocuments = (id: number) =>
+  api
+    .get<PrincipalDocument[]>(`/api/principals/${id}/documents`)
+    .then((r) => r.data);
+export const uploadPrincipalDocuments = (id: number, files: File[]) => {
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+  return api
+    .post<UploadSummary>(`/api/principals/${id}/documents/upload`, form, {
+      timeout: 120000,
+    })
+    .then((r) => r.data);
+};
+export const indexPrincipalDocument = (
+  id: number,
+  filename: string,
+  force = false
+) =>
+  api
+    .post<IndexFileResult>(
+      `/api/principals/${id}/documents/index-file`,
+      {},
+      { params: { filename, force }, timeout: 180000 }
+    )
+    .then((r) => r.data);
+export const ingestPrincipalDocuments = (id: number, force = false) =>
+  api
+    .post<IngestSummary>(
+      `/api/principals/${id}/documents/ingest`,
+      {},
+      { params: { force }, timeout: 600000 }
+    )
+    .then((r) => r.data);
+export const deletePrincipalDocument = (id: number, documentId: number) =>
+  api
+    .delete(`/api/principals/${id}/documents/${documentId}`)
+    .then((r) => r.data);
+
+export interface PrincipalDossier {
+  documents_total: number;
+  documents_usable: number;
+  proof_points_total: number;
+  proof_points_unique: number;
+  themes: string[];
+  top_proof_points: string[];
+  documents: {
+    id: number;
+    filename: string;
+    doc_type?: string | null;
+    status: string;
+    relevance_score?: number | null;
+    relevance_note?: string | null;
+    summary?: string | null;
+    key_facts: string[];
+    themes: string[];
+    indexed_at?: string | null;
+  }[];
+  used_in: string[];
+}
+export const getPrincipalDossier = (id: number) =>
+  api.get<PrincipalDossier>(`/api/principals/${id}/dossier`).then((r) => r.data);
+
+// --- Search definitions ---
+export const listSearchDefinitions = (params: Record<string, unknown> = {}) =>
+  api
+    .get<Page<SearchDefinition>>("/api/search-definitions", { params })
+    .then((r) => r.data);
+export const createSearchDefinition = (payload: Partial<SearchDefinition>) =>
+  api
+    .post<SearchDefinition>("/api/search-definitions", payload)
+    .then((r) => r.data);
+
+// --- Discovery ---
+export interface DiscoveryRunPayload {
+  principal_id: number;
+  search_definition_id?: number;
+  industries?: string[];
+  company_types?: string[];
+  healthcare_sectors?: string[];
+  geographies?: string[];
+  titles?: string[];
+  seniorities?: string[];
+  keywords?: string[];
+  themes?: string[];
+  employee_min?: number;
+  employee_max?: number;
+  org_limit?: number;
+  people_limit?: number;
+  people_first?: boolean;
+  generate_insights?: boolean;
+  organization_job_titles?: string[];
+  contact_email_status?: string[];
+  organization_domains?: string[];
+  auto_expand_to_target?: boolean;
+  auto_process?: boolean;
+  /** Plain-language goal from AI-assisted setup — drives relevance research. */
+  search_goal?: string;
+}
+export const runDiscovery = (payload: DiscoveryRunPayload) =>
+  api
+    .post<DiscoveryRun>("/api/discovery/run", payload, {
+      timeout: payload.auto_process ? 600000 : 360000,
+    })
+    .then((r) => r.data);
+export const listDiscoveryRuns = (params: Record<string, unknown> = {}) =>
+  api.get<Page<DiscoveryRun>>("/api/discovery/runs", { params }).then((r) => r.data);
+export const getDiscoveryRun = (id: number) =>
+  api.get<DiscoveryRun>(`/api/discovery/runs/${id}`).then((r) => r.data);
+export const deleteDiscoveryRun = (id: number) =>
+  api
+    .delete<{ run_id: number; deleted: Record<string, number>; message: string }>(
+      `/api/discovery/runs/${id}`
+    )
+    .then((r) => r.data);
+
+// --- Organizations ---
+export const listOrganizations = (params: Record<string, unknown> = {}) =>
+  api.get<Page<Organization>>("/api/organizations", { params }).then((r) => r.data);
+export const getOrganization = (id: number) =>
+  api.get<Organization>(`/api/organizations/${id}`).then((r) => r.data);
+export const getOrganizationInsights = (id: number) =>
+  api
+    .get<RelevanceInsight[]>(`/api/organizations/${id}/insights`)
+    .then((r) => r.data);
+export const enrichOrganization = (id: number, maxContacts = 5) =>
+  api
+    .post<Prospect[]>(
+      `/api/organizations/${id}/enrich`,
+      { max_contacts: maxContacts },
+      { timeout: 120000 }
+    )
+    .then((r) => r.data);
+
+// --- Prospects ---
+export interface ProspectFilters {
+  company_id?: number;
+  discovery_run_id?: number;
+  role_category?: string;
+  status?: string;
+  approved?: boolean;
+  min_relevance?: number;
+  researched?: boolean;
+  search?: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listProspects = (params: ProspectFilters = {}) =>
+  api.get<Page<Prospect>>("/api/prospects", { params }).then((r) => r.data);
+export const getProspect = (id: number) =>
+  api.get<Prospect>(`/api/prospects/${id}`).then((r) => r.data);
+export const getProspectInsights = (id: number) =>
+  api.get<RelevanceInsight[]>(`/api/prospects/${id}/insights`).then((r) => r.data);
+export const revealProspect = (id: number) =>
+  api
+    .post<Prospect>(`/api/prospects/${id}/reveal`, {}, { timeout: 120000 })
+    .then((r) => r.data);
+export const researchProspect = (id: number) =>
+  api
+    .post<Prospect>(`/api/prospects/${id}/research`, {}, { timeout: 180000 })
+    .then((r) => r.data);
+export const setProspectApproval = (id: number, approved: boolean) =>
+  api
+    .post<Prospect>(`/api/prospects/${id}/approval`, {
+      approved_for_outreach: approved,
+    })
+    .then((r) => r.data);
+export const setProspectStatus = (id: number, status: string) =>
+  api.post<Prospect>(`/api/prospects/${id}/status`, { status }).then((r) => r.data);
+
+// --- Insights ---
+export const listInsights = (params: Record<string, unknown> = {}) =>
+  api.get<Page<RelevanceInsight>>("/api/insights", { params }).then((r) => r.data);
+export const generateInsight = (payload: {
+  principal_id: number;
+  contact_id?: number;
+  company_id?: number;
+}) =>
+  api.post<RelevanceInsight>("/api/insights/generate", payload).then((r) => r.data);
+
+export interface BatchInsightSummary {
+  total: number;
+  researched: number;
+  skipped: number;
+  failed: number;
+  qualified: number;
+  auto_rejected: number;
+  errors: string[];
+}
+
+export const batchGenerateInsights = (payload: {
+  principal_id: number;
+  discovery_run_id?: number;
+  contact_ids?: number[];
+  skip_existing?: boolean;
+  auto_reject_below?: number;
+}) =>
+  api
+    .post<BatchInsightSummary>("/api/insights/batch-generate", payload, {
+      timeout: 600000,
+    })
+    .then((r) => r.data);
+
+export interface BatchRevealSummary {
+  total: number;
+  revealed: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+}
+
+export const batchRevealProspects = (payload: {
+  discovery_run_id?: number;
+  contact_ids?: number[];
+}) =>
+  api
+    .post<BatchRevealSummary>("/api/prospects/batch-reveal", payload, {
+      timeout: 600000,
+    })
+    .then((r) => r.data);
+
+export interface DiscoveryProcessSummary {
+  run_id: number;
+  research: BatchInsightSummary;
+  reveal: BatchRevealSummary;
+}
+
+export const processDiscoveryRun = (runId: number) =>
+  api
+    .post<DiscoveryProcessSummary>(`/api/discovery/runs/${runId}/process`, {}, {
+      timeout: 600000,
+    })
+    .then((r) => r.data);
+
+// --- Emails ---
+export interface EmailFilters {
+  status?: string;
+  contact_id?: number;
+  principal_id?: number;
+  campaign_id?: number;
+  discovery_run_id?: number;
+  limit?: number;
+  offset?: number;
+}
+export const listEmails = (params: EmailFilters = {}) =>
+  api.get<Page<EmailDraft>>("/api/emails", { params }).then((r) => r.data);
+export const generateEmail = (payload: {
+  principal_id: number;
+  contact_id: number;
+  insight_id?: number;
+  regenerate?: boolean;
+}) => api.post<EmailDraft>("/api/emails/generate", payload).then((r) => r.data);
+export const regenerateEmail = (draftId: number) =>
+  api
+    .post<EmailDraft>(`/api/emails/${draftId}/regenerate`, {}, { timeout: 120000 })
+    .then((r) => r.data);
+export interface RegenerateRunResult {
+  discovery_run_id: number;
+  candidates: number;
+  regenerated: number;
+  errors: string[];
+  provider_warnings?: string[];
+}
+export interface GenerateRunResult {
+  discovery_run_id: number;
+  candidates: number;
+  generated: number;
+  skipped: number;
+  errors: string[];
+  provider_warnings?: string[];
+}
+export const generateRunDrafts = (payload: {
+  discovery_run_id: number;
+  principal_id?: number;
+  outreach_goal?: string;
+}) =>
+  api
+    .post<GenerateRunResult>("/api/emails/generate-run", payload, {
+      timeout: 600000,
+    })
+    .then((r) => r.data);
+export const regenerateRunDrafts = (payload: {
+  discovery_run_id: number;
+  principal_id?: number;
+  only_statuses?: string[];
+}) =>
+  api
+    .post<RegenerateRunResult>("/api/emails/regenerate-run", payload, {
+      timeout: 600000,
+    })
+    .then((r) => r.data);
+export const deleteEmail = (id: number) =>
+  api.delete(`/api/emails/${id}`).then(() => undefined);
+export const updateEmail = (
+  id: number,
+  payload: { subject?: string; body?: string }
+) => api.patch<EmailDraft>(`/api/emails/${id}`, payload).then((r) => r.data);
+export const setEmailStatus = (id: number, status: string) =>
+  api.post<EmailDraft>(`/api/emails/${id}/status`, { status }).then((r) => r.data);
+export const sendEmail = (id: number) =>
+  api.post<EmailDraft>(`/api/emails/${id}/send`).then((r) => r.data);
+export const scheduleEmail = (id: number, scheduledAt: string) =>
+  api
+    .post<EmailDraft>(`/api/emails/${id}/schedule`, { scheduled_at: scheduledAt })
+    .then((r) => r.data);
+export const unscheduleEmail = (id: number) =>
+  api.post<EmailDraft>(`/api/emails/${id}/unschedule`).then((r) => r.data);
+export interface CheckRepliesResult {
+  checked: number;
+  replied: number;
+  supported: boolean;
+  error?: string | null;
+  message?: string;
+}
+export const checkEmailReplies = () =>
+  api
+    .post<CheckRepliesResult>(`/api/emails/check-replies`, {}, { timeout: 120000 })
+    .then((r) => r.data);
+
+export interface FollowupResult {
+  created: number;
+  candidates: number;
+  skipped_pending: number;
+  days: number;
+  drafts: EmailDraft[];
+}
+export const generateFollowups = (params: {
+  days: number;
+  limit?: number;
+  approve?: boolean;
+  principal_id?: number;
+}) =>
+  api
+    .post<FollowupResult>(`/api/emails/followups/generate`, params, {
+      timeout: 180000,
+    })
+    .then((r) => r.data);
+export const createFollowup = (draftId: number) =>
+  api.post<EmailDraft>(`/api/emails/${draftId}/followup`).then((r) => r.data);
+export const replyToEmail = (draftId: number, body: string) =>
+  api
+    .post<EmailDraft>(`/api/emails/${draftId}/reply`, { body }, { timeout: 120000 })
+    .then((r) => r.data);
+
+// --- Agent ---
+export const planAgentSearch = (payload: {
+  objective_prompt: string;
+  principal_id?: number;
+  clarifying_answers?: Record<string, string>;
+}) =>
+  api.post<AgentPlan>("/api/agent/plan", payload).then((r) => r.data);
+
+export const listAgentPlaybooks = (params: Record<string, unknown> = {}) =>
+  api.get<Page<AgentPlaybook>>("/api/agent/playbooks", { params }).then((r) => r.data);
+
+export const saveAgentPlaybook = (payload: {
+  name: string;
+  objective_prompt: string;
+  clarifying_answers?: Record<string, string>;
+  criteria: Record<string, unknown>;
+  set_active?: boolean;
+  principal_id?: number;
+}) =>
+  api.post<AgentPlaybook>("/api/agent/playbooks", payload).then((r) => r.data);
+
+export const deleteAgentPlaybook = (id: number) =>
+  api.delete(`/api/agent/playbooks/${id}`).then(() => undefined);
+
+export const getAgentConfig = (principalId?: number) =>
+  api
+    .get<AgentConfig>("/api/agent/config", {
+      params: principalId ? { principal_id: principalId } : {},
+    })
+    .then((r) => r.data);
+export const updateAgentConfig = (
+  payload: Partial<AgentConfig>,
+  principalId?: number
+) =>
+  api
+    .put<AgentConfig>("/api/agent/config", payload, {
+      params: principalId ? { principal_id: principalId } : {},
+    })
+    .then((r) => r.data);
+export const runAgentNow = (payload?: { principal_id?: number; playbook_id?: number }) =>
+  api
+    .post<AgentRun>("/api/agent/run", payload ?? {})
+    .then((r) => r.data);
+export const listAgentRuns = (params: Record<string, unknown> = {}) =>
+  api.get<Page<AgentRun>>("/api/agent/runs", { params }).then((r) => r.data);
+export const getAgentRun = (id: number) =>
+  api.get<AgentRun>(`/api/agent/runs/${id}`).then((r) => r.data);
+export const getCampaignDashboard = (principalId?: number, days = 14) =>
+  api
+    .get<CampaignDashboard>("/api/agent/dashboard", {
+      params: {
+        ...(principalId ? { principal_id: principalId } : {}),
+        days,
+      },
+    })
+    .then((r) => r.data);
+// --- Campaigns (multi-campaign) ---
+export const listCampaigns = (days = 14) =>
+  api
+    .get<CampaignList>("/api/campaigns", { params: { days } })
+    .then((r) => r.data);
+export const getCampaign = (id: number, days = 14) =>
+  api
+    .get<CampaignDetail>(`/api/campaigns/${id}`, { params: { days } })
+    .then((r) => r.data);
+export const getCampaignProspects = (id: number) =>
+  api
+    .get<CampaignProspects>(`/api/campaigns/${id}/prospects`)
+    .then((r) => r.data);
+export const createCampaign = (payload: CampaignCreatePayload) =>
+  api
+    .post<CampaignSummary>("/api/campaigns", payload, { timeout: 120000 })
+    .then((r) => r.data);
+export const updateCampaign = (id: number, payload: CampaignUpdatePayload) =>
+  api.put<CampaignDetail>(`/api/campaigns/${id}`, payload).then((r) => r.data);
+export const runCampaign = (id: number) =>
+  api.post<CampaignDetail>(`/api/campaigns/${id}/run`).then((r) => r.data);
+export const deleteCampaign = (id: number) =>
+  api.delete(`/api/campaigns/${id}`).then(() => undefined);
+export const listAgentVariants = (principalId?: number) =>
+  api
+    .get<AgentVariantsResponse>("/api/agent/variants", {
+      params: principalId ? { principal_id: principalId } : {},
+    })
+    .then((r) => r.data);
+export const regenerateAgentVariants = (principalId?: number) =>
+  api
+    .post<AgentVariantsResponse>(
+      "/api/agent/variants/regenerate",
+      {},
+      { params: principalId ? { principal_id: principalId } : {} }
+    )
+    .then((r) => r.data);
+
+// --- Calls ---
+export const listCalls = (params: Record<string, unknown> = {}) =>
+  api.get<Page<Call>>("/api/calls", { params }).then((r) => r.data);
+export const generateCall = (payload: {
+  principal_id: number;
+  contact_id: number;
+  insight_id?: number;
+}) => api.post<Call>("/api/calls/generate", payload).then((r) => r.data);
+export const setCallStatus = (id: number, status: string) =>
+  api.post<Call>(`/api/calls/${id}/status`, { status }).then((r) => r.data);
+export const placeCall = (id: number) =>
+  api.post<Call>(`/api/calls/${id}/place`).then((r) => r.data);
+export const getCallConfig = () =>
+  api.get<CallConfig>("/api/calls/config").then((r) => r.data);

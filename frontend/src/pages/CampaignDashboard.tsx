@@ -1,0 +1,762 @@
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+import {
+  deleteCampaign,
+  getCampaign,
+  getCampaignProspects,
+  listEmails,
+  runCampaign,
+  sendEmail,
+  setEmailStatus,
+  updateCampaign,
+} from "../api/client";
+import { Badge, Button, Card, Loading, ScoreBar } from "../components/ui";
+import type { CampaignDetail, CampaignProspect, CampaignRunSnapshot, EmailDraft } from "../types";
+
+type Tone = "green" | "blue" | "amber" | "slate" | "purple";
+
+function relativeTime(iso?: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+const inputCls =
+  "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100";
+
+const FUNNEL = [
+  { key: "discovered", label: "Find", desc: "Found on Apollo" },
+  { key: "qualified", label: "Score", desc: "Passed AI research" },
+  { key: "drafted", label: "Draft", desc: "Emails written" },
+  { key: "sent", label: "Send", desc: "Emails sent" },
+  { key: "followups_sent", label: "Follow up", desc: "Follow-ups sent" },
+] as const;
+
+function Stat({ label, value, sub, accent = "slate" }: {
+  label: string;
+  value: string | number;
+  sub?: string;
+  accent?: "violet" | "emerald" | "sky" | "amber" | "slate";
+}) {
+  const bg: Record<string, string> = {
+    violet: "from-violet-500/10 to-violet-600/5 border-violet-200/60",
+    emerald: "from-emerald-500/10 to-emerald-600/5 border-emerald-200/60",
+    sky: "from-sky-500/10 to-sky-600/5 border-sky-200/60",
+    amber: "from-amber-500/10 to-amber-600/5 border-amber-200/60",
+    slate: "from-slate-500/5 to-slate-600/5 border-slate-200",
+  };
+  return (
+    <div className={`rounded-2xl border bg-gradient-to-br px-4 py-3 ${bg[accent]}`}>
+      <p className="text-[11px] font-medium uppercase tracking-wider text-slate-500">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-900">{value}</p>
+      {sub && <p className="mt-0.5 text-xs text-slate-500">{sub}</p>}
+    </div>
+  );
+}
+
+function emailTone(status?: string | null): Tone {
+  switch (status) {
+    case "replied":
+      return "green";
+    case "sent":
+      return "blue";
+    case "scheduled":
+    case "approved":
+      return "purple";
+    case "draft":
+      return "slate";
+    default:
+      return "slate";
+  }
+}
+
+function pipelineTone(status?: string | null): Tone {
+  if (!status) return "slate";
+  const s = status.toLowerCase();
+  if (s.includes("draft")) return "purple";
+  if (s.includes("qualif")) return "green";
+  if (s.includes("reject") || s.includes("below")) return "amber";
+  if (s.includes("sent") || s.includes("schedul")) return "blue";
+  return "slate";
+}
+
+function RunProgress({ run, live }: { run: CampaignRunSnapshot; live?: boolean }) {
+  const stages = run.stages ?? [];
+  const people = run.people ?? [];
+  const errors = run.errors ?? [];
+  const stageOrder = ["discovery", "qualify", "draft", "send", "followup"];
+  const currentStage =
+    live && stages.length > 0 ? stages[stages.length - 1]?.stage : run.status;
+
+  return (
+    <div
+      className={`rounded-2xl border shadow-sm ${
+        live ? "border-sky-200 bg-sky-50/50" : "border-slate-200 bg-white"
+      }`}
+    >
+      <div className="border-b border-inherit px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-slate-900">
+            {live ? "Run in progress" : "Last run"}
+            {live && (
+              <span className="ml-2 inline-flex items-center gap-1 text-xs font-normal text-sky-700">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />
+                Working…
+              </span>
+            )}
+          </h2>
+          <span className="text-xs text-slate-500">
+            Run #{run.id}
+            {run.started_at ? ` · started ${relativeTime(run.started_at)}` : ""}
+          </span>
+        </div>
+        {live && currentStage && (
+          <p className="mt-1 text-xs text-sky-800">
+            Current step: <strong>{String(currentStage)}</strong>
+            {run.discovered ? ` · ${run.discovered} found so far` : ""}
+            {run.qualified ? ` · ${run.qualified} scored` : ""}
+            {run.drafted ? ` · ${run.drafted} drafted` : ""}
+          </p>
+        )}
+      </div>
+
+      {stages.length > 0 && (
+        <div className="flex flex-wrap gap-2 border-b border-inherit px-5 py-3">
+          {stageOrder.map((name) => {
+            const hit = stages.find((s) => s.stage === name);
+            return (
+              <span
+                key={name}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium capitalize ${
+                  hit
+                    ? "bg-violet-100 text-violet-800"
+                    : live
+                      ? "bg-slate-100 text-slate-400"
+                      : "hidden"
+                }`}
+              >
+                {name}
+                {hit && name === "discovery" && hit.imported != null
+                  ? ` (${hit.imported})`
+                  : ""}
+                {hit && name === "qualify" && hit.qualified != null
+                  ? ` (${hit.qualified})`
+                  : ""}
+                {hit && name === "draft" && hit.drafted != null ? ` (${hit.drafted})` : ""}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {errors.length > 0 && (
+        <div className="border-b border-rose-200 bg-rose-50 px-5 py-3">
+          <p className="text-xs font-semibold text-rose-800">
+            {errors.length} issue{errors.length === 1 ? "" : "s"} during this run
+          </p>
+          <ul className="mt-1 list-inside list-disc text-xs text-rose-700">
+            {errors.slice(0, 3).map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {people.length > 0 && (
+        <div className="max-h-64 overflow-y-auto px-5 py-3">
+          <p className="mb-2 text-xs font-medium text-slate-500">
+            People in this run ({people.length})
+          </p>
+          <ul className="space-y-1.5">
+            {people.slice(0, 50).map((p) => (
+              <li key={p.id} className="flex items-center justify-between gap-2 text-xs">
+                <Link to={`/prospects/${p.id}`} className="min-w-0 truncate text-violet-700 hover:underline">
+                  {p.name}
+                  {p.title ? <span className="text-slate-500"> · {p.title}</span> : null}
+                </Link>
+                <Badge tone={pipelineTone(p.status)}>{p.status}</Badge>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProspectRow({ p }: { p: CampaignProspect }) {
+  return (
+    <tr className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+      <td className="px-4 py-3">
+        <Link
+          to={`/prospects/${p.contact_id}`}
+          className="font-medium text-violet-700 hover:underline"
+        >
+          {p.name}
+        </Link>
+        <p className="text-xs text-slate-500">
+          {[p.title, p.company_name].filter(Boolean).join(" · ") || "—"}
+        </p>
+      </td>
+      <td className="px-4 py-3">
+        <ScoreBar value={p.relevance_score ?? null} />
+      </td>
+      <td className="px-4 py-3">
+        {p.email_status ? (
+          <Badge tone={emailTone(p.email_status)}>{p.email_status}</Badge>
+        ) : p.pipeline_status ? (
+          <Badge tone={pipelineTone(p.pipeline_status)}>{p.pipeline_status}</Badge>
+        ) : (
+          <span className="text-xs text-slate-400">not contacted</span>
+        )}
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-500">
+        {p.replied_at
+          ? `replied ${relativeTime(p.replied_at)}`
+          : p.sent_at
+            ? `sent ${relativeTime(p.sent_at)}`
+            : "—"}
+      </td>
+    </tr>
+  );
+}
+
+function EditPanel({
+  campaign,
+  onClose,
+}: {
+  campaign: CampaignDetail;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(campaign.name);
+  const [objective, setObjective] = useState(campaign.objective ?? "");
+  const [discoverTarget, setDiscoverTarget] = useState(campaign.discover_target || 50);
+  const [mailboxCap, setMailboxCap] = useState(campaign.mailbox_daily_cap || 50);
+  const [autoSend, setAutoSend] = useState(campaign.auto_send);
+  const [autoSchedule, setAutoSchedule] = useState(campaign.auto_schedule);
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateCampaign(campaign.id, {
+        name: name.trim() || campaign.name,
+        objective_prompt: objective.trim() || undefined,
+        discover_target: discoverTarget,
+        mailbox_daily_cap: mailboxCap,
+        auto_send: autoSend,
+        auto_schedule: autoSchedule,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaign", campaign.id] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Card className="p-5">
+      <h3 className="text-sm font-semibold text-slate-900">Edit campaign</h3>
+      <div className="mt-4 space-y-4">
+        <label className="block">
+          <span className="text-xs font-medium text-slate-600">Campaign name</span>
+          <input className={`${inputCls} mt-1.5`} value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium text-slate-600">Goal</span>
+          <textarea
+            rows={3}
+            className={`${inputCls} mt-1.5`}
+            value={objective}
+            onChange={(e) => setObjective(e.target.value)}
+          />
+        </label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">People to find / run</span>
+            <input
+              type="number"
+              className={`${inputCls} mt-1.5`}
+              value={discoverTarget}
+              onChange={(e) => setDiscoverTarget(Number(e.target.value))}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">
+              Shared mailbox cap / day
+            </span>
+            <input
+              type="number"
+              className={`${inputCls} mt-1.5`}
+              value={mailboxCap}
+              onChange={(e) => setMailboxCap(Number(e.target.value))}
+            />
+            <span className="mt-1 block text-[11px] text-slate-400">
+              Across all of {campaign.principal_name}&apos;s campaigns.
+            </span>
+          </label>
+        </div>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
+          <input
+            type="checkbox"
+            className="mt-0.5 rounded border-slate-300"
+            checked={autoSend}
+            onChange={(e) => setAutoSend(e.target.checked)}
+          />
+          <span className="text-sm text-slate-800">
+            <span className="font-medium">Autopilot — send without manual approval</span>
+            <span className="block text-xs text-slate-500">
+              Off = review mode: every email is drafted and waits for your approval on this page.
+            </span>
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
+          <input
+            type="checkbox"
+            className="mt-0.5 rounded border-slate-300"
+            checked={autoSchedule}
+            onChange={(e) => setAutoSchedule(e.target.checked)}
+          />
+          <span className="text-sm text-slate-800">
+            <span className="font-medium">Let the AI choose send times</span>
+            <span className="block text-xs text-slate-500">
+              Sends in each recipient's local business hours and A/B tests time-of-day.
+            </span>
+          </span>
+        </label>
+      </div>
+      <div className="mt-5 flex gap-2">
+        <Button onClick={() => save.mutate()} disabled={save.isPending}>
+          {save.isPending ? "Saving…" : "Save changes"}
+        </Button>
+        <Button variant="secondary" onClick={onClose}>
+          Cancel
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function PendingApproval({
+  campaign,
+  onChanged,
+}: {
+  campaign: CampaignDetail;
+  onChanged: (msg: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [sendingAll, setSendingAll] = useState(false);
+
+  const { data: drafts, isLoading } = useQuery({
+    queryKey: ["campaign", campaign.id, "drafts"],
+    queryFn: () =>
+      listEmails({ campaign_id: campaign.id, status: "draft", limit: 100 }),
+    refetchInterval: campaign.status === "running" ? 6000 : false,
+  });
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["campaign", campaign.id] });
+    qc.invalidateQueries({ queryKey: ["campaign", campaign.id, "drafts"] });
+    qc.invalidateQueries({ queryKey: ["campaign", campaign.id, "prospects"] });
+  };
+
+  const approveAndSend = async (d: EmailDraft) => {
+    setBusyId(d.id);
+    try {
+      await setEmailStatus(d.id, "approved");
+      await sendEmail(d.id);
+      onChanged(`Sent to ${d.contact_name ?? "prospect"}.`);
+      refresh();
+    } catch (e) {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not send.";
+      onChanged(String(msg));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const sendAll = async () => {
+    if (!drafts?.items.length) return;
+    if (!window.confirm(`Approve and send all ${drafts.items.length} drafts now?`)) return;
+    setSendingAll(true);
+    let ok = 0;
+    for (const d of drafts.items) {
+      try {
+        await setEmailStatus(d.id, "approved");
+        await sendEmail(d.id);
+        ok += 1;
+      } catch {
+        /* keep going; failures stay as drafts */
+      }
+    }
+    setSendingAll(false);
+    onChanged(`Sent ${ok} of ${drafts.items.length} drafts.`);
+    refresh();
+  };
+
+  if (campaign.auto_send) return null;
+
+  const count = drafts?.items.length ?? campaign.pending_drafts;
+
+  return (
+    <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/60 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200/70 px-5 py-4">
+        <div>
+          <h2 className="text-sm font-semibold text-amber-900">
+            Review before sending
+            {count ? <span className="ml-1 text-amber-700">({count} waiting)</span> : null}
+          </h2>
+          <p className="mt-0.5 text-xs text-amber-800/80">
+            This campaign drafts every email and waits for your approval — nothing is sent
+            automatically. Approve them here, or switch to Autopilot in Edit once you're happy.
+          </p>
+        </div>
+        {count > 0 && (
+          <Button onClick={sendAll} disabled={sendingAll}>
+            {sendingAll ? "Sending…" : "Approve & send all"}
+          </Button>
+        )}
+      </div>
+      {isLoading ? (
+        <Loading />
+      ) : !drafts || drafts.items.length === 0 ? (
+        <div className="px-5 py-8 text-center text-sm text-amber-800/70">
+          No drafts waiting. Run the campaign to generate emails for review.
+        </div>
+      ) : (
+        <ul className="divide-y divide-amber-200/60">
+          {drafts.items.map((d) => (
+            <li key={d.id} className="px-5 py-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-900">
+                    {d.contact_name ?? "Prospect"}
+                    {d.contact_title ? (
+                      <span className="font-normal text-slate-500"> · {d.contact_title}</span>
+                    ) : null}
+                  </p>
+                  <p className="mt-0.5 text-xs font-medium text-slate-700">{d.subject}</p>
+                  <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-slate-600">
+                    {d.body}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  {d.contact_id && (
+                    <Link to={`/prospects/${d.contact_id}`}>
+                      <Button variant="secondary">View</Button>
+                    </Link>
+                  )}
+                  <Button onClick={() => approveAndSend(d)} disabled={busyId === d.id || sendingAll}>
+                    {busyId === d.id ? "Sending…" : "Approve & send"}
+                  </Button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export default function CampaignDashboard() {
+  const { id } = useParams();
+  const campaignId = Number(id);
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const notify = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 4000);
+  };
+
+  const { data: campaign, isLoading, isError } = useQuery({
+    queryKey: ["campaign", campaignId],
+    queryFn: () => getCampaign(campaignId, 14),
+    enabled: Number.isFinite(campaignId),
+    refetchInterval: (q) => {
+      const status = (q.state.data as CampaignDetail | undefined)?.status;
+      return status === "running" ? 3000 : false;
+    },
+  });
+
+  const { data: prospects } = useQuery({
+    queryKey: ["campaign", campaignId, "prospects"],
+    queryFn: () => getCampaignProspects(campaignId),
+    enabled: Number.isFinite(campaignId),
+    refetchInterval: () => (campaign?.status === "running" ? 4000 : false),
+  });
+
+  // Refresh prospects when a run finishes.
+  useEffect(() => {
+    if (campaign?.last_run_at) {
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId, "prospects"] });
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId, "drafts"] });
+    }
+  }, [campaign?.last_run_at, campaignId, qc]);
+
+  const run = useMutation({
+    mutationFn: () => runCampaign(campaignId),
+    onSuccess: () => {
+      notify("Run started — watch the funnel update below.");
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: (e: unknown) => {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not start run.";
+      notify(String(msg));
+    },
+  });
+
+  const toggleEnabled = useMutation({
+    mutationFn: (enabled: boolean) => updateCampaign(campaignId, { enabled }),
+    onSuccess: (_d, enabled) => {
+      notify(enabled ? "Daily automation on." : "Daily automation off.");
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => deleteCampaign(campaignId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+      navigate("/agent");
+    },
+  });
+
+  useEffect(() => {
+    setEditing(false);
+  }, [campaignId]);
+
+  if (isLoading) return <Loading />;
+  if (isError || !campaign) {
+    return (
+      <Card className="mx-auto max-w-lg p-6 text-center text-sm text-rose-700">
+        Could not load this campaign.{" "}
+        <Link to="/agent" className="font-medium underline">
+          Back to campaigns
+        </Link>
+      </Card>
+    );
+  }
+
+  const t = campaign.totals;
+  const running = campaign.status === "running";
+  const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
+
+  return (
+    <div className="pb-12">
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 shadow-lg">
+          {toast}
+        </div>
+      )}
+
+      <Link to="/agent" className="text-sm text-violet-700 hover:underline">
+        ← All campaigns
+      </Link>
+
+      {/* Header */}
+      <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="text-xs font-medium uppercase tracking-wider text-violet-600">
+              {campaign.principal_name}
+            </p>
+            <h1 className="mt-1 text-2xl font-semibold text-slate-900">{campaign.name}</h1>
+            {campaign.objective && (
+              <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-600">
+                {campaign.objective}
+              </p>
+            )}
+            <p className="mt-3 text-xs text-slate-500">
+              Last run {relativeTime(campaign.last_run_at)} · finds up to{" "}
+              {campaign.discover_target} people/run · shares a {campaign.mailbox_daily_cap}/day
+              mailbox cap · {campaign.auto_schedule ? "AI-timed sends" : "fixed send window"}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <Badge tone={running ? "blue" : campaign.enabled ? "green" : "amber"}>
+              {running ? "Running now" : campaign.enabled ? "Runs daily" : "Ready"}
+            </Badge>
+            <Badge tone={campaign.auto_send ? "green" : "purple"}>
+              {campaign.auto_send ? "Autopilot" : "Review before send"}
+            </Badge>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+          <Button onClick={() => run.mutate()} disabled={run.isPending || running}>
+            {running ? "Running…" : "Run now"}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => toggleEnabled.mutate(!campaign.enabled)}
+            disabled={toggleEnabled.isPending}
+          >
+            {campaign.enabled ? "Turn off daily" : "Turn on daily"}
+          </Button>
+          <Button variant="secondary" onClick={() => setEditing((v) => !v)}>
+            {editing ? "Close editor" : "Edit"}
+          </Button>
+          <Button
+            variant="ghost"
+            className="!text-rose-600 hover:!bg-rose-50"
+            onClick={() => {
+              if (window.confirm("Delete this campaign? Its email history stays on each prospect.")) {
+                remove.mutate();
+              }
+            }}
+          >
+            Delete
+          </Button>
+        </div>
+      </div>
+
+      {/* Live run progress or last-run traceability */}
+      {campaign.status === "running" && campaign.current_run && (
+        <div className="mt-6">
+          <RunProgress run={campaign.current_run} live />
+        </div>
+      )}
+      {campaign.status !== "running" &&
+        campaign.last_run &&
+        ((campaign.last_run.people?.length ?? 0) > 0 ||
+          (campaign.last_run.errors?.length ?? 0) > 0) && (
+          <div className="mt-6">
+            <RunProgress run={campaign.last_run} />
+          </div>
+        )}
+
+      {editing && (
+        <div className="mt-6">
+          <EditPanel campaign={campaign} onClose={() => setEditing(false)} />
+        </div>
+      )}
+
+      {/* Drafts awaiting approval (review-before-send mode) */}
+      <PendingApproval campaign={campaign} onChanged={notify} />
+
+      {/* KPIs */}
+      <div className="mt-6 grid gap-3 sm:grid-cols-4">
+        <Stat label="Emails sent" value={t.sent} sub="Last 14 days" accent="sky" />
+        <Stat label="Replies" value={t.replies} sub="People who wrote back" accent="emerald" />
+        <Stat
+          label="Reply rate"
+          value={`${Math.round((campaign.reply_rate || 0) * 100)}%`}
+          sub="Replies ÷ sent"
+          accent="violet"
+        />
+        <Stat label="Qualified" value={t.qualified} sub="Passed AI research" accent="amber" />
+      </div>
+
+      {/* Funnel */}
+      <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-slate-900">Pipeline (last 14 days)</h2>
+        <p className="mt-0.5 text-xs text-slate-500">
+          Find people → score them → draft emails → send → follow up.
+        </p>
+        <div className="mt-4 grid gap-2 sm:grid-cols-5">
+          {FUNNEL.map((step, i) => {
+            const value = (t as unknown as Record<string, number>)[step.key] ?? 0;
+            return (
+              <div key={step.key} className="rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-600">
+                    {i + 1}
+                  </span>
+                  <span className="text-sm font-semibold text-slate-900">{step.label}</span>
+                </div>
+                <p className="mt-2 text-2xl font-semibold tabular-nums text-slate-900">{value}</p>
+                <p className="text-[11px] text-slate-500">{step.desc}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Daily activity */}
+      {campaign.days.length > 0 && (
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="text-sm font-semibold text-slate-900">Daily activity</h2>
+          <div className="mt-4 space-y-2">
+            {campaign.days.slice(0, 14).map((d) => (
+              <div key={d.date} className="grid grid-cols-[5.5rem_1fr_auto] items-center gap-3 text-sm">
+                <span className="text-xs font-medium text-slate-500">{d.date}</span>
+                <div className="flex h-6 items-center gap-1">
+                  <div
+                    className="h-2 rounded-full bg-violet-400/80"
+                    style={{ width: `${(d.discovered / maxFunnel) * 100}%`, minWidth: d.discovered ? 4 : 0 }}
+                    title={`${d.discovered} found`}
+                  />
+                  <div
+                    className="h-2 rounded-full bg-sky-500"
+                    style={{ width: `${(d.sent / maxFunnel) * 100}%`, minWidth: d.sent ? 4 : 0 }}
+                    title={`${d.sent} sent`}
+                  />
+                  {d.replies > 0 && (
+                    <span className="ml-1 text-xs font-medium text-emerald-600">+{d.replies} replies</span>
+                  )}
+                </div>
+                <span className="text-xs tabular-nums text-slate-400">{d.sent} sent</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">Violet = discovered · Blue = sent</p>
+        </div>
+      )}
+
+      {/* Prospects */}
+      <div className="mt-6 rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-4">
+          <h2 className="text-sm font-semibold text-slate-900">
+            Prospects {prospects ? <span className="text-slate-400">({prospects.total})</span> : null}
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Everyone this campaign surfaced. Click a name for full research, the email sent, and any
+            replies.
+          </p>
+        </div>
+        {!prospects ? (
+          <Loading />
+        ) : prospects.items.length === 0 ? (
+          <div className="px-5 py-12 text-center text-sm text-slate-400">
+            No prospects yet. Click <strong>Run now</strong> to start finding people.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-3">Person</th>
+                  <th className="px-4 py-3">Relevance</th>
+                  <th className="px-4 py-3">Email</th>
+                  <th className="px-4 py-3">Activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {prospects.items.map((p) => (
+                  <ProspectRow key={p.contact_id} p={p} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
