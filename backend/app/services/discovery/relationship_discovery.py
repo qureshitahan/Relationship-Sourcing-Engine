@@ -100,6 +100,7 @@ def run_discovery(
     people_first: bool = False,
     auto_expand_to_target: bool = True,
     search_goal: Optional[str] = None,
+    campaign_id: Optional[int] = None,
 ) -> DiscoveryRun:
     provider = get_discovery_provider()
     original_criteria = copy_criteria(criteria)
@@ -200,7 +201,12 @@ def run_discovery(
                     db.flush()
 
                 existing = _find_contact(
-                    db, person.external_id, person.name, company, person.linkedin_url
+                    db,
+                    person.external_id,
+                    person.name,
+                    company,
+                    person.linkedin_url,
+                    campaign_id=campaign_id,
                 )
                 if existing is not None:
                     duplicates += 1
@@ -224,6 +230,7 @@ def run_discovery(
                     external_id=person.external_id,
                     source=run.provider,
                     discovery_run_id=run.id,
+                    campaign_id=campaign_id,
                     has_email=bool(person.has_email),
                     confidence_score=70.0 if person.has_email else 45.0,
                     usefulness_score=usefulness,
@@ -371,25 +378,34 @@ def _find_contact(
     name: str,
     company: Optional[Company],
     linkedin_url: Optional[str] = None,
+    *,
+    campaign_id: Optional[int] = None,
 ) -> Optional[Contact]:
-    """Global cross-run dedup: same person at same employer is never re-added."""
+    """Dedup within a campaign (or globally when campaign_id is unset)."""
+    def _scoped(q):
+        if campaign_id is not None:
+            return q.where(Contact.campaign_id == campaign_id)
+        return q
+
     if external_id:
         found = db.execute(
-            select(Contact).where(Contact.external_id == external_id)
+            _scoped(select(Contact).where(Contact.external_id == external_id))
         ).scalars().first()
         if found:
             return found
     if linkedin_url:
         found = db.execute(
-            select(Contact).where(Contact.linkedin_url == linkedin_url)
+            _scoped(select(Contact).where(Contact.linkedin_url == linkedin_url))
         ).scalars().first()
         if found:
             return found
     if company is not None:
         return db.execute(
-            select(Contact).where(
-                Contact.company_id == company.id,
-                Contact.name == name,
+            _scoped(
+                select(Contact).where(
+                    Contact.company_id == company.id,
+                    Contact.name == name,
+                )
             )
         ).scalars().first()
     return None

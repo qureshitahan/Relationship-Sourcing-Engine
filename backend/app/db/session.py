@@ -73,6 +73,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "variant_id": "INTEGER",
         "phone_reveal_status": "VARCHAR(32)",
         "external_id": "VARCHAR(255)",
+        "campaign_id": "INTEGER",
     },
     "relevance_insights": {
         "snapshot": "TEXT",
@@ -98,6 +99,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "first_opened_at": "DATETIME",
         "last_opened_at": "DATETIME",
         "approved_at": "DATETIME",
+        # Campaign scoping + A/B copy / send-time learning.
+        "campaign_id": "INTEGER",
+        "copy_variant_id": "INTEGER",
+        "send_bucket_index": "INTEGER",
     },
     "agent_configs": {
         "name": "VARCHAR(255)",
@@ -117,9 +122,6 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "agent_runs": {
         "playbook_id": "INTEGER",
         "variant_id": "INTEGER",
-        "campaign_id": "INTEGER",
-    },
-    "email_drafts": {
         "campaign_id": "INTEGER",
     },
 }
@@ -189,6 +191,33 @@ def _apply_lightweight_migrations() -> None:
                 if column not in present:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}'))
     _backfill_campaigns()
+    _backfill_contact_campaign_ids()
+
+
+def _backfill_contact_campaign_ids() -> None:
+    """Stamp campaign_id on contacts from their discovery run's agent run."""
+    inspector = inspect(engine)
+    if "contacts" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("contacts")}
+    if "campaign_id" not in cols or "agent_runs" not in inspector.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE contacts
+                SET campaign_id = (
+                    SELECT ar.campaign_id FROM agent_runs ar
+                    WHERE ar.discovery_run_id = contacts.discovery_run_id
+                      AND ar.campaign_id IS NOT NULL
+                    ORDER BY ar.id DESC
+                    LIMIT 1
+                )
+                WHERE campaign_id IS NULL AND discovery_run_id IS NOT NULL
+                """
+            )
+        )
 
 
 def _backfill_campaigns() -> None:

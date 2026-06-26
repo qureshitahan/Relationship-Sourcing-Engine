@@ -84,6 +84,7 @@ def list_prospects(
     db: Session = Depends(get_db),
     company_id: Optional[int] = None,
     discovery_run_id: Optional[int] = None,
+    campaign_id: Optional[int] = None,
     role_category: Optional[str] = None,
     status: Optional[str] = None,
     approved: Optional[bool] = None,
@@ -101,6 +102,8 @@ def list_prospects(
         filters.append(Contact.company_id == company_id)
     if discovery_run_id is not None:
         filters.append(Contact.discovery_run_id == discovery_run_id)
+    if campaign_id is not None:
+        filters.append(Contact.campaign_id == campaign_id)
     if role_category:
         filters.append(Contact.role_category == role_category)
     if status:

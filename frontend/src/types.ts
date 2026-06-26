@@ -334,6 +334,26 @@ export interface AgentVariantsResponse {
   variants: AgentVariant[];
 }
 
+export interface AgentCopyVariant {
+  id: number;
+  label: string;
+  style: Record<string, unknown>;
+  rationale?: string | null;
+  is_active: boolean;
+  drafted: number;
+  sent: number;
+  opened: number;
+  replied: number;
+  reply_rate: number;
+  open_rate: number;
+}
+
+export interface AgentCopyVariantsResponse {
+  playbook_id: number | null;
+  playbook_name?: string;
+  copy_variants: AgentCopyVariant[];
+}
+
 export interface AgentConfig {
   id: number;
   principal_id: number;

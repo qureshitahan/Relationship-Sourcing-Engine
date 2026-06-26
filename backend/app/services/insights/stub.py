@@ -124,6 +124,7 @@ class StubInsightProvider(InsightProvider):
         person: Optional[dict] = None,
         organization: Optional[dict] = None,
         insight: Optional[dict] = None,
+        style: Optional[dict] = None,
     ) -> OutreachResult:
         """Deterministic, per-person template grounded in the insight when present."""
         greeting = _first_name((person or {}).get("name"))

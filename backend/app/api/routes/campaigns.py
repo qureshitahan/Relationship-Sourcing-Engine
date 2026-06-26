@@ -17,7 +17,10 @@ from app.db.session import get_db
 from app.models.agent_config import AgentConfig
 from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
+from app.models.contact import Contact
+from app.models.email_draft import EmailDraft
 from app.models.principal import Principal
+from app.models.relevance_insight import RelevanceInsight
 from app.schemas.entities import (
     CampaignDetailOut,
     CampaignListOut,
@@ -56,6 +59,15 @@ def _get_campaign(db: Session, campaign_id: int) -> AgentConfig:
     if config is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     return config
+
+
+def _sync_playbook_people_limit(playbook: AgentPlaybook | None, discover_target: int) -> None:
+    """Keep playbook search criteria aligned with the campaign's people/run setting."""
+    if playbook is None:
+        return
+    criteria = dict(playbook.criteria or {})
+    criteria["people_limit"] = max(1, int(discover_target))
+    playbook.criteria = criteria
 
 
 @router.get("", response_model=CampaignListOut)
@@ -97,6 +109,9 @@ def create_campaign(payload: CampaignCreateRequest, db: Session = Depends(get_db
     )
     if payload.discover_target is not None:
         config.discover_target = max(1, int(payload.discover_target))
+    else:
+        config.discover_target = 50
+    _sync_playbook_people_limit(playbook, config.discover_target)
     if payload.auto_send is not None:
         config.auto_send = bool(payload.auto_send)
     if payload.auto_schedule is not None:
@@ -226,7 +241,12 @@ def update_campaign(
                 value = [r.strip() for r in value if r and r.strip()]
             if key == "name":
                 value = value.strip()
+            if key == "discover_target":
+                value = max(1, int(value))
             setattr(config, key, value)
+
+    if "discover_target" in data and data["discover_target"] is not None:
+        _sync_playbook_people_limit(playbook, config.discover_target)
 
     if any(k in data for k in ("timezone", "run_hour_local")):
         _sync_run_hour_utc(config)
@@ -236,7 +256,11 @@ def update_campaign(
 
 
 @router.post("/{campaign_id}/run", response_model=CampaignDetailOut, status_code=202)
-def run_campaign(campaign_id: int, db: Session = Depends(get_db)):
+def run_campaign(
+    campaign_id: int,
+    resume: bool = Query(False, description="Continue prior run: re-process undrafted people"),
+    db: Session = Depends(get_db),
+):
     """Kick off a run for this campaign now (executes in the background)."""
     config = _get_campaign(db, campaign_id)
     if not config.playbook_id:
@@ -259,7 +283,25 @@ def run_campaign(campaign_id: int, db: Session = Depends(get_db)):
         trigger="manual",
         playbook_id=config.playbook_id,
         campaign_id=config.id,
+        resume=resume,
     )
+    return campaign_detail(db, campaign_id)
+
+
+@router.post("/{campaign_id}/cancel", response_model=CampaignDetailOut)
+def cancel_campaign_run(campaign_id: int, db: Session = Depends(get_db)):
+    """Request the in-flight agent run to stop after the current step."""
+    _get_campaign(db, campaign_id)
+    running = db.execute(
+        select(AgentRun).where(
+            AgentRun.campaign_id == campaign_id,
+            AgentRun.status == "running",
+        )
+    ).scalars().first()
+    if running is None:
+        raise HTTPException(status_code=404, detail="No run in progress for this campaign.")
+    running.summary = {**(running.summary or {}), "cancel_requested": True}
+    db.commit()
     return campaign_detail(db, campaign_id)
 
 
@@ -267,6 +309,34 @@ def run_campaign(campaign_id: int, db: Session = Depends(get_db)):
 def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
     config = _get_campaign(db, campaign_id)
     playbook_id = config.playbook_id
+
+    # Remove this campaign's runs, drafts, prospects, and their insights.
+    contact_ids = [
+        cid
+        for (cid,) in db.execute(
+            select(Contact.id).where(Contact.campaign_id == campaign_id)
+        ).all()
+        if cid is not None
+    ]
+    if contact_ids:
+        for insight in db.execute(
+            select(RelevanceInsight).where(RelevanceInsight.contact_id.in_(contact_ids))
+        ).scalars().all():
+            db.delete(insight)
+        for contact in db.execute(
+            select(Contact).where(Contact.id.in_(contact_ids))
+        ).scalars().all():
+            db.delete(contact)
+
+    for run in db.execute(
+        select(AgentRun).where(AgentRun.campaign_id == campaign_id)
+    ).scalars().all():
+        db.delete(run)
+    for draft in db.execute(
+        select(EmailDraft).where(EmailDraft.campaign_id == campaign_id)
+    ).scalars().all():
+        db.delete(draft)
+
     db.delete(config)
     db.commit()
     # Best-effort cleanup of the campaign's own playbook (if not shared).

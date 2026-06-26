@@ -269,11 +269,22 @@ export default function ProspectDetail() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const runId = searchParams.get("run") ? Number(searchParams.get("run")) : undefined;
+  const campaignId = searchParams.get("campaign")
+    ? Number(searchParams.get("campaign"))
+    : undefined;
 
   const { data: siblings } = useQuery({
-    queryKey: ["prospect-siblings", runId],
-    queryFn: () =>
-      listProspects({ discovery_run_id: runId, sort: "relevance", limit: 200 }),
+    queryKey: ["prospect-siblings", runId, campaignId],
+    queryFn: () => {
+      if (campaignId) {
+        return listProspects({ campaign_id: campaignId, sort: "relevance", limit: 200 });
+      }
+      if (runId) {
+        return listProspects({ discovery_run_id: runId, sort: "relevance", limit: 200 });
+      }
+      return Promise.resolve({ items: [], total: 0, limit: 0, offset: 0 });
+    },
+    enabled: !!(runId || campaignId),
   });
   const siblingItems = siblings?.items ?? [];
   const currentIndex = siblingItems.findIndex((p) => p.id === prospectId);
@@ -282,8 +293,12 @@ export default function ProspectDetail() {
     currentIndex >= 0 && currentIndex < siblingItems.length - 1
       ? siblingItems[currentIndex + 1]
       : undefined;
-  const runSuffix = runId ? `?run=${runId}` : "";
-  const goTo = (pid: number) => navigate(`/prospects/${pid}${runSuffix}`);
+  const querySuffix = campaignId
+    ? `?campaign=${campaignId}`
+    : runId
+      ? `?run=${runId}`
+      : "";
+  const goTo = (pid: number) => navigate(`/prospects/${pid}${querySuffix}`);
 
   const { data: prospect, isLoading } = useQuery({
     queryKey: ["prospect", prospectId],
@@ -518,10 +533,11 @@ export default function ProspectDetail() {
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <Link
-          to={`/prospects${runSuffix}`}
+          to={campaignId ? `/campaigns/${campaignId}` : `/prospects${querySuffix}`}
           className="text-sm font-medium text-slate-500 hover:text-slate-800"
         >
-          ← Back to prospects{runId ? ` (run #${runId})` : ""}
+          ← Back to {campaignId ? "campaign" : "prospects"}
+          {runId && !campaignId ? ` (run #${runId})` : ""}
         </Link>
         {siblingItems.length > 1 && (
           <div className="flex items-center gap-2">

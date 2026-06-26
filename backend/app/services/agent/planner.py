@@ -40,7 +40,92 @@ DEFAULT_HOSPITAL_TITLES = [
     "Director Pharmacy",
 ]
 
+# Domain-agnostic title seeds for the RULE-BASED fallback (used only when the LLM
+# planner is unavailable). Keyed by phrases likely to appear in an objective.
+# This keeps the fallback from defaulting every non-healthcare goal to board roles.
+_DOMAIN_TITLE_SEEDS: list[tuple[tuple[str, ...], list[str]]] = [
+    (
+        ("llm", "machine learning", "ml engineer", "ai engineer", "artificial intelligence",
+         "deep learning", "nlp", "genai", "generative ai", "neural", " ai "),
+        ["AI Engineer", "Machine Learning Engineer", "ML Engineer", "Research Scientist",
+         "Applied Scientist", "NLP Engineer", "Deep Learning Engineer", "MLOps Engineer",
+         "Head of AI", "Director of Machine Learning", "VP Engineering", "Founding Engineer"],
+    ),
+    (
+        ("software", "developer", "full stack", "full-stack", "backend", "frontend",
+         "devops", "platform engineer", "swe", "engineering"),
+        ["Software Engineer", "Senior Software Engineer", "Staff Engineer",
+         "Principal Engineer", "Engineering Manager", "Head of Engineering",
+         "VP Engineering", "CTO", "Platform Engineer", "Founding Engineer"],
+    ),
+    (
+        ("data scien", "data engineer", "analytics", "data platform"),
+        ["Data Scientist", "Senior Data Scientist", "Data Engineer", "Analytics Engineer",
+         "Head of Data", "Director of Data Science", "VP Data", "ML Engineer"],
+    ),
+    (
+        ("sales", "revenue", "quota", "account executive", "business development", "go-to-market"),
+        ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director",
+         "Account Executive", "Head of Business Development", "VP Revenue", "Sales Manager"],
+    ),
+    (
+        ("marketing", "growth", "demand gen", "brand", "content"),
+        ["VP Marketing", "Head of Growth", "CMO", "Marketing Director",
+         "Demand Generation Manager", "Head of Brand", "Growth Lead"],
+    ),
+    (
+        ("design", "ux", "ui ", "product design", "user experience"),
+        ["Head of Design", "Design Director", "Principal Designer", "UX Lead",
+         "Product Designer", "VP Design"],
+    ),
+    (
+        ("finance", "cfo", "controller", "fp&a", "accounting", "treasury"),
+        ["CFO", "VP Finance", "Controller", "Finance Director", "Head of FP&A",
+         "Chief Financial Officer"],
+    ),
+    (
+        ("product manager", "product management", "head of product"),
+        ["Product Manager", "Senior Product Manager", "Director of Product",
+         "VP Product", "Head of Product", "Chief Product Officer"],
+    ),
+]
+
+# Domain-neutral decision-maker titles when no domain keyword is detected.
+_GENERIC_LEADER_TITLES = [
+    "Founder", "Co-Founder", "CEO", "President", "Chief Operating Officer",
+    "VP", "Vice President", "Director", "Head of Operations", "General Manager",
+]
+
+
+def _titles_from_objective(objective: str) -> list[str]:
+    """Best-effort domain-agnostic title seeds from the objective (LLM-free fallback)."""
+    lower = f" {objective.lower()} "
+    for needles, titles in _DOMAIN_TITLE_SEEDS:
+        if any(n in lower for n in needles):
+            return list(titles)
+    return list(_GENERIC_LEADER_TITLES)
+
 _PLANNER_SYSTEM = """You help configure a B2B outreach search engine powered by Apollo.io People API Search.
+
+TARGETING AUTHORITY (the single most important rule):
+- The OBJECTIVE is the ONLY source of truth for WHO to target. Derive every title,
+  seniority, and industry from the OBJECTIVE itself.
+- You are FULLY DOMAIN-AGNOSTIC. The objective may be in ANY field — AI/ML, software,
+  climate, fintech, legal, design, manufacturing, biotech, education, healthcare,
+  private equity, anything. Infer the correct real-world job titles for THAT field.
+  Example: "find AI engineers who work with LLMs" -> titles like "AI Engineer",
+  "Machine Learning Engineer", "ML Engineer", "Research Scientist", "Applied Scientist",
+  "NLP Engineer", "Founding Engineer", "Head of AI", "Director of Machine Learning" —
+  NOT investors, partners, or board roles.
+- PRINCIPAL_BACKGROUND (their sectors, prior industry, resume, documents) is provided
+  ONLY to shape the email's voice and credibility. NEVER use the principal's background
+  to choose who to target. If the principal is a healthcare/PE operator but the objective
+  is about AI engineers, you target AI engineers — the principal's healthcare/PE history
+  is irrelevant to WHO we search for.
+- The ONLY time principal background may influence targeting is when the OBJECTIVE
+  explicitly references it (e.g. "people in my industry", "operators like me").
+- If the objective is too vague to infer concrete titles, do NOT guess a domain — ask a
+  clarifying question instead.
 
 Given a principal's objective and optional clarifying answers, output JSON only:
 {
@@ -65,14 +150,17 @@ Given a principal's objective and optional clarifying answers, output JSON only:
 
 CREATIVITY (critical):
 - You are NOT limited to any preset list. Invent job titles, keywords, themes, and company-type tags
-  that fit the user's objective — think like a researcher who knows the domain.
-- For pharma/formulary: invent titles like "Pharmacy & Therapeutics Chair", "Clinical Pharmacy Director",
-  "VP Clinical Services", "Medication Management Director" — whatever fits the objective.
-- For board seats: think Operating Partner, board search, governance committee chairs, etc.
-- For themes: invent acquisition/investment angles relevant to the goal (not just generic "roll-up").
-- For industries: use 1-3 BROAD keyword tags; you may use tags not in any preset list.
-- For company_types: invent descriptive keyword tags (e.g. "mid-market PE", "regional health system").
-- Always explain your title choices in rationale.
+  that fit the user's objective — think like a domain expert recruiter for THAT field.
+- Match the field of the objective. Examples (illustrative, not exhaustive):
+  * AI/ML goal -> "Machine Learning Engineer", "AI Engineer", "Research Scientist", "Head of AI".
+  * Sales-leadership goal -> "VP Sales", "Head of Revenue", "CRO", "Sales Director".
+  * Pharma/formulary goal -> "Pharmacy & Therapeutics Chair", "Clinical Pharmacy Director".
+  * Board-seat goal -> "Operating Partner", "Independent Director", governance committee chairs.
+  Always pick titles from the objective's OWN field, not the principal's field.
+- For themes: invent angles relevant to the goal (not generic boilerplate).
+- For industries: use 1-3 BROAD keyword tags from the objective's field; you may use tags not in any preset list.
+- For company_types: invent descriptive keyword tags appropriate to the objective's field.
+- Always explain your title choices in rationale, and tie them back to the objective.
 
 Apollo API rules:
 - person_seniorities ONLY: owner, founder, c_suite, partner, vp, head, director, manager, senior, entry, intern.
@@ -100,16 +188,19 @@ Apollo API rules:
     (5) Volume: how many new people to surface per run (default 50).
   Write each question so a busy person can answer in a few words; always populate "suggested"
   with the smartest default so they can just confirm.
+- Do NOT ask how many people to find per run — that is configured separately in campaign Settings.
 - When clarifying_answers provided, return questions: [] and finalize criteria.
 
 VOLUME DISCOVERY (critical — discovery must return people_limit prospects):
 - This is a BROAD net pass. Relevance filtering happens later on the Prospects page.
-- people_limit: use the user's discover_target answer, or default 50. Never set below 20.
-- titles: 12–18 broad decision-maker titles — be generous so discovery returns enough people.
-  Include the obvious core roles AND close synonyms/adjacent variants (e.g. for board work:
-  Operating Partner, Managing Director, Partner, Board Member, Independent Director, Chairman,
-  CEO, COO, President). Prefer broad role names over hyper-narrow specialties.
-- industries: 1–2 BROAD tags only (e.g. "Hospital & Health Care", "Healthcare"). Never stack 3+ industries.
+- people_limit: use the user's discover_target answer, or default 50. Respect small test runs (as low as 1).
+- titles: 12–18 broad titles FROM THE OBJECTIVE'S FIELD — be generous so discovery returns enough people.
+  Include the obvious core roles AND close synonyms/adjacent variants within that field
+  (e.g. for an AI-engineer goal: AI Engineer, Machine Learning Engineer, ML Engineer,
+  Research Scientist, Applied Scientist, NLP Engineer, Deep Learning Engineer, MLOps Engineer,
+  Founding Engineer, Head of AI, Director of Machine Learning, VP Engineering). Prefer broad
+  role names over hyper-narrow specialties, but stay inside the objective's field.
+- industries: 1–2 BROAD tags only, matching the objective's field. Never stack 3+ industries.
 - company_types: 0–2 tags max, or leave empty — industry + title is enough.
 - keywords: leave EMPTY unless the user explicitly named a search term. Never put product codes (503B) here.
 - themes: 0–2 strategic angles max, or leave empty. Themes narrow Apollo when combined with industries.
@@ -139,15 +230,23 @@ def _parse_json(text: str) -> Optional[dict]:
 
 def _normalize_questions(questions: Any) -> List[dict]:
     """Coerce planner questions to {id, prompt, suggested} dicts for the API schema."""
+    skip_ids = {"discover_target", "people_limit", "people_per_run", "volume"}
     out: List[dict] = []
     for i, q in enumerate(questions or []):
         if isinstance(q, dict):
+            qid = str(q.get("id") or f"q{i}")
+            if qid in skip_ids:
+                continue
             prompt = (q.get("prompt") or q.get("question") or "").strip()
             if not prompt:
                 continue
+            # Drop volume questions even when the model omits a stable id.
+            lower = prompt.lower()
+            if "how many" in lower and ("people" in lower or "prospect" in lower or "surface" in lower):
+                continue
             out.append(
                 {
-                    "id": str(q.get("id") or f"q{i}"),
+                    "id": qid,
                     "prompt": prompt,
                     "suggested": q.get("suggested"),
                 }
@@ -239,7 +338,7 @@ def _sanitize_planner_criteria(data: dict) -> dict:
 
     raw_limit = out.get("people_limit") or out.get("discover_target") or 50
     try:
-        people_limit = max(20, min(int(raw_limit), 500))
+        people_limit = max(1, min(int(raw_limit), 500))
     except (TypeError, ValueError):
         people_limit = 50
     out["people_limit"] = people_limit
@@ -317,23 +416,34 @@ def _heuristic_plan(
             "Non-Executive Director",
         ]
     else:
-        titles = DEFAULT_BOARD_TITLES
-        industries = ["Healthcare", "Healthcare Services"]
-        company_types = ["private_equity", "operating_company"]
+        # Domain-agnostic default: derive titles from the OBJECTIVE itself, never
+        # assume healthcare/board. Leave industry/company_type empty so Apollo
+        # matches on title alone unless the goal implies a sector.
+        titles = _titles_from_objective(objective)
+        industries = []
+        company_types = []
         keywords = []
         themes = []
         board_jobs = []
 
     geo = (answers or {}).get("geography") or "United States"
     try:
-        people_limit = max(20, int((answers or {}).get("discover_target") or 50))
+        people_limit = max(1, int((answers or {}).get("discover_target") or 50))
     except (TypeError, ValueError):
         people_limit = 50
+
+    # Leadership-only seniorities make sense for board/exec sourcing, but would wrongly
+    # exclude individual contributors (e.g. an "AI Engineer" is usually senior/entry in
+    # Apollo, not c_suite). For the generic/derived path, keep the net wide.
+    if use_case in ("503b_hospital", "hospital", "pharma", "board"):
+        seniorities = ["c_suite", "vp", "director", "head", "manager"]
+    else:
+        seniorities = ["c_suite", "vp", "director", "head", "manager", "senior", "entry"]
 
     criteria = _sanitize_planner_criteria(
         {
             "titles": titles,
-            "seniorities": ["c_suite", "vp", "director", "head", "manager"],
+            "seniorities": seniorities,
             "geographies": [geo],
             "industries": industries,
             "company_types": company_types,
@@ -355,13 +465,14 @@ def _heuristic_plan(
             "rationale": "Search plan from your objective (rule-based fallback).",
         }
 
-    focus_suggested = (
-        "Mid-market healthcare private equity firms"
-        if "private_equity" in company_types
-        else "Hospital and health-system pharmacy leaders"
-        if use_case in ("503b_hospital", "hospital")
-        else "Healthcare operating companies"
-    )
+    if use_case in ("503b_hospital", "hospital"):
+        focus_suggested = "Hospital and health-system leaders"
+    elif use_case == "pharma":
+        focus_suggested = "Pharma / medical-affairs organizations"
+    elif use_case == "board":
+        focus_suggested = "Mid-market PE firms and their portfolio companies"
+    else:
+        focus_suggested = "Companies that employ the roles in your goal"
     questions = [
         {
             "id": "goal",
@@ -381,12 +492,7 @@ def _heuristic_plan(
         {
             "id": "seniority",
             "prompt": "What seniority level should we target?",
-            "suggested": "Director and VP level decision makers",
-        },
-        {
-            "id": "discover_target",
-            "prompt": "How many new people should the agent discover per day?",
-            "suggested": "60",
+            "suggested": "The people who actually do this work, plus their direct leaders",
         },
     ]
     return {
@@ -412,11 +518,21 @@ def plan_agent_search(
 
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             user_parts = [
-                f"OBJECTIVE:\n{objective_prompt.strip()}",
+                f"OBJECTIVE (defines WHO to target):\n{objective_prompt.strip()}",
             ]
             if principal:
                 user_parts.append(
-                    f"PRINCIPAL:\n{json.dumps({'name': principal.name, 'document_focus': principal.document_focus, 'target_sectors': principal.target_sectors}, default=str)}"
+                    "PRINCIPAL_BACKGROUND (for email voice/credibility ONLY — do NOT use "
+                    "this to choose who to target unless the OBJECTIVE explicitly references "
+                    "the principal's own industry):\n"
+                    + json.dumps(
+                        {
+                            "name": principal.name,
+                            "document_focus": principal.document_focus,
+                            "target_sectors": principal.target_sectors,
+                        },
+                        default=str,
+                    )
                 )
             if clarifying_answers:
                 user_parts.append(f"CLARIFYING_ANSWERS:\n{json.dumps(clarifying_answers)}")

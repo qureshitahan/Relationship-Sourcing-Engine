@@ -3,9 +3,12 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  cancelCampaignRun,
   deleteCampaign,
   getCampaign,
   getCampaignProspects,
+  listAgentCopyVariants,
+  listAgentVariants,
   listEmails,
   runCampaign,
   sendEmail,
@@ -87,7 +90,15 @@ function pipelineTone(status?: string | null): Tone {
   return "slate";
 }
 
-function RunProgress({ run, live }: { run: CampaignRunSnapshot; live?: boolean }) {
+function RunProgress({
+  run,
+  live,
+  campaignId,
+}: {
+  run: CampaignRunSnapshot;
+  live?: boolean;
+  campaignId: number;
+}) {
   const stages = run.stages ?? [];
   const people = run.people ?? [];
   const errors = run.errors ?? [];
@@ -177,7 +188,10 @@ function RunProgress({ run, live }: { run: CampaignRunSnapshot; live?: boolean }
           <ul className="space-y-1.5">
             {people.slice(0, 50).map((p) => (
               <li key={p.id} className="flex items-center justify-between gap-2 text-xs">
-                <Link to={`/prospects/${p.id}`} className="min-w-0 truncate text-violet-700 hover:underline">
+                <Link
+                  to={`/prospects/${p.id}?campaign=${campaignId}`}
+                  className="min-w-0 truncate text-violet-700 hover:underline"
+                >
                   {p.name}
                   {p.title ? <span className="text-slate-500"> · {p.title}</span> : null}
                 </Link>
@@ -191,12 +205,103 @@ function RunProgress({ run, live }: { run: CampaignRunSnapshot; live?: boolean }
   );
 }
 
-function ProspectRow({ p }: { p: CampaignProspect }) {
+function pct(rate: number): string {
+  return `${Math.round((rate || 0) * 100)}%`;
+}
+
+function LearningPanel({ principalId }: { principalId: number }) {
+  const { data: search } = useQuery({
+    queryKey: ["agent-variants", principalId],
+    queryFn: () => listAgentVariants(principalId),
+    refetchInterval: 30000,
+  });
+  const { data: copy } = useQuery({
+    queryKey: ["agent-copy-variants", principalId],
+    queryFn: () => listAgentCopyVariants(principalId),
+    refetchInterval: 30000,
+  });
+
+  const searchVariants = search?.variants ?? [];
+  const copyVariants = copy?.copy_variants ?? [];
+  if (!searchVariants.length && !copyVariants.length) return null;
+
+  const best = <span className="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">leading</span>;
+  const bestSearchId = searchVariants
+    .filter((v) => v.sent > 0)
+    .sort((a, b) => b.reply_rate - a.reply_rate)[0]?.id;
+  const bestCopyId = copyVariants
+    .filter((v) => v.sent > 0)
+    .sort((a, b) => b.reply_rate - a.reply_rate)[0]?.id;
+
+  return (
+    <Card className="mt-6">
+      <h2 className="text-sm font-semibold text-slate-900">What's working (auto-optimizing)</h2>
+      <p className="mt-1 text-xs text-slate-500">
+        The agent A/B tests who it targets and how it writes, and shifts toward whatever earns replies.
+        Stats build up over the first couple of weeks of sending.
+      </p>
+
+      <div className="mt-4 grid gap-5 md:grid-cols-2">
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Who we target (search)
+          </h3>
+          <ul className="mt-2 space-y-1.5">
+            {searchVariants.map((v) => (
+              <li key={v.id} className="flex items-center justify-between text-xs">
+                <span className="min-w-0 truncate text-slate-700">
+                  {v.label}
+                  {v.id === bestSearchId ? best : null}
+                  {!v.is_active ? (
+                    <span className="ml-1 text-slate-400">(retired)</span>
+                  ) : null}
+                </span>
+                <span className="shrink-0 tabular-nums text-slate-500">
+                  {v.replied}/{v.sent} · {pct(v.reply_rate)}
+                </span>
+              </li>
+            ))}
+            {!searchVariants.length ? (
+              <li className="text-xs text-slate-400">No search variants yet.</li>
+            ) : null}
+          </ul>
+        </div>
+
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            How we write (copy)
+          </h3>
+          <ul className="mt-2 space-y-1.5">
+            {copyVariants.map((v) => (
+              <li key={v.id} className="flex items-center justify-between text-xs">
+                <span className="min-w-0 truncate text-slate-700">
+                  {v.label}
+                  {v.id === bestCopyId ? best : null}
+                  {!v.is_active ? (
+                    <span className="ml-1 text-slate-400">(retired)</span>
+                  ) : null}
+                </span>
+                <span className="shrink-0 tabular-nums text-slate-500">
+                  {v.replied}/{v.sent} · {pct(v.reply_rate)}
+                </span>
+              </li>
+            ))}
+            {!copyVariants.length ? (
+              <li className="text-xs text-slate-400">No copy variants yet.</li>
+            ) : null}
+          </ul>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ProspectRow({ p, campaignId }: { p: CampaignProspect; campaignId: number }) {
   return (
     <tr className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
       <td className="px-4 py-3">
         <Link
-          to={`/prospects/${p.contact_id}`}
+          to={`/prospects/${p.contact_id}?campaign=${campaignId}`}
           className="font-medium text-violet-700 hover:underline"
         >
           {p.name}
@@ -451,7 +556,7 @@ function PendingApproval({
                 </div>
                 <div className="flex shrink-0 gap-2">
                   {d.contact_id && (
-                    <Link to={`/prospects/${d.contact_id}`}>
+                    <Link to={`/prospects/${d.contact_id}?campaign=${campaign.id}`}>
                       <Button variant="secondary">View</Button>
                     </Link>
                   )}
@@ -507,9 +612,13 @@ export default function CampaignDashboard() {
   }, [campaign?.last_run_at, campaignId, qc]);
 
   const run = useMutation({
-    mutationFn: () => runCampaign(campaignId),
-    onSuccess: () => {
-      notify("Run started — watch the funnel update below.");
+    mutationFn: (resume?: boolean) => runCampaign(campaignId, resume === true),
+    onSuccess: (_d, resume) => {
+      notify(
+        resume
+          ? "Continuing — picking up where the last run left off."
+          : "Run started — watch the funnel update below."
+      );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
@@ -519,6 +628,16 @@ export default function CampaignDashboard() {
         "Could not start run.";
       notify(String(msg));
     },
+  });
+
+  const stopRun = useMutation({
+    mutationFn: () => cancelCampaignRun(campaignId),
+    onSuccess: () => {
+      notify("Stop requested — the run will finish the current step and halt.");
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: () => notify("Could not stop the run."),
   });
 
   const toggleEnabled = useMutation({
@@ -557,6 +676,10 @@ export default function CampaignDashboard() {
   const t = campaign.totals;
   const running = campaign.status === "running";
   const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
+  const canContinue =
+    !running &&
+    !!campaign.last_run &&
+    (campaign.last_run.qualified ?? 0) > (campaign.last_run.drafted ?? 0);
 
   return (
     <div className="pb-12">
@@ -600,27 +723,55 @@ export default function CampaignDashboard() {
         </div>
 
         <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
-          <Button onClick={() => run.mutate()} disabled={run.isPending || running}>
-            {running ? "Running…" : "Run now"}
-          </Button>
+          {running ? (
+            <Button
+              variant="secondary"
+              className="!text-rose-600 hover:!bg-rose-50"
+              onClick={() => stopRun.mutate()}
+              disabled={stopRun.isPending}
+            >
+              {stopRun.isPending ? "Stopping…" : "Stop run"}
+            </Button>
+          ) : (
+            <>
+              <Button onClick={() => run.mutate(false)} disabled={run.isPending}>
+                Run now
+              </Button>
+              {canContinue && (
+                <Button
+                  variant="secondary"
+                  onClick={() => run.mutate(true)}
+                  disabled={run.isPending}
+                  title="Re-process people from earlier runs who never got a draft"
+                >
+                  Continue
+                </Button>
+              )}
+            </>
+          )}
           <Button
             variant="secondary"
             onClick={() => toggleEnabled.mutate(!campaign.enabled)}
-            disabled={toggleEnabled.isPending}
+            disabled={toggleEnabled.isPending || running}
           >
             {campaign.enabled ? "Turn off daily" : "Turn on daily"}
           </Button>
-          <Button variant="secondary" onClick={() => setEditing((v) => !v)}>
+          <Button variant="secondary" onClick={() => setEditing((v) => !v)} disabled={running}>
             {editing ? "Close editor" : "Edit"}
           </Button>
           <Button
             variant="ghost"
             className="!text-rose-600 hover:!bg-rose-50"
             onClick={() => {
-              if (window.confirm("Delete this campaign? Its email history stays on each prospect.")) {
+                if (
+                window.confirm(
+                  "Delete this campaign? Its prospects, runs, and email drafts are permanently removed."
+                )
+              ) {
                 remove.mutate();
               }
             }}
+            disabled={running}
           >
             Delete
           </Button>
@@ -630,7 +781,7 @@ export default function CampaignDashboard() {
       {/* Live run progress or last-run traceability */}
       {campaign.status === "running" && campaign.current_run && (
         <div className="mt-6">
-          <RunProgress run={campaign.current_run} live />
+          <RunProgress run={campaign.current_run} live campaignId={campaignId} />
         </div>
       )}
       {campaign.status !== "running" &&
@@ -638,7 +789,7 @@ export default function CampaignDashboard() {
         ((campaign.last_run.people?.length ?? 0) > 0 ||
           (campaign.last_run.errors?.length ?? 0) > 0) && (
           <div className="mt-6">
-            <RunProgress run={campaign.last_run} />
+            <RunProgress run={campaign.last_run} campaignId={campaignId} />
           </div>
         )}
 
@@ -650,6 +801,9 @@ export default function CampaignDashboard() {
 
       {/* Drafts awaiting approval (review-before-send mode) */}
       <PendingApproval campaign={campaign} onChanged={notify} />
+
+      {/* Self-optimizing A/B: who we target + how we write */}
+      <LearningPanel principalId={campaign.principal_id} />
 
       {/* KPIs */}
       <div className="mt-6 grid gap-3 sm:grid-cols-4">
@@ -750,7 +904,7 @@ export default function CampaignDashboard() {
               </thead>
               <tbody>
                 {prospects.items.map((p) => (
-                  <ProspectRow key={p.contact_id} p={p} />
+                  <ProspectRow key={p.contact_id} p={p} campaignId={campaignId} />
                 ))}
               </tbody>
             </table>

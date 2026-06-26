@@ -47,6 +47,11 @@ class Contact(Base, TimestampMixin):
     discovery_run_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("discovery_runs.id"), index=True
     )
+    # Which outreach campaign surfaced this person (prospects are not shared
+    # across campaigns, even for the same principal).
+    campaign_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agent_configs.id"), index=True
+    )
     # Which A/B search variant surfaced this person (for conversion tracking).
     variant_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("agent_variants.id"), index=True

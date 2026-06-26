@@ -9,13 +9,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.agent_copy_variant import AgentCopyVariant
 from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_variant import AgentVariant
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.models.enums import EmailStatus
 from app.models.principal import Principal
-from app.services.agent.experiments import regenerate_variants
+from app.services.agent.experiments import (
+    best_send_bucket,
+    regenerate_copy_variants,
+    regenerate_variants,
+)
+from app.services.agent.send_timing import AB_SEND_BUCKETS
 
 logger = logging.getLogger(__name__)
 
@@ -95,24 +101,27 @@ def analyze_replies_and_adapt(
 
     analyzed: list[dict[str, Any]] = []
     by_variant: dict[int, list[float]] = {}
+    by_copy_variant: dict[int, list[float]] = {}
 
     for draft, contact in rows:
         reply_text = draft.reply_body or draft.reply_snippet or ""
         fit = _score_reply(goal, draft.subject or "", reply_text)
+        score = float(fit.get("score", 0.5))
         analyzed.append(
             {
                 "contact_id": contact.id,
                 "contact_name": contact.name,
                 "variant_id": contact.variant_id,
+                "copy_variant_id": draft.copy_variant_id,
                 "score": fit.get("score", 0.5),
                 "goal_aligned": fit.get("goal_aligned", True),
                 "summary": fit.get("summary", ""),
             }
         )
         if contact.variant_id:
-            by_variant.setdefault(contact.variant_id, []).append(
-                float(fit.get("score", 0.5))
-            )
+            by_variant.setdefault(contact.variant_id, []).append(score)
+        if draft.copy_variant_id:
+            by_copy_variant.setdefault(draft.copy_variant_id, []).append(score)
 
     adaptations: list[str] = []
     if playbook and by_variant:
@@ -127,18 +136,53 @@ def analyze_replies_and_adapt(
                 continue
             variant.is_active = False
             adaptations.append(
-                f"Retired variant '{variant.label}' (avg reply-goal score {avg:.2f})"
+                f"Retired search variant '{variant.label}' (avg reply-goal score {avg:.2f})"
             )
         if adaptations:
             db.commit()
             try:
                 regenerate_variants(db, principal, playbook)
-                adaptations.append("Seeded fresh A/B variants from playbook.")
+                adaptations.append("Seeded fresh A/B search variants from playbook.")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Variant regeneration after reply analysis failed: %s", exc)
+
+    # Evolve the email COPY the same way: retire copy approaches whose replies
+    # don't advance the goal, then seed fresh angles.
+    copy_retired = False
+    if playbook and by_copy_variant:
+        for cv_id, scores in by_copy_variant.items():
+            if len(scores) < 2:
+                continue
+            avg = sum(scores) / len(scores)
+            if avg >= 0.45:
+                continue
+            cv = db.get(AgentCopyVariant, cv_id)
+            if not cv or not cv.is_active:
+                continue
+            cv.is_active = False
+            copy_retired = True
+            adaptations.append(
+                f"Retired copy variant '{cv.label}' (avg reply-goal score {avg:.2f})"
+            )
+        if copy_retired:
+            db.commit()
+            try:
+                regenerate_copy_variants(db, principal, playbook)
+                adaptations.append("Seeded fresh A/B email-copy variants.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Copy variant regeneration failed: %s", exc)
+
+    # Report the best send-time window so the digest/dashboard can show what's winning.
+    best_bucket = best_send_bucket(db, principal)
+    best_send_time = None
+    if best_bucket is not None and 0 <= best_bucket < len(AB_SEND_BUCKETS):
+        hour, minute = AB_SEND_BUCKETS[best_bucket]
+        best_send_time = f"{hour:02d}:{minute:02d} local"
+        adaptations.append(f"Best send window so far: {best_send_time}.")
 
     return {
         "analyzed": len(analyzed),
         "replies": analyzed[:15],
         "adaptations": adaptations,
+        "best_send_time": best_send_time,
     }

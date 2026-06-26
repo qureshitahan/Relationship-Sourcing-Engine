@@ -107,8 +107,12 @@ class InsightProvider(ABC):
         person: Optional[dict] = None,
         organization: Optional[dict] = None,
         insight: Optional[dict] = None,
+        style: Optional[dict] = None,
     ) -> OutreachResult:
-        """Draft a warm, strategic, personalized outreach email."""
+        """Draft a warm, strategic, personalized outreach email.
+
+        ``style`` is an optional A/B copy directive (hook/structure/cta/tone/length).
+        """
 
     def generate_followup(
         self,

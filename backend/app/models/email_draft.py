@@ -26,6 +26,13 @@ class EmailDraft(Base, TimestampMixin):
     company_id: Mapped[Optional[int]] = mapped_column(ForeignKey("companies.id"), index=True)
     contact_id: Mapped[Optional[int]] = mapped_column(ForeignKey("contacts.id"), index=True)
     insight_id: Mapped[Optional[int]] = mapped_column(ForeignKey("relevance_insights.id"), index=True)
+    # Which A/B email-copy approach wrote this draft (for reply-rate learning).
+    copy_variant_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("agent_copy_variants.id"), index=True
+    )
+    # Which A/B send-time bucket this draft was scheduled into (index into
+    # AB_SEND_BUCKETS); lets us learn which send window earns more replies.
+    send_bucket_index: Mapped[Optional[int]] = mapped_column(Integer)
 
     subject: Mapped[str] = mapped_column(String(512), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)

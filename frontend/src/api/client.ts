@@ -1,6 +1,7 @@
 import axios from "axios";
 import type {
   AgentConfig,
+  AgentCopyVariantsResponse,
   AgentPlan,
   AgentPlaybook,
   AgentRun,
@@ -218,6 +219,7 @@ export const enrichOrganization = (id: number, maxContacts = 5) =>
 export interface ProspectFilters {
   company_id?: number;
   discovery_run_id?: number;
+  campaign_id?: number;
   role_category?: string;
   status?: string;
   approved?: boolean;
@@ -500,8 +502,14 @@ export const createCampaign = (payload: CampaignCreatePayload) =>
     .then((r) => r.data);
 export const updateCampaign = (id: number, payload: CampaignUpdatePayload) =>
   api.put<CampaignDetail>(`/api/campaigns/${id}`, payload).then((r) => r.data);
-export const runCampaign = (id: number) =>
-  api.post<CampaignDetail>(`/api/campaigns/${id}/run`).then((r) => r.data);
+export const runCampaign = (id: number, resume = false) =>
+  api
+    .post<CampaignDetail>(`/api/campaigns/${id}/run`, null, {
+      params: resume ? { resume: true } : {},
+    })
+    .then((r) => r.data);
+export const cancelCampaignRun = (id: number) =>
+  api.post<CampaignDetail>(`/api/campaigns/${id}/cancel`).then((r) => r.data);
 export const deleteCampaign = (id: number) =>
   api.delete(`/api/campaigns/${id}`).then(() => undefined);
 export const listAgentVariants = (principalId?: number) =>
@@ -514,6 +522,20 @@ export const regenerateAgentVariants = (principalId?: number) =>
   api
     .post<AgentVariantsResponse>(
       "/api/agent/variants/regenerate",
+      {},
+      { params: principalId ? { principal_id: principalId } : {} }
+    )
+    .then((r) => r.data);
+export const listAgentCopyVariants = (principalId?: number) =>
+  api
+    .get<AgentCopyVariantsResponse>("/api/agent/copy-variants", {
+      params: principalId ? { principal_id: principalId } : {},
+    })
+    .then((r) => r.data);
+export const regenerateAgentCopyVariants = (principalId?: number) =>
+  api
+    .post<AgentCopyVariantsResponse>(
+      "/api/agent/copy-variants/regenerate",
       {},
       { params: principalId ? { principal_id: principalId } : {} }
     )

@@ -256,6 +256,46 @@ def regenerate_variants_endpoint(
     }
 
 
+@router.get("/copy-variants")
+def list_copy_variants(principal_id: Optional[int] = None, db: Session = Depends(get_db)):
+    """A/B email-copy variants for the active playbook, with live reply stats."""
+    from app.services.agent.experiments import copy_variant_stats, ensure_copy_variants
+
+    pid = _resolve_principal_id(db, principal_id)
+    principal = db.get(Principal, pid)
+    pb = _active_playbook(db, pid)
+    if pb is None:
+        return {"playbook_id": None, "copy_variants": []}
+    variants = ensure_copy_variants(db, principal, pb)
+    return {
+        "playbook_id": pb.id,
+        "playbook_name": pb.name,
+        "copy_variants": [copy_variant_stats(db, v) for v in variants],
+    }
+
+
+@router.post("/copy-variants/regenerate")
+def regenerate_copy_variants_endpoint(
+    principal_id: Optional[int] = None, db: Session = Depends(get_db)
+):
+    """Replace the current A/B email-copy variants with a fresh set."""
+    from app.services.agent.experiments import (
+        copy_variant_stats,
+        regenerate_copy_variants,
+    )
+
+    pid = _resolve_principal_id(db, principal_id)
+    principal = db.get(Principal, pid)
+    pb = _active_playbook(db, pid)
+    if pb is None:
+        raise HTTPException(status_code=400, detail="Save a playbook first.")
+    variants = regenerate_copy_variants(db, principal, pb)
+    return {
+        "playbook_id": pb.id,
+        "copy_variants": [copy_variant_stats(db, v) for v in variants],
+    }
+
+
 @router.get("/dashboard")
 def get_campaign_dashboard(
     principal_id: Optional[int] = None,

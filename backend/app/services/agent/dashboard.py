@@ -13,9 +13,10 @@ from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
-from app.models.enums import EmailStatus
+from app.models.enums import EmailStatus, ProspectStatus
 from app.models.company import Company
 from app.models.principal import Principal
+from app.models.relevance_insight import RelevanceInsight
 
 
 def campaign_dashboard(
@@ -346,9 +347,9 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     )
 
     totals = {
-        "discovered": sum(r.discovered or 0 for r in runs),
-        "qualified": sum(r.qualified or 0 for r in runs),
-        "rejected": sum(r.rejected or 0 for r in runs),
+        "discovered": _campaign_contact_count(db, campaign_id),
+        "qualified": _campaign_qualified_count(db, campaign_id, config),
+        "rejected": _campaign_rejected_count(db, campaign_id, config),
         "drafted": drafts_total,
         "sent": sent_total,
         "followups_sent": sum(r.followups_sent or 0 for r in runs),
@@ -430,41 +431,50 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     }
 
 
+def _campaign_contact_count(db: Session, campaign_id: int) -> int:
+    return int(
+        db.execute(
+            select(func.count(Contact.id)).where(Contact.campaign_id == campaign_id)
+        ).scalar_one()
+    )
+
+
+def _campaign_qualified_count(db: Session, campaign_id: int, config: AgentConfig) -> int:
+    floor = float(config.qualify_min or 40)
+    return int(
+        db.execute(
+            select(func.count(Contact.id)).where(
+                Contact.campaign_id == campaign_id,
+                Contact.relevance_score.isnot(None),
+                Contact.relevance_score >= floor,
+            )
+        ).scalar_one()
+    )
+
+
+def _campaign_rejected_count(db: Session, campaign_id: int, config: AgentConfig) -> int:
+    return int(
+        db.execute(
+            select(func.count(Contact.id)).where(
+                Contact.campaign_id == campaign_id,
+                Contact.status == ProspectStatus.REJECTED,
+            )
+        ).scalar_one()
+    )
+
+
 def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
-    """People surfaced by a campaign, each with their latest email/reply state."""
+    """People owned by this campaign (not shared with other campaigns)."""
     config = db.get(AgentConfig, campaign_id)
     if config is None:
         raise ValueError("Campaign not found")
 
-    # Discovery runs that belong to this campaign's agent runs.
-    discovery_run_ids = [
-        rid
-        for (rid,) in db.execute(
-            select(AgentRun.discovery_run_id).where(
-                AgentRun.campaign_id == campaign_id,
-                AgentRun.discovery_run_id.isnot(None),
-            )
-        ).all()
-        if rid is not None
-    ]
-
-    contact_ids: set[int] = set()
-    if discovery_run_ids:
-        for (cid,) in db.execute(
-            select(Contact.id).where(Contact.discovery_run_id.in_(discovery_run_ids))
-        ).all():
-            contact_ids.add(cid)
-
-    # Also include any contact this campaign has drafted/sent to (covers cases
-    # where the discovery linkage is missing).
-    for (cid,) in db.execute(
-        select(EmailDraft.contact_id).where(
-            EmailDraft.campaign_id == campaign_id,
-            EmailDraft.contact_id.isnot(None),
-        )
-    ).all():
-        if cid is not None:
-            contact_ids.add(cid)
+    contacts = list(
+        db.execute(
+            select(Contact).where(Contact.campaign_id == campaign_id)
+        ).scalars().all()
+    )
+    contact_ids = {c.id for c in contacts}
 
     if not contact_ids:
         return {"campaign_id": campaign_id, "items": [], "total": 0}
@@ -481,12 +491,6 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
             pid = p.get("id")
             if pid is not None:
                 pipeline_status[int(pid)] = str(p.get("status") or "discovered")
-
-    contacts = list(
-        db.execute(
-            select(Contact).where(Contact.id.in_(contact_ids))
-        ).scalars().all()
-    )
 
     company_ids = {c.company_id for c in contacts if c.company_id}
     companies: dict[int, Company] = {}

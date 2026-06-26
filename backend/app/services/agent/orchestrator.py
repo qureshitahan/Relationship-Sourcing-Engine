@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from datetime import datetime, timedelta
@@ -95,6 +96,15 @@ def _resolve_search_definition(
 
 def _criteria_from_dict(data: dict, people_limit: int) -> DiscoveryCriteria:
     norm = criteria_from_dict({**data, "people_limit": people_limit})
+    # Cost guard: for an email outreach campaign, only surface people Apollo can
+    # actually reach. The people-search "has_email" signal is free, so filtering
+    # out unreachable contacts here avoids spending expensive LLM research on
+    # people we could never email. Callers can still override per playbook.
+    email_status = norm.get("contact_email_status") or [
+        "verified",
+        "unverified",
+        "likely to engage",
+    ]
     return DiscoveryCriteria(
         industries=norm.get("industries"),
         company_types=norm.get("company_types"),
@@ -102,7 +112,7 @@ def _criteria_from_dict(data: dict, people_limit: int) -> DiscoveryCriteria:
         geographies=norm.get("geographies"),
         titles=norm.get("titles"),
         seniorities=norm.get("seniorities"),
-        contact_email_status=norm.get("contact_email_status"),
+        contact_email_status=email_status,
         organization_domains=norm.get("organization_domains"),
         keywords=norm.get("keywords"),
         themes=norm.get("themes"),
@@ -169,6 +179,7 @@ def create_run(
     *,
     playbook_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
+    resume: bool = False,
 ) -> AgentRun:
     run = AgentRun(
         principal_id=principal_id,
@@ -177,7 +188,7 @@ def create_run(
         status="running",
         trigger=trigger,
         started_at=datetime.utcnow(),
-        summary={"stages": [], "people": []},
+        summary={"stages": [], "people": [], "resume": bool(resume)},
     )
     db.add(run)
     db.commit()
@@ -191,6 +202,7 @@ def launch_run(
     *,
     playbook_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
+    resume: bool = False,
 ) -> AgentRun:
     """Create a run row and execute it on a background daemon thread."""
     db = SessionLocal()
@@ -201,6 +213,7 @@ def launch_run(
             trigger,
             playbook_id=playbook_id,
             campaign_id=campaign_id,
+            resume=resume,
         )
         run_id = run.id
     finally:
@@ -219,6 +232,21 @@ def _stage(run: AgentRun, name: str, **data) -> None:
     stages = (run.summary or {}).get("stages", [])
     stages.append({"stage": name, **data})
     run.summary = {**(run.summary or {}), "stages": stages}
+
+
+def _is_cancelled(db: Session, run: AgentRun) -> bool:
+    db.refresh(run)
+    return bool((run.summary or {}).get("cancel_requested"))
+
+
+def _abort_if_cancelled(db: Session, run: AgentRun, errors: list[str]) -> bool:
+    if not _is_cancelled(db, run):
+        return False
+    run.status = "cancelled"
+    run.finished_at = datetime.utcnow()
+    run.summary = {**(run.summary or {}), "errors": errors[:50]}
+    db.commit()
+    return True
 
 
 def execute_run(run_id: int) -> None:
@@ -268,10 +296,12 @@ def execute_run(run_id: int) -> None:
             logger.warning("Variant selection failed, using base playbook: %s", exc)
 
         variant_criteria = variant.criteria if variant else (playbook.criteria or {})
+        # Campaign discover_target wins over playbook criteria (UI edits target there).
         people_limit = int(
-            variant_criteria.get("people_limit")
+            config.discover_target
+            or variant_criteria.get("people_limit")
             or (playbook.criteria or {}).get("people_limit")
-            or config.discover_target
+            or 50
         )
         criteria = _criteria_from_dict(variant_criteria, people_limit)
         run.summary = {
@@ -292,6 +322,7 @@ def execute_run(run_id: int) -> None:
                 generate_insights=False,
                 people_first=True,
                 search_goal=playbook.objective_prompt,
+                campaign_id=config.id,
             )
             run.discovery_run_id = discovery_run.id
             run.discovered = discovery_run.people_imported or 0
@@ -304,6 +335,7 @@ def execute_run(run_id: int) -> None:
                 # Attribute each discovered person to the A/B variant that found them.
                 if variant is not None:
                     c.variant_id = variant.id
+                c.campaign_id = config.id
                 company = db.get(Company, c.company_id) if c.company_id else None
                 _track_person(run, c, company, status="discovered")
             _stage(
@@ -318,57 +350,63 @@ def execute_run(run_id: int) -> None:
             errors.append(f"Discovery: {exc}")
         db.commit()
 
-        # Include contacts from earlier runs of this campaign that never got a
-        # draft (e.g. a prior run crashed during qualify/draft).
-        if config.id:
-            prior_discovery_ids = [
-                rid
-                for (rid,) in db.execute(
-                    select(AgentRun.discovery_run_id).where(
-                        AgentRun.campaign_id == config.id,
-                        AgentRun.discovery_run_id.isnot(None),
+        if _abort_if_cancelled(db, run, errors):
+            return
+
+        # Resume mode only: pick up contacts from earlier runs of this campaign
+        # that never got a draft (e.g. a prior run crashed during qualify/draft).
+        # Normal "Run now" processes only people found in this run's discovery.
+        if config.id and bool((run.summary or {}).get("resume")):
+            drafted_contact_ids = {
+                cid
+                for (cid,) in db.execute(
+                    select(EmailDraft.contact_id).where(
+                        EmailDraft.campaign_id == config.id,
+                        EmailDraft.contact_id.isnot(None),
                     )
                 ).all()
-                if rid is not None
-            ]
-            if prior_discovery_ids:
-                drafted_contact_ids = {
-                    cid
-                    for (cid,) in db.execute(
-                        select(EmailDraft.contact_id).where(
-                            EmailDraft.campaign_id == config.id,
-                            EmailDraft.contact_id.isnot(None),
+                if cid is not None
+            }
+            for (cid,) in db.execute(
+                select(Contact.id).where(Contact.campaign_id == config.id)
+            ).all():
+                if cid not in drafted_contact_ids and cid not in new_contact_ids:
+                    new_contact_ids.append(cid)
+                    contact = db.get(Contact, cid)
+                    if contact:
+                        company = (
+                            db.get(Company, contact.company_id)
+                            if contact.company_id
+                            else None
                         )
-                    ).all()
-                    if cid is not None
-                }
-                for (cid,) in db.execute(
-                    select(Contact.id).where(
-                        Contact.discovery_run_id.in_(prior_discovery_ids)
-                    )
-                ).all():
-                    if cid not in drafted_contact_ids and cid not in new_contact_ids:
-                        new_contact_ids.append(cid)
-                        contact = db.get(Contact, cid)
-                        if contact:
-                            company = (
-                                db.get(Company, contact.company_id)
-                                if contact.company_id
-                                else None
-                            )
-                            # Only track if not already on this run's people list.
-                            existing_ids = {
-                                p.get("id")
-                                for p in (run.summary or {}).get("people") or []
-                            }
-                            if cid not in existing_ids:
-                                _track_person(run, contact, company, status="discovered")
+                        existing_ids = {
+                            p.get("id")
+                            for p in (run.summary or {}).get("people") or []
+                        }
+                        if cid not in existing_ids:
+                            _track_person(run, contact, company, status="discovered")
+
+        if _abort_if_cancelled(db, run, errors):
+            return
 
         # 2) QUALIFY (per-person research for every new import) --------------
         qualified_ids: list[int] = []
         for cid in new_contact_ids:
+            if _is_cancelled(db, run):
+                _abort_if_cancelled(db, run, errors)
+                return
             contact = db.get(Contact, cid)
             if not contact:
+                continue
+            # Cost guard: skip the expensive LLM research for people Apollo has no
+            # reachable email for. They can't be emailed, so researching them
+            # spends tokens for nothing (the common "researched, then email not
+            # revealed" waste). Apollo's people-search has_email flag is free.
+            if not getattr(contact, "has_email", False) and not (contact.email or "").strip():
+                contact.status = ProspectStatus.REJECTED
+                run.rejected += 1
+                _update_person_status(run, cid, "skipped (no reachable email)")
+                db.commit()
                 continue
             company = db.get(Company, contact.company_id) if contact.company_id else None
             try:
@@ -400,14 +438,44 @@ def execute_run(run_id: int) -> None:
         _stage(run, "qualify", qualified=run.qualified, rejected=run.rejected)
         db.commit()
 
+        if _abort_if_cancelled(db, run, errors):
+            return
+
         # 3) APPROVE + REVEAL + DRAFT ---------------------------------------
+        # Email-COPY A/B: maintain copy variants per playbook and assign one to
+        # each draft (epsilon-greedy by reply rate). This is the second learning
+        # lever alongside the search variants picked above.
+        from app.services.agent.experiments import (
+            ensure_copy_variants,
+            select_copy_variant,
+        )
+
+        copy_variants: list = []
+        try:
+            copy_variants = ensure_copy_variants(db, principal, playbook)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Copy variant setup failed; using default copy: %s", exc)
+
         drafted_ids: list[int] = []
         drafted_people: list[str] = []
         for cid in qualified_ids:
+            if _is_cancelled(db, run):
+                _abort_if_cancelled(db, run, errors)
+                return
             contact = db.get(Contact, cid)
             if not contact or contact.do_not_contact:
                 continue
             try:
+                contact.approved_for_outreach = True
+                contact.status = ProspectStatus.APPROVED
+                db.commit()
+
+                # Reveal before blockers: Apollo search never returns emails; we must
+                # bulk_match first, then check whether drafting is possible.
+                if not (contact.email or "").strip():
+                    _reveal_email(db, contact, errors)
+                    db.refresh(contact)
+
                 blockers = outreach_draft_blockers(
                     db, principal_id=principal.id, contact=contact
                 )
@@ -416,13 +484,6 @@ def execute_run(run_id: int) -> None:
                         f"Skip draft {contact.name or cid}: {', '.join(blockers)}"
                     )
                     continue
-
-                contact.approved_for_outreach = True
-                contact.status = ProspectStatus.APPROVED
-                db.commit()
-
-                if not contact.email:
-                    _reveal_email(db, contact, errors)
 
                 # Idempotency: skip if a draft already exists for this pair IN
                 # THIS campaign. Other campaigns of the same principal may still
@@ -443,6 +504,9 @@ def execute_run(run_id: int) -> None:
                     db.get(Company, contact.company_id) if contact.company_id else None
                 )
                 insight = _latest_insight(db, principal.id, contact.id)
+                copy_variant = (
+                    select_copy_variant(db, copy_variants) if copy_variants else None
+                )
                 content = generate_outreach(
                     db,
                     principal,
@@ -450,6 +514,7 @@ def execute_run(run_id: int) -> None:
                     company,
                     insight,
                     outreach_goal=playbook.objective_prompt,
+                    style=copy_variant.style if copy_variant else None,
                 )
                 # Auto-send mode pre-approves the draft so it's ready to send.
                 draft = EmailDraft(
@@ -458,10 +523,13 @@ def execute_run(run_id: int) -> None:
                     company_id=contact.company_id,
                     contact_id=contact.id,
                     insight_id=insight.id if insight else None,
+                    copy_variant_id=copy_variant.id if copy_variant else None,
                     subject=content.subject,
                     body=content.body,
                     status=EmailStatus.APPROVED if config.auto_send else EmailStatus.DRAFT,
                 )
+                if copy_variant is not None:
+                    copy_variant.drafted = (copy_variant.drafted or 0) + 1
                 if config.auto_send:
                     draft.approved_by = "agent"
                     draft.approved_at = datetime.utcnow()
@@ -484,6 +552,9 @@ def execute_run(run_id: int) -> None:
                 errors.append(f"Draft #{cid}: {exc}")
         _stage(run, "draft", drafted=run.drafted, people=drafted_people[:50])
         db.commit()
+
+        if _abort_if_cancelled(db, run, errors):
+            return
 
         # 4) SEND (drip: small batches with a pause, capped per day) ---------
         if config.auto_send:
@@ -626,6 +697,7 @@ def _drip_send(
     to a fixed local send window for the principal.
     """
     from app.api.routes.emails import SendError, perform_send
+    from app.services.agent.experiments import EXPLORE_EPSILON, best_send_bucket
     from app.services.agent.send_timing import (
         AB_SEND_BUCKETS,
         personalized_send_time_utc,
@@ -635,6 +707,10 @@ def _drip_send(
     delay = max(0, int(settings.send_batch_delay_seconds or 120))
     gap_minutes = max(1, delay // 60) if delay else 2
     auto_schedule = bool(getattr(config, "auto_schedule", True))
+
+    # Send-time learning: once we have enough data, exploit the best-replying
+    # bucket most of the time, but keep exploring the others so we keep learning.
+    winning_bucket = best_send_bucket(db, principal)
 
     send_times: list[datetime] = []
     if not auto_schedule:
@@ -656,15 +732,23 @@ def _drip_send(
         contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
         if not contact or not contact.email:
             continue
+        bucket_index: Optional[int] = None
         if auto_schedule:
-            # Alternate A/B time-of-day buckets per recipient.
+            # Exploit the winning bucket ~70% of the time once known; otherwise
+            # alternate buckets per recipient so every window keeps getting data.
+            if winning_bucket is not None and random.random() < (1 - EXPLORE_EPSILON):
+                bucket_index = winning_bucket
+            else:
+                bucket_index = idx % len(AB_SEND_BUCKETS)
             when = personalized_send_time_utc(
                 location=contact.location,
                 order_index=idx,
-                ab_index=idx % len(AB_SEND_BUCKETS),
+                ab_index=bucket_index,
             )
         else:
             when = send_times[idx] if idx < len(send_times) else now
+        # Record the bucket so reply-rate learning can attribute results to it.
+        draft.send_bucket_index = bucket_index
         try:
             if when <= now:
                 perform_send(db, draft)

@@ -294,8 +294,13 @@ def generate_outreach(
     insight: Optional[RelevanceInsight],
     *,
     outreach_goal: Optional[str] = None,
+    style: Optional[dict] = None,
 ) -> OutreachResult:
-    """Generate a personalized outreach email (no persistence)."""
+    """Generate a personalized outreach email (no persistence).
+
+    ``style`` is an optional A/B copy directive (hook/structure/cta/tone/length)
+    from the selected AgentCopyVariant; it steers HOW the email is written.
+    """
     insight_ctx = None
     if insight is not None:
         facts = [_fact_text(f) for f in (insight.key_facts or []) if _fact_text(f)]
@@ -333,6 +338,7 @@ def generate_outreach(
         person=person_context(contact),
         organization=organization_context(company),
         insight=insight_ctx,
+        style=style,
     )
     # Enforce the standard signature regardless of how the LLM signed off.
     result.body = apply_signature(result.body, principal)

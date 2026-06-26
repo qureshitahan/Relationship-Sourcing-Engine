@@ -1,6 +1,7 @@
 """Model package: import all models so SQLAlchemy registers them on Base."""
 from app.db.base import Base
 from app.models.agent_config import AgentConfig
+from app.models.agent_copy_variant import AgentCopyVariant
 from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
 from app.models.agent_variant import AgentVariant
@@ -19,6 +20,7 @@ from app.models.suppression import OutreachHistory, Suppression
 __all__ = [
     "Base",
     "AgentConfig",
+    "AgentCopyVariant",
     "AgentPlaybook",
     "AgentRun",
     "AgentVariant",

@@ -362,12 +362,22 @@ class AnthropicInsightProvider(InsightProvider):
         person: Optional[dict] = None,
         organization: Optional[dict] = None,
         insight: Optional[dict] = None,
+        style: Optional[dict] = None,
     ) -> OutreachResult:
         if not self.api_key:
             return self._fallback.generate_outreach(
-                principal=principal, person=person, organization=organization, insight=insight
+                principal=principal, person=person, organization=organization,
+                insight=insight, style=style,
             )
 
+        style_block = ""
+        if style:
+            style_block = (
+                "\n\nCOPY DIRECTIVE (A/B variant — follow this writing approach):\n"
+                + json.dumps(style, indent=2, default=str)
+                + "\nApply the directive's hook, structure, cta, tone, and length. "
+                "Keep it honest, first-person, and on-objective."
+            )
         user = (
             "PRINCIPAL:\n"
             + json.dumps(principal, indent=2, default=str)
@@ -377,6 +387,7 @@ class AnthropicInsightProvider(InsightProvider):
             + json.dumps(organization or {}, indent=2, default=str)
             + "\n\nSTRATEGIC INSIGHT:\n"
             + json.dumps(insight or {}, indent=2, default=str)
+            + style_block
             + "\n\nUse credential_summary for at most one line of credibility. "
             "Do not paste proof points verbatim. Do not fabricate.\n"
             "Follow the body structure (greeting, hook, optional bridge, single soft ask). "
@@ -386,7 +397,8 @@ class AnthropicInsightProvider(InsightProvider):
         data = self._complete_json(_OUTREACH_SYSTEM, user)
         if not data or not data.get("body"):
             result = self._fallback.generate_outreach(
-                principal=principal, person=person, organization=organization, insight=insight
+                principal=principal, person=person, organization=organization,
+                insight=insight, style=style,
             )
             result.generated_by = f"{self.name} (stub fallback)"
             mark_using_stub("anthropic", reason="Anthropic outreach draft failed; using stub template")
@@ -574,15 +586,12 @@ def _build_insight_result(
 
     score = _as_float(data.get("relevance_score"), 60.0)
 
-    match_score = (person or {}).get("discovery_match_score")
-    if match_score is not None:
-        try:
-            ms = float(match_score)
-            if ms >= 80 and confidence != "conflict":
-                score = max(score, min(ms, 92.0))
-        except (TypeError, ValueError):
-            pass
-
+    # NOTE: We intentionally do NOT raise the LLM's score to match the discovery
+    # title-match score. The discovery score is a coarse title prefilter (e.g.
+    # any "Partner" title scores ~94), while the LLM score reflects real,
+    # web-grounded relevance to the outreach goal. Letting the title-match force
+    # the score up produced "everyone is 92" — wrong-domain people ranked as top
+    # fits despite the research itself saying "skip". The researched score wins.
     score = _apply_relevance_score_cap(score, confidence, fit)
 
     if confidence == "conflict":

@@ -286,11 +286,9 @@ def _step_clear_industries_to_broad(
     if len(industries) <= 1:
         return None
     state.applied.add("single_industry")
-    # Keep the broadest hospital/health tag if present.
-    preferred = next(
-        (i for i in industries if "hospital" in i.lower() or "health" in i.lower()),
-        industries[0],
-    )
+    # Domain-agnostic: keep the first (primary) industry tag. Do NOT prefer
+    # healthcare — that biased non-healthcare searches toward health companies.
+    preferred = industries[0]
     criteria.industries = [preferred]
     return f"Narrowed to one industry tag: {preferred}."
 

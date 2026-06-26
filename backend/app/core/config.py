@@ -6,11 +6,27 @@ optional. Real keys can be added incrementally as milestones progress.
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
-from typing import Annotated, List
+from typing import List
 
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _parse_cors_origins(raw: str) -> List[str]:
+    """Accept comma-separated or JSON-array CORS_ORIGINS from env (Azure-friendly)."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except json.JSONDecodeError:
+            pass
+    return [item.strip() for item in text.split(",") if item.strip()]
 
 
 class Settings(BaseSettings):
@@ -25,13 +41,12 @@ class Settings(BaseSettings):
     app_name: str = "Relationship Sourcing Engine"
     environment: str = "development"
     database_url: str = "sqlite:///./data/relationship_engine.db"
-    # NoDecode: stop pydantic-settings from JSON-parsing the env value so a plain
-    # or comma-separated string (e.g. "https://a.com,https://b.com") is accepted
-    # by _split_csv below instead of crashing on json.loads.
-    cors_origins: Annotated[List[str], NoDecode] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
+    # Stored as plain str (not List[str]) so pydantic-settings 2.3.x on Azure does not
+    # json-decode the env value before we can split it. Use settings.cors_origins for the list.
+    cors_origins_env: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        validation_alias=AliasChoices("cors_origins", "CORS_ORIGINS"),
+    )
     # Public HTTPS base URL for inbound webhooks (e.g. ngrok tunnel to port 8000).
     app_public_url: str = ""
 
@@ -145,13 +160,9 @@ class Settings(BaseSettings):
     max_outreach_per_company: int = 3
     outreach_cooldown_days: int = 14
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def _split_csv(cls, value):
-        """Allow comma-separated strings from env vars to become lists."""
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
+    @property
+    def cors_origins(self) -> List[str]:
+        return _parse_cors_origins(self.cors_origins_env)
 
 
 @lru_cache
