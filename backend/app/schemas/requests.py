@@ -35,6 +35,8 @@ class PrincipalRequest(BaseModel):
     opportunity_types: Optional[List[str]] = None
     value_props: Optional[List[str]] = None
     is_active: Optional[bool] = None
+    # Which outbound mailbox to use (galaxy_outlook | tekhqs_dalbir | tekhqs_taha | …).
+    outreach_mailbox_id: Optional[str] = None
 
     @field_validator("name")
     @classmethod

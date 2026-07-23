@@ -72,6 +72,7 @@ class PrincipalOut(ORMModel):
     opportunity_types: Optional[List[str]] = None
     value_props: Optional[List[str]] = None
     is_active: bool
+    outreach_mailbox_id: Optional[str] = None
     created_at: datetime
 
 
