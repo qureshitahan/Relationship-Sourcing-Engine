@@ -35,7 +35,7 @@ from app.schemas.requests import (
 )
 from app.services.outreach_goal import outreach_goal_for_run
 from app.services.audit import log_action
-from app.services.email_providers import get_email_provider
+from app.services.email_providers import get_email_provider, mailbox_for_principal
 from app.services.insights.engine import (
     apply_signature,
     generate_followup,
@@ -53,11 +53,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/emails", tags=["emails"])
 
 
+def _mailbox_for_draft(db: Session, draft: EmailDraft):
+    principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+    return mailbox_for_principal(principal)
+
+
 def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
     """Build API response with recipient/sender context for the review UI."""
     contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
     company = db.get(Company, draft.company_id) if draft.company_id else None
     principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+    mailbox = mailbox_for_principal(principal)
     return EmailDraftOut(
         id=draft.id,
         principal_id=draft.principal_id,
@@ -82,7 +88,7 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
         first_opened_at=draft.first_opened_at,
         last_opened_at=draft.last_opened_at,
         principal_name=principal.name if principal else None,
-        from_email=settings.outreach_from_email or None,
+        from_email=mailbox.address or settings.outreach_from_email or None,
         contact_name=contact.name if contact else None,
         contact_email=contact.email if contact else None,
         contact_title=contact.title if contact else None,
@@ -890,6 +896,8 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
     if contact.do_not_contact:
         raise SendError("Prospect is on do-not-contact list")
 
+    principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+
     # Open tracking: send HTML with an invisible pixel when enabled + reachable.
     html_body = None
     if settings.track_opens:
@@ -897,13 +905,19 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
         if pixel:
             html_body = _html_with_pixel(draft.body, pixel)
 
-    provider = get_email_provider()
+    provider = get_email_provider(principal=principal)
+    mailbox = mailbox_for_principal(principal)
+    if not mailbox.configured:
+        raise SendError(
+            f"Outreach mailbox '{mailbox.id}' ({mailbox.address}) is not configured. "
+            "Add the provider credentials in the backend environment."
+        )
     result = provider.send(
         to_email=contact.email,
         subject=draft.subject,
         body=draft.body,
-        from_email=settings.outreach_from_email,
-        from_name=settings.outreach_from_name,
+        from_email=mailbox.address,
+        from_name=mailbox.from_name,
         html_body=html_body,
     )
     if not result.sent:
@@ -988,7 +1002,9 @@ def schedule_email(
         draft.approved_at = datetime.utcnow()
     draft.approved_by = payload.approved_by
 
-    provider = get_email_provider()
+    principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+    provider = get_email_provider(principal=principal)
+    mailbox = mailbox_for_principal(principal)
     outlook = False
     if provider.supports_scheduled_send():
         # Hand off to Outlook for server-side deferred delivery.
@@ -1001,8 +1017,8 @@ def schedule_email(
             to_email=contact.email,
             subject=draft.subject,
             body=draft.body,
-            from_email=settings.outreach_from_email,
-            from_name=settings.outreach_from_name,
+            from_email=mailbox.address,
+            from_name=mailbox.from_name,
             html_body=html_body,
             send_at=when,
         )
@@ -1051,7 +1067,8 @@ def unschedule_email(draft_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Draft is not scheduled")
 
     if draft.outlook_scheduled and draft.provider_message_id:
-        provider = get_email_provider()
+        principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+        provider = get_email_provider(principal=principal)
         cancelled = provider.cancel_scheduled(
             remote_message_id=draft.provider_message_id
         )
@@ -1076,26 +1093,11 @@ def unschedule_email(draft_id: int, db: Session = Depends(get_db)):
 
 
 def scan_replies(db: Session) -> dict:
-    """Poll the mailbox for replies to sent emails (shared by the route + poller).
+    """Poll each principal's mailbox for replies to sent emails.
 
-    Requires the email provider to support reply tracking (Microsoft Graph with
-    Mail.Read). Marks matched drafts REPLIED, records a snippet/body, advances the
-    prospect to CONNECTED, and triggers deep research on reply. Degrades gracefully
-    if Mail.Read is not granted.
+    Supports Microsoft Graph and Gmail (IMAP). Drafts are checked with the
+    provider for that draft's principal mailbox.
     """
-    provider = get_email_provider()
-    if not provider.supports_reply_tracking():
-        return {
-            "checked": 0,
-            "replied": 0,
-            "supported": False,
-            "message": (
-                "Reply tracking needs Microsoft Graph with Mail.Read. Set the "
-                "Microsoft credentials and ask IT to grant Mail.Read on the Azure app."
-            ),
-        }
-
-    # Only sent emails that have not already been marked replied.
     sent_drafts = db.execute(
         select(EmailDraft).where(
             EmailDraft.status == EmailStatus.SENT,
@@ -1105,11 +1107,20 @@ def scan_replies(db: Session) -> dict:
 
     checked = 0
     replied = 0
+    skipped = 0
     error: Optional[str] = None
+    any_supported = False
+
     for draft in sent_drafts:
         contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
         if not contact or not contact.email or not draft.sent_at:
             continue
+        principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+        provider = get_email_provider(principal=principal)
+        if not provider.supports_reply_tracking():
+            skipped += 1
+            continue
+        any_supported = True
         checked += 1
         result = provider.check_reply(
             to_email=contact.email,
@@ -1137,22 +1148,31 @@ def scan_replies(db: Session) -> dict:
             )
             # Deep research happens NOW (on reply), not up front: this is where
             # we spend LLM budget to qualify the people who actually engaged.
-            if draft.principal_id:
-                principal = db.get(Principal, draft.principal_id)
-                if principal:
-                    try:
-                        generate_insight(db, principal, contact=contact)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "Post-reply research failed for contact %s: %s",
-                            contact.id,
-                            exc,
-                        )
+            if principal:
+                try:
+                    generate_insight(db, principal, contact=contact)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Post-reply research failed for contact %s: %s",
+                        contact.id,
+                        exc,
+                    )
     db.commit()
+    if not any_supported and checked == 0:
+        return {
+            "checked": 0,
+            "replied": 0,
+            "supported": False,
+            "message": (
+                "Reply tracking needs a configured Gmail or Microsoft Graph mailbox "
+                "with reply access on the principal's selected send-from address."
+            ),
+        }
     return {
         "checked": checked,
         "replied": replied,
         "supported": True,
+        "skipped": skipped,
         "error": error,
         "message": (
             f"Checked {checked} sent email(s); {replied} new repl{'y' if replied == 1 else 'ies'} found."

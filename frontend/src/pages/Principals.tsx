@@ -6,22 +6,30 @@ import {
   deletePrincipal,
   deletePrincipalDocument,
   getPrincipalDossier,
+  listOutreachMailboxes,
   listPrincipals,
   updatePrincipal,
   type PrincipalPayload,
 } from "../api/client";
 import PrincipalDocuments from "../components/PrincipalDocuments";
 import { Badge, Button, Card, EmptyState, Loading, PageHeader } from "../components/ui";
-import type { Principal } from "../types";
+import type { OutreachMailbox, Principal } from "../types";
 
 interface FormState {
   name: string;
   linkedin_url: string;
   phone: string;
   document_focus: string;
+  outreach_mailbox_id: string;
 }
 
-const EMPTY: FormState = { name: "", linkedin_url: "", phone: "", document_focus: "" };
+const EMPTY: FormState = {
+  name: "",
+  linkedin_url: "",
+  phone: "",
+  document_focus: "",
+  outreach_mailbox_id: "",
+};
 
 function fromPrincipal(p: Principal): FormState {
   return {
@@ -29,6 +37,7 @@ function fromPrincipal(p: Principal): FormState {
     linkedin_url: p.linkedin_url ?? "",
     phone: p.phone ?? "",
     document_focus: p.document_focus ?? "",
+    outreach_mailbox_id: p.outreach_mailbox_id ?? "",
   };
 }
 
@@ -38,6 +47,7 @@ function toPayload(f: FormState): PrincipalPayload {
     linkedin_url: f.linkedin_url,
     phone: f.phone,
     document_focus: f.document_focus || undefined,
+    outreach_mailbox_id: f.outreach_mailbox_id || undefined,
   };
 }
 
@@ -46,7 +56,8 @@ function principalFormValid(f: FormState): boolean {
   return (
     name.split(/\s+/).length >= 2 &&
     f.linkedin_url.trim().includes("linkedin.com") &&
-    f.phone.trim().length > 0
+    f.phone.trim().length > 0 &&
+    f.outreach_mailbox_id.trim().length > 0
   );
 }
 
@@ -57,6 +68,46 @@ function initials(name: string): string {
     .slice(0, 2)
     .map((w) => w[0]?.toUpperCase() ?? "")
     .join("");
+}
+
+function MailboxSelect({
+  value,
+  onChange,
+  mailboxes,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  mailboxes: OutreachMailbox[];
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-700">Send outreach from</span>
+      <p className="mt-0.5 text-xs text-slate-400">
+        Outlook and Gmail can both be used — pick the mailbox for this principal.
+      </p>
+      <select
+        className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-200"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <option value="">Select a mailbox…</option>
+        {mailboxes.map((m) => (
+          <option key={m.id} value={m.id} disabled={!m.configured}>
+            {m.label}
+            {!m.configured ? " (not configured)" : ""}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function useOutreachMailboxes() {
+  return useQuery({
+    queryKey: ["outreach-mailboxes"],
+    queryFn: listOutreachMailboxes,
+    staleTime: 60_000,
+  });
 }
 
 function Field({
@@ -167,6 +218,7 @@ function PrincipalProfile({
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [expandedDoc, setExpandedDoc] = useState<number | null>(null);
   const [form, setForm] = useState<FormState>(() => fromPrincipal(principal));
+  const { data: mailboxes = [] } = useOutreachMailboxes();
 
   useEffect(() => {
     setForm(fromPrincipal(principal));
@@ -243,6 +295,11 @@ function PrincipalProfile({
                   placeholder="e.g. AI Engineering"
                   multiline
                 />
+                <MailboxSelect
+                  value={form.outreach_mailbox_id}
+                  onChange={set("outreach_mailbox_id")}
+                  mailboxes={mailboxes}
+                />
                 <div className="flex gap-2">
                   <Button
                     onClick={() => save.mutate()}
@@ -300,6 +357,24 @@ function PrincipalProfile({
                     files.
                   </p>
                 )}
+                {(() => {
+                  const mb = mailboxes.find((m) => m.id === principal.outreach_mailbox_id);
+                  return (
+                    <p className="mt-3 text-sm text-slate-600">
+                      <span className="font-semibold text-slate-800">Send from:</span>{" "}
+                      {mb ? (
+                        <>
+                          {mb.label}{" "}
+                          <span className="text-slate-400">({mb.address})</span>
+                        </>
+                      ) : principal.outreach_mailbox_id ? (
+                        principal.outreach_mailbox_id
+                      ) : (
+                        <span className="text-amber-700">Not set — edit to choose a mailbox</span>
+                      )}
+                    </p>
+                  );
+                })()}
               </>
             )}
           </div>
@@ -525,6 +600,7 @@ function NewPrincipalForm({
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState<FormState>(EMPTY);
+  const { data: mailboxes = [] } = useOutreachMailboxes();
 
   const create = useMutation({
     mutationFn: () => createPrincipal(toPayload(form)),
@@ -538,7 +614,7 @@ function NewPrincipalForm({
     <Card className="p-5">
       <h2 className="text-lg font-semibold text-slate-900">New principal</h2>
       <p className="mt-1 text-sm text-slate-500">
-        Full name, LinkedIn, and phone are required for email signatures and outreach.
+        Full name, LinkedIn, phone, and send-from mailbox are required for outreach.
       </p>
       <div className="mt-5 space-y-4">
         <Field
@@ -567,6 +643,11 @@ function NewPrincipalForm({
           onChange={(v) => setForm((f) => ({ ...f, document_focus: v }))}
           placeholder="e.g. AI Engineering"
           multiline
+        />
+        <MailboxSelect
+          value={form.outreach_mailbox_id}
+          onChange={(v) => setForm((f) => ({ ...f, outreach_mailbox_id: v }))}
+          mailboxes={mailboxes}
         />
       </div>
       <div className="mt-5 flex gap-2">

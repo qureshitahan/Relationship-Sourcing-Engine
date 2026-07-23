@@ -59,6 +59,10 @@ class Principal(Base, TimestampMixin):
     # looking like spam). Enforced by the agent's send step.
     mailbox_daily_cap: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
 
+    # Which configured outreach mailbox to send from (Outlook or Gmail).
+    # See email_providers.mailboxes — e.g. galaxy_outlook, tekhqs_dalbir, tekhqs_taha.
+    outreach_mailbox_id: Mapped[Optional[str]] = mapped_column(String(64))
+
     search_definitions = relationship(
         "SearchDefinition", back_populates="principal", cascade="all, delete-orphan"
     )

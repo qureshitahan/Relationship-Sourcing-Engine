@@ -69,6 +69,7 @@ export interface PrincipalPayload {
   opportunity_types?: string[];
   value_props?: string[];
   is_active?: boolean;
+  outreach_mailbox_id?: string;
 }
 export const listPrincipals = (params: Record<string, unknown> = {}) =>
   api.get<Page<Principal>>("/api/principals", { params }).then((r) => r.data);
@@ -80,6 +81,12 @@ export const updatePrincipal = (id: number, payload: PrincipalPayload) =>
   api.put<Principal>(`/api/principals/${id}`, payload).then((r) => r.data);
 export const deletePrincipal = (id: number) =>
   api.delete(`/api/principals/${id}`).then((r) => r.data);
+export const listOutreachMailboxes = () =>
+  api
+    .get<{ items: import("../types").OutreachMailbox[] }>(
+      "/api/principals/outreach-mailboxes"
+    )
+    .then((r) => r.data.items);
 
 // --- Principal context documents ---
 export const listPrincipalDocuments = (id: number) =>
