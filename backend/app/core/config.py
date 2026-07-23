@@ -97,10 +97,15 @@ class Settings(BaseSettings):
     zoominfo_api_key: str = ""
 
     # --- Email ---
-    # Provider: stub | microsoft_graph | outlook (alias) | postmark | sendgrid
+    # Provider: stub | microsoft_graph | outlook (alias) | gmail | google | postmark | sendgrid
     email_provider: str = "stub"
     postmark_server_token: str = ""
     sendgrid_api_key: str = ""
+    # Gmail / Google Workspace (used when email_provider=gmail). SMTP send +
+    # IMAP reply tracking via an App Password (no OAuth). Blank = inactive, so
+    # this has no effect on existing (Graph/stub) deployments.
+    gmail_address: str = ""
+    gmail_app_password: str = ""
     outreach_from_email: str = "dalbir.bains@galaxypharma.net"
     outreach_from_name: str = "Dalbir Bains"
     # Appended to outreach email signatures when the principal has no linkedin_url set.

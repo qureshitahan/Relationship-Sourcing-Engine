@@ -6,6 +6,7 @@ so the approval/send workflow can be built safely before wiring a real provider.
 """
 from app.core.config import settings
 from app.services.email_providers.base import EmailProvider, SendResult
+from app.services.email_providers.gmail import GmailEmailProvider
 from app.services.email_providers.microsoft_graph import MicrosoftGraphEmailProvider
 from app.services.email_providers.stub import StubEmailProvider
 
@@ -13,6 +14,9 @@ _PROVIDERS = {
     "stub": StubEmailProvider,
     "microsoft_graph": MicrosoftGraphEmailProvider,
     "outlook": MicrosoftGraphEmailProvider,
+    # Gmail / Google Workspace (SMTP send + IMAP reply tracking).
+    "gmail": GmailEmailProvider,
+    "google": GmailEmailProvider,
 }
 
 
