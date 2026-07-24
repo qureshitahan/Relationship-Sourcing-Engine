@@ -7,6 +7,11 @@ const NAV_SECTIONS = [
     items: [
       { to: "/", label: "Dashboard", end: true },
       { to: "/agent", label: "Campaigns", hint: "Autonomous daily outreach" },
+      {
+        to: "/bulk",
+        label: "Send bulk emails",
+        hint: "Paste a list, draft, review & send",
+      },
       { to: "/guide", label: "How this works", hint: "Guided tour for new users" },
     ],
   },

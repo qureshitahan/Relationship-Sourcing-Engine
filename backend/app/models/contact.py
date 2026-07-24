@@ -56,6 +56,14 @@ class Contact(Base, TimestampMixin):
     variant_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("agent_variants.id"), index=True
     )
+    # Set when the person was pasted into a bulk email campaign instead of being
+    # discovered. These are excluded from the Prospects sheet by default.
+    bulk_campaign_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("bulk_campaigns.id"), index=True
+    )
+    # Free-text context about this person (e.g. "met at the FTA conference"),
+    # used to personalize outreach when no research insight exists.
+    notes: Mapped[Optional[str]] = mapped_column(Text)
 
     # Confidence that this is a real, reachable, relevant contact (0-100).
     confidence_score: Mapped[Optional[float]] = mapped_column(Float)

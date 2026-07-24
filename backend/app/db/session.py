@@ -74,6 +74,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "phone_reveal_status": "VARCHAR(32)",
         "external_id": "VARCHAR(255)",
         "campaign_id": "INTEGER",
+        "bulk_campaign_id": "INTEGER",
+        "notes": "TEXT",
     },
     "relevance_insights": {
         "snapshot": "TEXT",
@@ -102,6 +104,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "approved_at": "DATETIME",
         # Campaign scoping + A/B copy / send-time learning.
         "campaign_id": "INTEGER",
+        "bulk_campaign_id": "INTEGER",
         "copy_variant_id": "INTEGER",
         "send_bucket_index": "INTEGER",
     },

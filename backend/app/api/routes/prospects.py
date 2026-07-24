@@ -85,6 +85,7 @@ def list_prospects(
     company_id: Optional[int] = None,
     discovery_run_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
+    bulk_campaign_id: Optional[int] = None,
     role_category: Optional[str] = None,
     status: Optional[str] = None,
     approved: Optional[bool] = None,
@@ -104,6 +105,12 @@ def list_prospects(
         filters.append(Contact.discovery_run_id == discovery_run_id)
     if campaign_id is not None:
         filters.append(Contact.campaign_id == campaign_id)
+    # People pasted into a bulk campaign were never discovered or researched, so
+    # they'd only be noise on the prospect sheet unless explicitly asked for.
+    if bulk_campaign_id is not None:
+        filters.append(Contact.bulk_campaign_id == bulk_campaign_id)
+    else:
+        filters.append(Contact.bulk_campaign_id.is_(None))
     if role_category:
         filters.append(Contact.role_category == role_category)
     if status:

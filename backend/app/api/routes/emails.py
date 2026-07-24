@@ -67,6 +67,7 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
     return EmailDraftOut(
         id=draft.id,
         principal_id=draft.principal_id,
+        bulk_campaign_id=draft.bulk_campaign_id,
         company_id=draft.company_id,
         contact_id=draft.contact_id,
         insight_id=draft.insight_id,
@@ -123,6 +124,7 @@ def list_emails(
     contact_id: Optional[int] = None,
     principal_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
+    bulk_campaign_id: Optional[int] = None,
     discovery_run_id: Optional[int] = None,
     limit: int = Query(50, le=1000),
     offset: int = 0,
@@ -150,6 +152,9 @@ def list_emails(
     if campaign_id is not None:
         query = query.where(EmailDraft.campaign_id == campaign_id)
         count_query = count_query.where(EmailDraft.campaign_id == campaign_id)
+    if bulk_campaign_id is not None:
+        query = query.where(EmailDraft.bulk_campaign_id == bulk_campaign_id)
+        count_query = count_query.where(EmailDraft.bulk_campaign_id == bulk_campaign_id)
     query = query.order_by(EmailDraft.created_at.desc()).limit(limit).offset(offset)
     items = db.execute(query).scalars().all()
     total = db.execute(count_query).scalar_one()
@@ -245,6 +250,33 @@ def generate_draft(payload: EmailGenerateRequest, db: Session = Depends(get_db))
     return _draft_out(db, draft)
 
 
+def _refresh_bulk_draft(db: Session, draft: EmailDraft) -> EmailDraft:
+    """Rewrite one bulk email from its campaign brief (no principal, no insight)."""
+    from app.models.bulk_campaign import BulkCampaign
+    from app.services.bulk_email.drafter import build_email
+    from app.services.bulk_email.runner import (
+        campaign_signature,
+        recipient_payload,
+        sender_context,
+    )
+
+    campaign = db.get(BulkCampaign, draft.bulk_campaign_id)
+    contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
+    if campaign is None or contact is None:
+        raise HTTPException(status_code=404, detail="Bulk campaign or recipient not found")
+    if not (campaign.purpose or "").strip():
+        raise HTTPException(
+            status_code=400, detail="This bulk campaign has no brief to write from yet."
+        )
+    draft.subject, draft.body = build_email(
+        sender=sender_context(campaign),
+        purpose=campaign.purpose,
+        recipient=recipient_payload(db, contact),
+        signature=campaign_signature(campaign),
+    )
+    return draft
+
+
 def _refresh_draft_content(db: Session, draft: EmailDraft) -> EmailDraft:
     """Regenerate subject/body for an editable draft (per-person, insight-grounded)."""
     if draft.status in (EmailStatus.SENT, EmailStatus.REPLIED, EmailStatus.SCHEDULED):
@@ -252,6 +284,8 @@ def _refresh_draft_content(db: Session, draft: EmailDraft) -> EmailDraft:
             status_code=400,
             detail="Cannot regenerate sent, replied, or scheduled emails.",
         )
+    if draft.bulk_campaign_id:
+        return _refresh_bulk_draft(db, draft)
     principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
     contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
     if not principal or not contact:

@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     agent,
+    bulk_emails,
     calls,
     campaigns,
     discovery,
@@ -28,6 +29,7 @@ api_router.include_router(organizations.router)
 api_router.include_router(prospects.router)
 api_router.include_router(insights.router)
 api_router.include_router(emails.router)
+api_router.include_router(bulk_emails.router)
 api_router.include_router(linkedin.router)
 api_router.include_router(calls.router)
 api_router.include_router(webhooks.router)

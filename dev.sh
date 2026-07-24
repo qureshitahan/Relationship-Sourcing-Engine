@@ -14,7 +14,9 @@ if [ ! -d ".venv" ]; then
   ./.venv/bin/pip install --quiet -r requirements.txt
 fi
 echo "Starting backend on http://localhost:8000 ..."
-./.venv/bin/uvicorn app.main:app --reload --port 8000 &
+# Invoked via `python -m` so a stale venv shebang (e.g. after moving the
+# project directory) doesn't break the launcher.
+./.venv/bin/python -m uvicorn app.main:app --reload --port 8000 &
 BACKEND_PID=$!
 
 # --- Frontend ---

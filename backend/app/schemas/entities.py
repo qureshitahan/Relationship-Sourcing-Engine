@@ -172,6 +172,8 @@ class RelevanceInsightOut(ORMModel):
 class EmailDraftOut(ORMModel):
     id: int
     principal_id: Optional[int] = None
+    # Set when the email came from a bulk campaign instead of an agent campaign.
+    bulk_campaign_id: Optional[int] = None
     company_id: Optional[int] = None
     contact_id: Optional[int] = None
     insight_id: Optional[int] = None
@@ -450,6 +452,66 @@ class CampaignProspectsOut(BaseModel):
     campaign_id: int
     items: List[CampaignProspectOut]
     total: int = 0
+
+
+class BulkChatMessageOut(ORMModel):
+    """One turn of a bulk campaign chat."""
+
+    id: int
+    role: str
+    content: str
+    meta: Optional[dict] = None
+    created_at: datetime
+
+
+class BulkRecipientOut(BaseModel):
+    """A pasted recipient plus the state of the email written to them."""
+
+    contact_id: int
+    name: str
+    email: Optional[str] = None
+    title: Optional[str] = None
+    company_name: Optional[str] = None
+    notes: Optional[str] = None
+    draft_id: Optional[int] = None
+    draft_status: Optional[str] = None
+    subject: Optional[str] = None
+    sent_at: Optional[datetime] = None
+    replied_at: Optional[datetime] = None
+    reply_snippet: Optional[str] = None
+    open_count: int = 0
+
+
+class BulkCampaignOut(BaseModel):
+    """Header + counters for one bulk email campaign."""
+
+    id: int
+    name: str
+    mailbox_id: Optional[str] = None
+    mailbox_label: Optional[str] = None
+    from_email: Optional[str] = None
+    from_name: Optional[str] = None
+    status: str
+    purpose: Optional[str] = None
+    signature: Optional[str] = None
+    recipients: int = 0
+    drafted: int = 0
+    approved: int = 0
+    sent: int = 0
+    replied: int = 0
+    progress_total: int = 0
+    progress_done: int = 0
+    last_error: Optional[str] = None
+    created_at: datetime
+
+
+class BulkCampaignListOut(BaseModel):
+    items: List[BulkCampaignOut]
+
+
+class BulkCampaignDetailOut(BulkCampaignOut):
+    messages: List[BulkChatMessageOut] = []
+    recipients_pending_draft: int = 0
 
 
 class AgentPlaybookOut(ORMModel):

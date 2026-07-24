@@ -33,6 +33,7 @@ frontend/.vite/
 .DS_Store
 .idea/
 *.log
+.playwright-mcp/
 
 # Deploy artifacts (rebuild with deploy/build-zips.sh)
 deploy/artifacts/

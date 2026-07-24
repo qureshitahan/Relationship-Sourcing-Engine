@@ -16,6 +16,8 @@ import Emails from "./pages/Emails";
 import LinkedIn from "./pages/LinkedIn";
 import Conversations from "./pages/Conversations";
 import Agent from "./pages/Agent";
+import BulkEmails from "./pages/BulkEmails";
+import BulkCampaignPage from "./pages/BulkCampaignPage";
 import CampaignWizard from "./pages/CampaignWizard";
 import CampaignDashboard from "./pages/CampaignDashboard";
 import Calls from "./pages/Calls";
@@ -35,6 +37,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="agent" element={<Agent />} />
             <Route path="campaigns/new" element={<CampaignWizard />} />
             <Route path="campaigns/:id" element={<CampaignDashboard />} />
+            <Route path="bulk" element={<BulkEmails />} />
+            <Route path="bulk/:id" element={<BulkCampaignPage />} />
             <Route path="guide" element={<Guide />} />
             <Route path="principals" element={<Principals />} />
             <Route path="discover" element={<Discover />} />

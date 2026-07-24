@@ -6,6 +6,9 @@ import type {
   AgentPlaybook,
   AgentRun,
   AgentVariantsResponse,
+  BulkCampaign,
+  BulkCampaignDetail,
+  BulkRecipient,
   CampaignCreatePayload,
   CampaignDashboard,
   CampaignDetail,
@@ -327,6 +330,7 @@ export interface EmailFilters {
   contact_id?: number;
   principal_id?: number;
   campaign_id?: number;
+  bulk_campaign_id?: number;
   discovery_run_id?: number;
   limit?: number;
   offset?: number;
@@ -388,6 +392,51 @@ export const listMailboxes = () =>
   api
     .get<{ mailboxes: Mailbox[] }>("/api/emails/mailboxes")
     .then((r) => r.data.mailboxes);
+
+// --- Bulk email campaigns ---
+export const listBulkCampaigns = () =>
+  api
+    .get<{ items: BulkCampaign[] }>("/api/bulk-emails")
+    .then((r) => r.data.items);
+export const createBulkCampaign = (payload: { name: string; mailbox_id: string }) =>
+  api.post<BulkCampaignDetail>("/api/bulk-emails", payload).then((r) => r.data);
+export const getBulkCampaign = (id: number) =>
+  api.get<BulkCampaignDetail>(`/api/bulk-emails/${id}`).then((r) => r.data);
+export const updateBulkCampaign = (
+  id: number,
+  payload: {
+    name?: string;
+    mailbox_id?: string;
+    purpose?: string | null;
+    signature?: string | null;
+  }
+) => api.patch<BulkCampaignDetail>(`/api/bulk-emails/${id}`, payload).then((r) => r.data);
+export const sendBulkChat = (id: number, message: string) =>
+  api
+    .post<BulkCampaignDetail>(
+      `/api/bulk-emails/${id}/chat`,
+      { message },
+      { timeout: 300000 }
+    )
+    .then((r) => r.data);
+export const startBulkDrafting = (id: number, regenerate = false) =>
+  api
+    .post<BulkCampaignDetail>(`/api/bulk-emails/${id}/draft`, { regenerate })
+    .then((r) => r.data);
+export const startBulkSending = (id: number, draftIds?: number[]) =>
+  api
+    .post<BulkCampaignDetail>(`/api/bulk-emails/${id}/send`, {
+      draft_ids: draftIds ?? null,
+    })
+    .then((r) => r.data);
+export const cancelBulkJob = (id: number) =>
+  api.post<BulkCampaignDetail>(`/api/bulk-emails/${id}/cancel`).then((r) => r.data);
+export const listBulkRecipients = (id: number) =>
+  api.get<BulkRecipient[]>(`/api/bulk-emails/${id}/recipients`).then((r) => r.data);
+export const removeBulkRecipient = (id: number, contactId: number) =>
+  api.delete(`/api/bulk-emails/${id}/recipients/${contactId}`).then(() => undefined);
+export const deleteBulkCampaign = (id: number) =>
+  api.delete(`/api/bulk-emails/${id}`).then(() => undefined);
 
 // --- LinkedIn outreach ---
 export type LinkedInFilters = {

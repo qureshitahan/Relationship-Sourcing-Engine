@@ -180,6 +180,7 @@ export interface RelevanceInsight {
 export interface EmailDraft {
   id: number;
   principal_id?: number | null;
+  bulk_campaign_id?: number | null;
   company_id?: number | null;
   contact_id?: number | null;
   insight_id?: number | null;
@@ -217,6 +218,58 @@ export interface Mailbox {
   from_email: string;
   from_name?: string;
   provider: string;
+}
+
+// --- Bulk email campaigns (pasted recipient list + chat brief) ---
+export interface BulkCampaign {
+  id: number;
+  name: string;
+  mailbox_id?: string | null;
+  mailbox_label?: string | null;
+  from_email?: string | null;
+  from_name?: string | null;
+  /** collecting | drafting | ready | sending | sent */
+  status: string;
+  purpose?: string | null;
+  signature?: string | null;
+  recipients: number;
+  drafted: number;
+  approved: number;
+  sent: number;
+  replied: number;
+  progress_total: number;
+  progress_done: number;
+  last_error?: string | null;
+  created_at: string;
+}
+
+export interface BulkChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  meta?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface BulkCampaignDetail extends BulkCampaign {
+  messages: BulkChatMessage[];
+  recipients_pending_draft: number;
+}
+
+export interface BulkRecipient {
+  contact_id: number;
+  name: string;
+  email?: string | null;
+  title?: string | null;
+  company_name?: string | null;
+  notes?: string | null;
+  draft_id?: number | null;
+  draft_status?: string | null;
+  subject?: string | null;
+  sent_at?: string | null;
+  replied_at?: string | null;
+  reply_snippet?: string | null;
+  open_count: number;
 }
 
 export interface LinkedInMessage {

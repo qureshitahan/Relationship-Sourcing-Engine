@@ -23,6 +23,11 @@ class EmailDraft(Base, TimestampMixin):
     # The campaign (AgentConfig) this draft belongs to. Lets sends, replies, and
     # per-campaign dashboards scope to one campaign.
     campaign_id: Mapped[Optional[int]] = mapped_column(ForeignKey("agent_configs.id"), index=True)
+    # Set instead of ``campaign_id`` when the email came from a bulk campaign
+    # (pasted recipient list + chat brief) rather than an agent campaign.
+    bulk_campaign_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("bulk_campaigns.id"), index=True
+    )
     company_id: Mapped[Optional[int]] = mapped_column(ForeignKey("companies.id"), index=True)
     contact_id: Mapped[Optional[int]] = mapped_column(ForeignKey("contacts.id"), index=True)
     insight_id: Mapped[Optional[int]] = mapped_column(ForeignKey("relevance_insights.id"), index=True)

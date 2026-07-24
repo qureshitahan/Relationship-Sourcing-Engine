@@ -328,14 +328,9 @@ export default function ProspectDetail() {
     principalId || insights?.[0]?.principal_id || principals?.items[0]?.id;
 
   const { data: emailDrafts } = useQuery({
-    queryKey: ["emails", "prospect", prospectId, effectivePrincipalId],
-    queryFn: () =>
-      listEmails({
-        contact_id: prospectId,
-        principal_id: Number(effectivePrincipalId),
-        limit: 25,
-      }),
-    enabled: !!effectivePrincipalId && !!prospectId,
+    queryKey: ["emails", "prospect", prospectId],
+    queryFn: () => listEmails({ contact_id: prospectId, limit: 50 }),
+    enabled: !!prospectId,
   });
 
   const ok = (msg: string) => {
@@ -475,10 +470,16 @@ export default function ProspectDetail() {
   const hasInsight = Boolean(insights && insights.length > 0);
   const hasEmail = Boolean(prospect.email);
 
-  // Conversation: oldest → newest, like an email thread.
-  const thread = [...(emailDrafts?.items ?? [])].sort(
-    (a, b) => +new Date(a.created_at) - +new Date(b.created_at)
-  );
+  // Conversation: oldest → newest, like an email thread. Bulk-campaign emails
+  // have no principal of their own, so they are always part of the thread.
+  const thread = [...(emailDrafts?.items ?? [])]
+    .filter(
+      (d) =>
+        d.bulk_campaign_id != null ||
+        !effectivePrincipalId ||
+        d.principal_id === Number(effectivePrincipalId)
+    )
+    .sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at));
   const engagement = engagementStatus(thread, hasEmail, hasInsight);
   const principalName =
     principals?.items.find((p) => p.id === Number(effectivePrincipalId))?.name || "You";

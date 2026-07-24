@@ -116,6 +116,16 @@ class EmailStatus:
     FOLLOW_UP_NEEDED = "follow_up_needed"
 
 
+class BulkCampaignStatus:
+    """Lifecycle of a pasted-list bulk email campaign."""
+
+    COLLECTING = "collecting"  # gathering recipients + brief in the chat
+    DRAFTING = "drafting"      # background job is writing the emails
+    READY = "ready"            # drafts written, awaiting review/approval
+    SENDING = "sending"        # background job is sending approved emails
+    SENT = "sent"              # everything drafted has been sent
+
+
 class CallStatus:
     QUEUED = "queued"
     APPROVED = "approved"

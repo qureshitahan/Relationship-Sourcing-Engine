@@ -348,6 +348,46 @@ class CampaignUpdateRequest(BaseModel):
     digest_recipients: Optional[List[str]] = None
 
 
+class BulkCampaignCreateRequest(BaseModel):
+    """Start a bulk email campaign: a name and the mailbox it sends from."""
+
+    name: str
+    mailbox_id: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return _require_non_empty(v, "Campaign name")
+
+    @field_validator("mailbox_id")
+    @classmethod
+    def validate_mailbox(cls, v: str) -> str:
+        return _require_non_empty(v, "Sending mailbox")
+
+
+class BulkCampaignUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    mailbox_id: Optional[str] = None
+    purpose: Optional[str] = None
+    signature: Optional[str] = None
+
+
+class BulkChatRequest(BaseModel):
+    """One user turn: pasted recipients, instructions, or both."""
+
+    message: str
+
+
+class BulkDraftRequest(BaseModel):
+    # Replace existing unsent drafts instead of only writing missing ones.
+    regenerate: bool = False
+
+
+class BulkSendRequest(BaseModel):
+    # Limit the send to specific drafts; omit to send every reviewed draft.
+    draft_ids: Optional[List[int]] = None
+
+
 class FollowupGenerateRequest(BaseModel):
     # Draft follow-ups for people with no reply this many days after the last send.
     days: int = 3
