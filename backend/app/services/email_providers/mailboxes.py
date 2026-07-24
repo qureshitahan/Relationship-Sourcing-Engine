@@ -73,6 +73,12 @@ def _parse_configured() -> List[Mailbox]:
     raw = (settings.outreach_mailboxes_env or "").strip()
     if not raw:
         return []
+    # Tolerate a value accidentally wrapped in surrounding quotes. In a .env file
+    # python-dotenv strips these, but Azure App Settings keep them literally —
+    # without this, the JSON would fail to parse and mailboxes would silently
+    # fall back to the single default sender.
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        raw = raw[1:-1].strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
