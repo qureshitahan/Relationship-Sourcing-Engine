@@ -202,11 +202,73 @@ export interface EmailDraft {
   last_opened_at?: string | null;
   principal_name?: string | null;
   from_email?: string | null;
+  from_mailbox?: string | null;
+  from_name?: string | null;
   contact_name?: string | null;
   contact_email?: string | null;
   contact_title?: string | null;
   company_name?: string | null;
   discovery_run_id?: number | null;
+}
+
+export interface Mailbox {
+  id: string;
+  label: string;
+  from_email: string;
+  from_name?: string;
+  provider: string;
+}
+
+export interface LinkedInMessage {
+  id: number;
+  principal_id?: number | null;
+  campaign_id?: number | null;
+  company_id?: number | null;
+  contact_id?: number | null;
+  insight_id?: number | null;
+  body: string;
+  invitation_note?: string | null;
+  status: string;
+  provider?: string | null;
+  network_distance?: string | null;
+  connected?: boolean;
+  public_identifier?: string | null;
+  provider_chat_id?: string | null;
+  approved_by?: string | null;
+  created_at: string;
+  invitation_sent_at?: string | null;
+  sent_at?: string | null;
+  replied_at?: string | null;
+  reply_snippet?: string | null;
+  reply_body?: string | null;
+  last_reply_check_at?: string | null;
+  last_status_check_at?: string | null;
+  error?: string | null;
+  principal_name?: string | null;
+  contact_name?: string | null;
+  contact_title?: string | null;
+  company_name?: string | null;
+  linkedin_url?: string | null;
+  discovery_run_id?: number | null;
+}
+
+export interface LinkedInAccount {
+  provider: string;
+  configured: boolean;
+  account_id?: string | null;
+}
+
+export interface LinkedInConnectedAccount {
+  id: string;
+  name?: string | null;
+  type?: string | null;
+  status?: string | null;
+}
+
+export interface LinkedInAccountsResponse {
+  provider: string;
+  active_account_id?: string | null;
+  accounts: LinkedInConnectedAccount[];
 }
 
 export interface Call {

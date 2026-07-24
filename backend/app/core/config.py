@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     # this has no effect on existing (Graph/stub) deployments.
     gmail_address: str = ""
     gmail_app_password: str = ""
+    # Optional multi-sender support: a JSON array of selectable mailboxes (see
+    # services/email_providers/mailboxes.py). Blank = single legacy sender built
+    # from email_provider + outreach_from_email, so existing behaviour is intact.
+    outreach_mailboxes_env: str = Field(
+        default="",
+        validation_alias=AliasChoices("outreach_mailboxes", "OUTREACH_MAILBOXES"),
+    )
     outreach_from_email: str = "dalbir.bains@galaxypharma.net"
     outreach_from_name: str = "Dalbir Bains"
     # Appended to outreach email signatures when the principal has no linkedin_url set.
@@ -122,6 +129,16 @@ class Settings(BaseSettings):
     microsoft_client_secret: str = ""
     # Mailbox UPN to send from (must match an M365 user in the tenant).
     microsoft_send_as_user: str = "dalbir.bains@galaxypharma.net"
+
+    # --- LinkedIn outreach (Unipile) ---
+    # Provider: stub | unipile  (stub never sends — safe default).
+    linkedin_provider: str = "stub"
+    unipile_api_key: str = ""
+    # The connected LinkedIn account id in Unipile to send from.
+    unipile_account_id: str = ""
+    # Unipile DSN as host:port (e.g. api28.unipile.com:15824). The base URL is
+    # built as https://{dsn}/api/v1.
+    unipile_dsn: str = ""
 
     # --- Voice (Vapi + ElevenLabs + Claude) ---
     # Provider: stub | vapi

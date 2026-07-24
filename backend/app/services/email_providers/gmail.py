@@ -49,11 +49,17 @@ TIMEOUT = 30.0
 class GmailEmailProvider(EmailProvider):
     name = "gmail"
 
-    def __init__(self) -> None:
-        # The authenticated mailbox we log in as and send from. Falls back to the
-        # generic outreach address so a single OUTREACH_FROM_EMAIL still works.
-        self.address = (settings.gmail_address or settings.outreach_from_email or "").strip()
-        self.app_password = (settings.gmail_app_password or "").strip()
+    def __init__(
+        self,
+        address: Optional[str] = None,
+        app_password: Optional[str] = None,
+    ) -> None:
+        # Per-mailbox creds when provided (multi-sender); otherwise fall back to
+        # the global GMAIL_* / OUTREACH_FROM_EMAIL settings (single-sender).
+        self.address = (
+            address or settings.gmail_address or settings.outreach_from_email or ""
+        ).strip()
+        self.app_password = (app_password or settings.gmail_app_password or "").strip()
 
     def _configured(self) -> bool:
         return bool(self.address and self.app_password)

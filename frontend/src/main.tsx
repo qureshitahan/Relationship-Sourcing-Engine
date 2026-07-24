@@ -13,6 +13,7 @@ import ProspectDetail from "./pages/ProspectDetail";
 import Organizations from "./pages/Organizations";
 import OrganizationDetail from "./pages/OrganizationDetail";
 import Emails from "./pages/Emails";
+import LinkedIn from "./pages/LinkedIn";
 import Conversations from "./pages/Conversations";
 import Agent from "./pages/Agent";
 import CampaignWizard from "./pages/CampaignWizard";
@@ -43,6 +44,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="organizations/:id" element={<OrganizationDetail />} />
             <Route path="outreach" element={<Conversations />} />
             <Route path="emails" element={<Emails />} />
+            <Route path="linkedin" element={<LinkedIn />} />
             <Route path="calls" element={<Calls />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

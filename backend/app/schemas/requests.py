@@ -182,6 +182,8 @@ class EmailGenerateRequest(BaseModel):
 class EmailUpdateRequest(BaseModel):
     subject: Optional[str] = None
     body: Optional[str] = None
+    # Selectable sending mailbox id (see email_providers/mailboxes.py).
+    from_mailbox: Optional[str] = None
 
 
 class EmailStatusRequest(BaseModel):
@@ -198,6 +200,42 @@ class EmailScheduleRequest(BaseModel):
 class EmailReplyRequest(BaseModel):
     # Plain-text reply to send to the prospect within the same thread.
     body: str
+
+
+class LinkedInGenerateRequest(BaseModel):
+    principal_id: int
+    contact_id: int
+    outreach_goal: Optional[str] = None
+    regenerate: bool = False
+
+
+class LinkedInGenerateRunRequest(BaseModel):
+    discovery_run_id: int
+    principal_id: Optional[int] = None
+    outreach_goal: Optional[str] = None
+
+
+class LinkedInUpdateRequest(BaseModel):
+    body: Optional[str] = None
+    invitation_note: Optional[str] = None
+
+
+class LinkedInStatusRequest(BaseModel):
+    status: str
+    approved_by: Optional[str] = "user"
+
+
+class LinkedInReplyRequest(BaseModel):
+    body: str
+
+
+class LinkedInConnectRequest(BaseModel):
+    # Optional label to identify the connection in Unipile.
+    name: Optional[str] = None
+
+
+class LinkedInSelectAccountRequest(BaseModel):
+    account_id: str
 
 
 class AgentRunRequest(BaseModel):

@@ -8,6 +8,7 @@ from app.api.routes import (
     discovery,
     emails,
     insights,
+    linkedin,
     organizations,
     principals,
     prospects,
@@ -27,6 +28,7 @@ api_router.include_router(organizations.router)
 api_router.include_router(prospects.router)
 api_router.include_router(insights.router)
 api_router.include_router(emails.router)
+api_router.include_router(linkedin.router)
 api_router.include_router(calls.router)
 api_router.include_router(webhooks.router)
 

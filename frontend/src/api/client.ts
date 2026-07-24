@@ -20,6 +20,10 @@ import type {
   EmailDraft,
   IngestSummary,
   IndexFileResult,
+  LinkedInAccount,
+  LinkedInAccountsResponse,
+  LinkedInMessage,
+  Mailbox,
   Organization,
   Page,
   ProviderHealth,
@@ -378,8 +382,85 @@ export const deleteEmail = (id: number) =>
   api.delete(`/api/emails/${id}`).then(() => undefined);
 export const updateEmail = (
   id: number,
-  payload: { subject?: string; body?: string }
+  payload: { subject?: string; body?: string; from_mailbox?: string | null }
 ) => api.patch<EmailDraft>(`/api/emails/${id}`, payload).then((r) => r.data);
+export const listMailboxes = () =>
+  api
+    .get<{ mailboxes: Mailbox[] }>("/api/emails/mailboxes")
+    .then((r) => r.data.mailboxes);
+
+// --- LinkedIn outreach ---
+export type LinkedInFilters = {
+  status?: string;
+  contact_id?: number;
+  principal_id?: number;
+  discovery_run_id?: number;
+  limit?: number;
+  offset?: number;
+};
+export const getLinkedInAccount = () =>
+  api.get<LinkedInAccount>("/api/linkedin/account").then((r) => r.data);
+export const listLinkedInAccounts = () =>
+  api.get<LinkedInAccountsResponse>("/api/linkedin/accounts").then((r) => r.data);
+export const createLinkedInConnectLink = (name?: string) =>
+  api
+    .post<{ url: string }>("/api/linkedin/connect-link", { name }, { timeout: 60000 })
+    .then((r) => r.data);
+export const selectLinkedInAccount = (accountId: string) =>
+  api
+    .post<{ active_account_id: string }>("/api/linkedin/select-account", {
+      account_id: accountId,
+    })
+    .then((r) => r.data);
+export const listLinkedInMessages = (params: LinkedInFilters = {}) =>
+  api.get<Page<LinkedInMessage>>("/api/linkedin", { params }).then((r) => r.data);
+export const generateLinkedIn = (payload: {
+  principal_id: number;
+  contact_id: number;
+  outreach_goal?: string;
+  regenerate?: boolean;
+}) =>
+  api
+    .post<LinkedInMessage>("/api/linkedin/generate", payload, { timeout: 120000 })
+    .then((r) => r.data);
+export const generateRunLinkedIn = (payload: {
+  discovery_run_id: number;
+  principal_id?: number;
+  outreach_goal?: string;
+}) =>
+  api
+    .post<{
+      discovery_run_id: number;
+      candidates: number;
+      generated: number;
+      skipped: number;
+      errors: string[];
+    }>("/api/linkedin/generate-run", payload, { timeout: 180000 })
+    .then((r) => r.data);
+export const updateLinkedIn = (
+  id: number,
+  payload: { body?: string; invitation_note?: string }
+) => api.patch<LinkedInMessage>(`/api/linkedin/${id}`, payload).then((r) => r.data);
+export const setLinkedInStatus = (id: number, status: string) =>
+  api
+    .post<LinkedInMessage>(`/api/linkedin/${id}/status`, { status })
+    .then((r) => r.data);
+export const sendLinkedIn = (id: number) =>
+  api.post<LinkedInMessage>(`/api/linkedin/${id}/send`, {}, { timeout: 120000 }).then((r) => r.data);
+export const replyLinkedIn = (id: number, body: string) =>
+  api
+    .post<LinkedInMessage>(`/api/linkedin/${id}/reply`, { body }, { timeout: 120000 })
+    .then((r) => r.data);
+export const deleteLinkedIn = (id: number) =>
+  api.delete(`/api/linkedin/${id}`).then(() => undefined);
+export const checkLinkedInUpdates = () =>
+  api
+    .post<{ supported: boolean; accepted: number; replied: number }>(
+      "/api/linkedin/check-updates",
+      {},
+      { timeout: 120000 }
+    )
+    .then((r) => r.data);
 export const setEmailStatus = (id: number, status: string) =>
   api.post<EmailDraft>(`/api/emails/${id}/status`, { status }).then((r) => r.data);
 export const sendEmail = (id: number) =>
