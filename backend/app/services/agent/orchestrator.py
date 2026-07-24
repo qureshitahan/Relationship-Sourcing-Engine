@@ -42,7 +42,7 @@ from app.models.search_definition import SearchDefinition
 from app.services.agent.planner import criteria_from_dict
 from app.services.audit import log_action
 from app.services.discovery import run_discovery
-from app.services.email_providers import get_email_provider, mailbox_for_principal
+from app.services.email_providers import get_email_provider
 from app.services.enrichment.base import DiscoveryCriteria
 from app.services.insights.engine import generate_insight, generate_outreach
 from app.services.outreach_eligibility import outreach_draft_blockers
@@ -922,8 +922,7 @@ def _send_digest(
     recipients = [r for r in (config.digest_recipients or []) if r and "@" in r]
     if not recipients:
         return
-    mailbox = mailbox_for_principal(principal)
-    if not mailbox.address and not settings.outreach_from_email:
+    if not settings.outreach_from_email:
         return
 
     people = (run.summary or {}).get("people") or []
@@ -1002,16 +1001,15 @@ def _send_digest(
     ]
     body = "\n".join(lines)
 
-    provider = get_email_provider(principal=principal)
-    mailbox = mailbox_for_principal(principal)
+    provider = get_email_provider()
     for to_email in recipients:
         try:
             provider.send(
                 to_email=to_email,
                 subject=subject,
                 body=body,
-                from_email=mailbox.address or settings.outreach_from_email,
-                from_name=mailbox.from_name or settings.outreach_from_name or "Sourcing Agent",
+                from_email=settings.outreach_from_email,
+                from_name=settings.outreach_from_name or "Sourcing Agent",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Digest send to %s failed: %s", to_email, exc)

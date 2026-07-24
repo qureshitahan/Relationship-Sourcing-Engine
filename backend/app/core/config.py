@@ -97,21 +97,10 @@ class Settings(BaseSettings):
     zoominfo_api_key: str = ""
 
     # --- Email ---
-    # Provider: stub | microsoft_graph | outlook (alias) | gmail | google | postmark | sendgrid
-    # Legacy global default when a principal has no outreach_mailbox_id.
+    # Provider: stub | microsoft_graph | outlook (alias) | postmark | sendgrid
     email_provider: str = "stub"
     postmark_server_token: str = ""
     sendgrid_api_key: str = ""
-    # Gmail / Google Workspace (legacy single-mailbox). Prefer per-mailbox
-    # GMAIL_APP_PASSWORD_TEKHQS_* + built-in catalog, or OUTREACH_MAILBOXES_JSON.
-    gmail_address: str = ""
-    gmail_app_password: str = ""
-    gmail_app_password_tekhqs_dalbir: str = ""
-    gmail_app_password_tekhqs_taha: str = ""
-    # Optional JSON array overriding the built-in mailbox catalog. See .env.example.
-    outreach_mailboxes_json: str = ""
-    # Default mailbox id for principals that have not chosen one yet.
-    default_outreach_mailbox_id: str = "galaxy_outlook"
     outreach_from_email: str = "dalbir.bains@galaxypharma.net"
     outreach_from_name: str = "Dalbir Bains"
     # Appended to outreach email signatures when the principal has no linkedin_url set.

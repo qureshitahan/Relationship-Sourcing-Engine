@@ -27,17 +27,7 @@ export interface Principal {
   opportunity_types?: string[] | null;
   value_props?: string[] | null;
   is_active: boolean;
-  outreach_mailbox_id?: string | null;
   created_at: string;
-}
-
-export interface OutreachMailbox {
-  id: string;
-  label: string;
-  provider: string;
-  address: string;
-  from_name: string;
-  configured: boolean;
 }
 
 export interface PrincipalDocument {

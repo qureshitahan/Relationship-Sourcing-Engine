@@ -15,7 +15,6 @@ from app.models.principal_document import PrincipalDocument
 from app.schemas.entities import Page, PrincipalOut
 from app.schemas.requests import PrincipalRequest
 from app.services.audit import log_action
-from app.services.email_providers import list_outreach_mailboxes
 from app.services.principal_docs import ingest_principal_docs
 from app.services.principal_docs.ingest import (
     SUPPORTED_SUFFIXES,
@@ -25,12 +24,6 @@ from app.services.principal_docs.ingest import (
 )
 
 router = APIRouter(prefix="/principals", tags=["principals"])
-
-
-@router.get("/outreach-mailboxes")
-def get_outreach_mailboxes():
-    """List outbound mailboxes principals can send from (Outlook + Gmail)."""
-    return {"items": [m.public_dict() for m in list_outreach_mailboxes()]}
 
 
 @router.get("", response_model=Page[PrincipalOut])
@@ -72,7 +65,6 @@ def create_principal(payload: PrincipalRequest, db: Session = Depends(get_db)):
         opportunity_types=payload.opportunity_types,
         value_props=payload.value_props,
         is_active=payload.is_active if payload.is_active is not None else True,
-        outreach_mailbox_id=payload.outreach_mailbox_id,
     )
     db.add(principal)
     db.flush()

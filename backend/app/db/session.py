@@ -66,7 +66,6 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "objective": "TEXT",
         "document_focus": "TEXT",
         "mailbox_daily_cap": "INTEGER DEFAULT 50",
-        "outreach_mailbox_id": "VARCHAR(64)",
     },
     "contacts": {
         "location": "VARCHAR(255)",

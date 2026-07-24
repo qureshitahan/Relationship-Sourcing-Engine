@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Build API + Web zip packages for Azure App Service manual upload.
-# Preferred path: merge to main → GitHub Actions auto-deploys (see deploy/README.md).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
