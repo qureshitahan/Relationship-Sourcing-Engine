@@ -1,0 +1,76 @@
+name: Deploy to Azure
+
+# Deploys both App Services whenever main changes (or when run manually).
+#   - backend  -> relationship-sourcing-api   (FastAPI, Oryx pip install on server)
+#   - frontend -> relationship-sourcing-web    (Vite build + Node/express host)
+#
+# One-time setup (see repo docs / the PR that added this):
+#   1. Each App Service -> Overview -> "Download publish profile".
+#   2. Repo -> Settings -> Secrets and variables -> Actions -> add:
+#        AZURE_WEBAPP_PUBLISH_PROFILE_API  = contents of the API app's profile
+#        AZURE_WEBAPP_PUBLISH_PROFILE_WEB  = contents of the web app's profile
+#   3. Each App Service must allow SCM basic-auth publishing (Configuration ->
+#      General settings -> "SCM Basic Auth Publishing" = On) for the profile to work.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  API_APP_NAME: relationship-sourcing-api
+  WEB_APP_NAME: relationship-sourcing-web
+  # The API's public URL, baked into the frontend build so it calls the right host.
+  API_BASE_URL: https://relationship-sourcing-api-dagshxhjachtgrfn.canadacentral-01.azurewebsites.net
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-api:
+    name: Deploy backend (API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The App Service runs Oryx build (pip install requirements.txt) on deploy,
+      # so we just ship the backend/ folder (app/ + requirements.txt at its root).
+      - name: Deploy to relationship-sourcing-api
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.API_APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_API }}
+          package: backend
+
+  deploy-web:
+    name: Deploy frontend (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ env.API_BASE_URL }}
+        run: |
+          npm ci
+          npm run build
+      - name: Assemble web host package (dist + express server)
+        run: |
+          mkdir -p web-package/dist
+          cp -r frontend/dist/* web-package/dist/
+          cp deploy/web-host/server.js web-package/server.js
+          cp deploy/web-host/package.json web-package/package.json
+      - name: Deploy to relationship-sourcing-web
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.WEB_APP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_WEB }}
+          package: web-package
