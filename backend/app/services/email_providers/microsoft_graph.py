@@ -313,25 +313,19 @@ class MicrosoftGraphEmailProvider(EmailProvider):
         if not token:
             return ReplyResult(found=False, error="Failed to obtain Graph access token.")
 
+        # Graph returns InefficientFilter when $filter combines from/conversationId
+        # with receivedDateTime AND $orderby receivedDateTime. Use a single
+        # receivedDateTime predicate (orderby-compatible), then match sender /
+        # conversation in Python.
         since_iso = since.strftime("%Y-%m-%dT%H:%M:%SZ")
         url = f"{GRAPH_BASE}/users/{self.send_as_user}/mailFolders/inbox/messages"
-        # Prefer matching the exact conversation when we captured it; otherwise
-        # fall back to sender + time window.
-        if conversation_id:
-            filter_expr = (
-                f"conversationId eq '{conversation_id}' and "
-                f"receivedDateTime ge {since_iso}"
-            )
-        else:
-            filter_expr = (
-                f"from/emailAddress/address eq '{to_email}' and "
-                f"receivedDateTime ge {since_iso}"
-            )
         params = {
-            "$filter": filter_expr,
-            "$top": "5",
+            "$filter": f"receivedDateTime ge {since_iso}",
+            "$top": "50",
             "$orderby": "receivedDateTime desc",
-            "$select": "bodyPreview,body,receivedDateTime,from,subject",
+            "$select": (
+                "bodyPreview,body,receivedDateTime,from,subject,conversationId"
+            ),
         }
         try:
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
@@ -357,11 +351,27 @@ class MicrosoftGraphEmailProvider(EmailProvider):
                 error=f"Graph API {resp.status_code}: {resp.text[:200]}",
             )
 
+        want_from = (to_email or "").strip().lower()
+        want_conv = (conversation_id or "").strip()
+        our_addr = (self.send_as_user or "").strip().lower()
+
         for msg in (resp.json() or {}).get("value", []):
-            sender = ((msg.get("from") or {}).get("emailAddress") or {}).get("address", "")
-            # When filtering by conversationId, ignore our own outbound copies.
-            if conversation_id and sender.lower() == (self.send_as_user or "").lower():
+            sender = (
+                ((msg.get("from") or {}).get("emailAddress") or {}).get("address") or ""
+            ).strip().lower()
+            if sender and sender == our_addr:
+                continue  # ignore our own copies in the inbox
+
+            conv = (msg.get("conversationId") or "").strip()
+            if want_conv:
+                if conv != want_conv:
+                    continue
+            elif want_from:
+                if sender != want_from:
+                    continue
+            else:
                 continue
+
             received_raw = msg.get("receivedDateTime")
             received_at = None
             if received_raw:
