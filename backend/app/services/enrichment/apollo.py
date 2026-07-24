@@ -438,6 +438,11 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
             detail["linkedin_url"] = contact.linkedin_url
         if contact.domain:
             detail["domain"] = contact.domain
+        # Apollo can match a name against an employer name when no domain or
+        # person id is known, which is the only handle we have on people typed
+        # out of a conference roster.
+        if contact.organization_name:
+            detail["organization_name"] = contact.organization_name
         return detail
 
     def _apply_match(self, contact: EnrichmentContact, match: Dict[str, Any]) -> None:

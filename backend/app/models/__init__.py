@@ -7,7 +7,7 @@ from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
 from app.models.agent_variant import AgentVariant
 from app.models.audit import AuditLog
-from app.models.bulk_campaign import BulkCampaign, BulkChatMessage
+from app.models.bulk_campaign import BulkCampaign, BulkChatMessage, BulkLookup
 from app.models.call import Call
 from app.models.company import Company
 from app.models.contact import Contact
@@ -31,6 +31,7 @@ __all__ = [
     "AuditLog",
     "BulkCampaign",
     "BulkChatMessage",
+    "BulkLookup",
     "Call",
     "Company",
     "Contact",

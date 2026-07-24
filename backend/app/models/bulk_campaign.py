@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import Boolean, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
-from app.models.enums import BulkCampaignStatus
+from app.models.enums import BulkCampaignStatus, BulkLookupStatus
 
 
 class BulkCampaign(Base, TimestampMixin):
@@ -49,6 +49,56 @@ class BulkCampaign(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="BulkChatMessage.id",
     )
+
+
+class BulkLookup(Base, TimestampMixin):
+    """The search for one pasted person's email address, and its evidence.
+
+    Pasting a conference roster gives names and job descriptions but rarely
+    addresses. Each of those people gets a placeholder ``Contact`` plus one of
+    these rows, which records who the web search decided they are, what Apollo
+    returned, and the sources behind it — so the user approves a proposal they
+    can actually check rather than an address that simply appeared.
+    """
+
+    __tablename__ = "bulk_lookups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("bulk_campaigns.id"), index=True, nullable=False
+    )
+    contact_id: Mapped[int] = mapped_column(
+        ForeignKey("contacts.id"), index=True, nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20), default=BulkLookupStatus.PENDING, index=True, nullable=False
+    )
+    # Exactly what the user pasted about this person, kept verbatim so the
+    # review screen can show the original next to the match.
+    source_text: Mapped[Optional[str]] = mapped_column(Text)
+
+    # What the web search concluded about who this person is.
+    resolved_name: Mapped[Optional[str]] = mapped_column(String(255))
+    resolved_title: Mapped[Optional[str]] = mapped_column(String(255))
+    resolved_org: Mapped[Optional[str]] = mapped_column(String(255))
+    resolved_domain: Mapped[Optional[str]] = mapped_column(String(255))
+    linkedin_url: Mapped[Optional[str]] = mapped_column(String(512))
+    location: Mapped[Optional[str]] = mapped_column(String(255))
+    # 0-1 self-reported certainty that this is the right person.
+    confidence: Mapped[Optional[float]] = mapped_column(Float)
+    # Why the lookup landed where it did (especially when ambiguous/not found).
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    # [{"title": ..., "url": ...}] the search actually used.
+    evidence: Mapped[Optional[list]] = mapped_column(JSON)
+
+    # The proposed address. Never copied onto the contact without approval.
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    # Apollo's verdict: verified | likely | guessed | unavailable | unknown.
+    email_status: Mapped[Optional[str]] = mapped_column(String(30))
+    # Set when the address was typed in by hand instead of found.
+    manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class BulkChatMessage(Base, TimestampMixin):

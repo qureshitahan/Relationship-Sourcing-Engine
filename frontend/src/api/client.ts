@@ -8,6 +8,7 @@ import type {
   AgentVariantsResponse,
   BulkCampaign,
   BulkCampaignDetail,
+  BulkLookup,
   BulkRecipient,
   CampaignCreatePayload,
   CampaignDashboard,
@@ -433,6 +434,30 @@ export const cancelBulkJob = (id: number) =>
   api.post<BulkCampaignDetail>(`/api/bulk-emails/${id}/cancel`).then((r) => r.data);
 export const listBulkRecipients = (id: number) =>
   api.get<BulkRecipient[]>(`/api/bulk-emails/${id}/recipients`).then((r) => r.data);
+export const startBulkLookup = (id: number, retryFailed = false) =>
+  api
+    .post<BulkCampaignDetail>(`/api/bulk-emails/${id}/lookup`, {
+      retry_failed: retryFailed,
+    })
+    .then((r) => r.data);
+export const listBulkLookups = (id: number) =>
+  api.get<BulkLookup[]>(`/api/bulk-emails/${id}/lookups`).then((r) => r.data);
+export const acceptBulkLookups = (id: number, lookupIds: number[]) =>
+  api
+    .post<BulkCampaignDetail>(`/api/bulk-emails/${id}/lookups/accept`, {
+      lookup_ids: lookupIds,
+    })
+    .then((r) => r.data);
+export const rejectBulkLookups = (id: number, lookupIds: number[]) =>
+  api
+    .post<BulkCampaignDetail>(`/api/bulk-emails/${id}/lookups/reject`, {
+      lookup_ids: lookupIds,
+    })
+    .then((r) => r.data);
+export const setBulkLookupEmail = (id: number, lookupId: number, email: string) =>
+  api
+    .patch<BulkCampaignDetail>(`/api/bulk-emails/${id}/lookups/${lookupId}`, { email })
+    .then((r) => r.data);
 export const removeBulkRecipient = (id: number, contactId: number) =>
   api.delete(`/api/bulk-emails/${id}/recipients/${contactId}`).then(() => undefined);
 export const deleteBulkCampaign = (id: number) =>

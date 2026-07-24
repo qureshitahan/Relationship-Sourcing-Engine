@@ -14,16 +14,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.bulk_campaign import BulkCampaign
+from app.models.bulk_campaign import BulkCampaign, BulkLookup
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
-from app.models.enums import BulkCampaignStatus, EmailStatus
+from app.models.enums import BulkCampaignStatus, BulkLookupStatus, EmailStatus
 from app.schemas.entities import (
     BulkCampaignDetailOut,
     BulkCampaignListOut,
     BulkCampaignOut,
     BulkChatMessageOut,
+    BulkLookupOut,
     BulkRecipientOut,
 )
 from app.schemas.requests import (
@@ -31,12 +32,17 @@ from app.schemas.requests import (
     BulkCampaignUpdateRequest,
     BulkChatRequest,
     BulkDraftRequest,
+    BulkLookupDecisionRequest,
+    BulkLookupEmailRequest,
+    BulkLookupRequest,
     BulkSendRequest,
 )
 from app.services.bulk_email.chat import handle_message
 from app.services.bulk_email.runner import (
     launch_drafting,
+    launch_lookup,
     launch_sending,
+    lookups_pending,
     recipients_needing_drafts,
 )
 from app.services.email_providers import list_mailboxes, resolve_mailbox
@@ -45,7 +51,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bulk-emails", tags=["bulk-emails"])
 
-_BUSY_STATUSES = (BulkCampaignStatus.DRAFTING, BulkCampaignStatus.SENDING)
+_BUSY_STATUSES = (
+    BulkCampaignStatus.DRAFTING,
+    BulkCampaignStatus.SENDING,
+    BulkCampaignStatus.LOOKING_UP,
+)
+# Lookups the user has not settled: they still cannot be emailed.
+_UNRESOLVED_LOOKUPS = (
+    BulkLookupStatus.PENDING,
+    BulkLookupStatus.FOUND,
+    BulkLookupStatus.NOT_FOUND,
+    BulkLookupStatus.AMBIGUOUS,
+    BulkLookupStatus.ERROR,
+)
 
 
 def _get_campaign(db: Session, campaign_id: int) -> BulkCampaign:
@@ -68,6 +86,12 @@ def _counts(db: Session, campaign_id: int) -> dict:
         .group_by(EmailDraft.status)
     ).all()
     by_status = {status: count for status, count in rows}
+    lookup_rows = db.execute(
+        select(BulkLookup.status, func.count())
+        .where(BulkLookup.campaign_id == campaign_id)
+        .group_by(BulkLookup.status)
+    ).all()
+    lookups = {status: count for status, count in lookup_rows}
     return {
         "recipients": recipients,
         "drafted": by_status.get(EmailStatus.DRAFT, 0),
@@ -75,6 +99,9 @@ def _counts(db: Session, campaign_id: int) -> dict:
         + by_status.get(EmailStatus.SCHEDULED, 0),
         "sent": by_status.get(EmailStatus.SENT, 0) + by_status.get(EmailStatus.REPLIED, 0),
         "replied": by_status.get(EmailStatus.REPLIED, 0),
+        "lookup_pending": lookups.get(BulkLookupStatus.PENDING, 0),
+        "lookup_found": lookups.get(BulkLookupStatus.FOUND, 0),
+        "needs_email": sum(lookups.get(status, 0) for status in _UNRESOLVED_LOOKUPS),
     }
 
 
@@ -239,9 +266,210 @@ def send_bulk_emails(
     return _detail_out(db, campaign)
 
 
+@router.post("/{campaign_id}/lookup", response_model=BulkCampaignDetailOut, status_code=202)
+def start_bulk_lookup(
+    campaign_id: int,
+    payload: BulkLookupRequest,
+    db: Session = Depends(get_db),
+):
+    """Search the web, then Apollo, for the addresses this list is missing.
+
+    Results are proposals: they are shown with their evidence and only reach a
+    recipient once the user accepts them.
+    """
+    campaign = _get_campaign(db, campaign_id)
+    if campaign.status in _BUSY_STATUSES:
+        raise HTTPException(
+            status_code=409, detail="This campaign is already running a job."
+        )
+    if not lookups_pending(db, campaign_id, retry_failed=payload.retry_failed):
+        raise HTTPException(
+            status_code=400, detail="There is nobody left to look up on this list."
+        )
+    campaign.status = BulkCampaignStatus.LOOKING_UP
+    campaign.last_error = None
+    db.commit()
+    launch_lookup(campaign_id, retry_failed=payload.retry_failed)
+    db.refresh(campaign)
+    return _detail_out(db, campaign)
+
+
+@router.get("/{campaign_id}/lookups", response_model=list[BulkLookupOut])
+def get_bulk_lookups(campaign_id: int, db: Session = Depends(get_db)):
+    """The review queue: everyone pasted without an address, and what we found."""
+    _get_campaign(db, campaign_id)
+    lookups = db.execute(
+        select(BulkLookup)
+        .where(BulkLookup.campaign_id == campaign_id)
+        .order_by(BulkLookup.id)
+    ).scalars().all()
+    if not lookups:
+        return []
+
+    contacts = {
+        c.id: c
+        for c in db.execute(
+            select(Contact).where(Contact.id.in_([l.contact_id for l in lookups]))
+        ).scalars().all()
+    }
+    company_ids = {c.company_id for c in contacts.values() if c.company_id}
+    companies = {
+        c.id: c.name
+        for c in (
+            db.execute(select(Company).where(Company.id.in_(company_ids))).scalars().all()
+            if company_ids
+            else []
+        )
+    }
+    out: list[BulkLookupOut] = []
+    for lookup in lookups:
+        contact = contacts.get(lookup.contact_id)
+        out.append(
+            BulkLookupOut(
+                id=lookup.id,
+                contact_id=lookup.contact_id,
+                status=lookup.status,
+                name=contact.name if contact else (lookup.resolved_name or "Unknown"),
+                source_text=lookup.source_text,
+                title=contact.title if contact else None,
+                company_name=companies.get(contact.company_id) if contact else None,
+                resolved_name=lookup.resolved_name,
+                resolved_title=lookup.resolved_title,
+                resolved_org=lookup.resolved_org,
+                resolved_domain=lookup.resolved_domain,
+                linkedin_url=lookup.linkedin_url,
+                location=lookup.location,
+                confidence=lookup.confidence,
+                reason=lookup.reason,
+                evidence=lookup.evidence,
+                email=lookup.email,
+                email_status=lookup.email_status,
+                manual=lookup.manual,
+                error=lookup.error,
+                created_at=lookup.created_at,
+            )
+        )
+    return out
+
+
+@router.post("/{campaign_id}/lookups/accept", response_model=BulkCampaignDetailOut)
+def accept_bulk_lookups(
+    campaign_id: int,
+    payload: BulkLookupDecisionRequest,
+    db: Session = Depends(get_db),
+):
+    """Take these proposed addresses: their people become sendable recipients."""
+    campaign = _get_campaign(db, campaign_id)
+    accepted = 0
+    for lookup in _lookups_by_id(db, campaign_id, payload.lookup_ids):
+        if not lookup.email:
+            continue
+        contact = db.get(Contact, lookup.contact_id)
+        if contact is None:
+            continue
+        _adopt_lookup(db, contact, lookup)
+        accepted += 1
+    if not accepted:
+        raise HTTPException(status_code=400, detail="None of those have an address yet.")
+    db.commit()
+    db.refresh(campaign)
+    return _detail_out(db, campaign)
+
+
+@router.post("/{campaign_id}/lookups/reject", response_model=BulkCampaignDetailOut)
+def reject_bulk_lookups(
+    campaign_id: int,
+    payload: BulkLookupDecisionRequest,
+    db: Session = Depends(get_db),
+):
+    """Dismiss these people: they stay on the list but are never emailed."""
+    campaign = _get_campaign(db, campaign_id)
+    for lookup in _lookups_by_id(db, campaign_id, payload.lookup_ids):
+        lookup.status = BulkLookupStatus.REJECTED
+    db.commit()
+    db.refresh(campaign)
+    return _detail_out(db, campaign)
+
+
+@router.patch("/{campaign_id}/lookups/{lookup_id}", response_model=BulkCampaignDetailOut)
+def set_bulk_lookup_email(
+    campaign_id: int,
+    lookup_id: int,
+    payload: BulkLookupEmailRequest,
+    db: Session = Depends(get_db),
+):
+    """Type in an address the search could not find, and accept it."""
+    campaign = _get_campaign(db, campaign_id)
+    email = (payload.email or "").strip()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="That isn't an email address.")
+    lookup = db.get(BulkLookup, lookup_id)
+    if lookup is None or lookup.campaign_id != campaign_id:
+        raise HTTPException(status_code=404, detail="Lookup not found")
+    contact = db.get(Contact, lookup.contact_id)
+    if contact is None:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    lookup.email = email
+    lookup.email_status = "provided"
+    lookup.manual = True
+    _adopt_lookup(db, contact, lookup)
+    db.commit()
+    db.refresh(campaign)
+    return _detail_out(db, campaign)
+
+
+def _lookups_by_id(
+    db: Session, campaign_id: int, lookup_ids: list[int]
+) -> list[BulkLookup]:
+    if not lookup_ids:
+        raise HTTPException(status_code=400, detail="No people were selected.")
+    return list(
+        db.execute(
+            select(BulkLookup).where(
+                BulkLookup.campaign_id == campaign_id,
+                BulkLookup.id.in_(lookup_ids),
+            )
+        ).scalars().all()
+    )
+
+
+def _adopt_lookup(db: Session, contact: Contact, lookup: BulkLookup) -> None:
+    """Copy an approved address (and what came with it) onto the contact."""
+    contact.email = lookup.email
+    contact.has_email = True
+    contact.email_status = lookup.email_status
+    if lookup.resolved_name and not lookup.manual:
+        contact.name = lookup.resolved_name
+    if lookup.resolved_title and not contact.title:
+        contact.title = lookup.resolved_title
+    if lookup.linkedin_url and not contact.linkedin_url:
+        contact.linkedin_url = lookup.linkedin_url
+    if lookup.location and not contact.location:
+        contact.location = lookup.location
+    if lookup.resolved_org and not contact.company_id:
+        contact.company_id = _company_id_for(db, lookup.resolved_org)
+    lookup.status = BulkLookupStatus.ACCEPTED
+
+
+def _company_id_for(db: Session, name: str) -> int:
+    normalized = name.strip().lower()
+    company = db.execute(
+        select(Company).where(Company.normalized_name == normalized)
+    ).scalars().first()
+    if company is None:
+        company = Company(
+            name=name.strip(),
+            normalized_name=normalized,
+            enrichment_source="bulk_lookup",
+        )
+        db.add(company)
+        db.flush()
+    return company.id
+
+
 @router.post("/{campaign_id}/cancel", response_model=BulkCampaignDetailOut)
 def cancel_bulk_job(campaign_id: int, db: Session = Depends(get_db)):
-    """Ask the running drafting/sending job to stop after the current email."""
+    """Ask the running job to stop after the person it is working on."""
     campaign = _get_campaign(db, campaign_id)
     if campaign.status not in _BUSY_STATUSES:
         raise HTTPException(status_code=400, detail="Nothing is running for this campaign.")
@@ -325,6 +553,10 @@ def remove_bulk_recipient(
         )
     for draft in drafts:
         db.delete(draft)
+    for lookup in db.execute(
+        select(BulkLookup).where(BulkLookup.contact_id == contact_id)
+    ).scalars().all():
+        db.delete(lookup)
     db.delete(contact)
     db.commit()
 
@@ -341,6 +573,10 @@ def delete_bulk_campaign(campaign_id: int, db: Session = Depends(get_db)):
         select(EmailDraft).where(EmailDraft.bulk_campaign_id == campaign_id)
     ).scalars().all():
         db.delete(draft)
+    for lookup in db.execute(
+        select(BulkLookup).where(BulkLookup.campaign_id == campaign_id)
+    ).scalars().all():
+        db.delete(lookup)
     for contact in db.execute(
         select(Contact).where(Contact.bulk_campaign_id == campaign_id)
     ).scalars().all():

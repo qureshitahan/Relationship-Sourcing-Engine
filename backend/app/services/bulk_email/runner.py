@@ -20,15 +20,29 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.bulk_campaign import BulkCampaign
+from app.models.bulk_campaign import BulkCampaign, BulkLookup
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
-from app.models.enums import AuditAction, BulkCampaignStatus, EmailStatus
+from app.models.enums import (
+    AuditAction,
+    BulkCampaignStatus,
+    BulkLookupStatus,
+    EmailStatus,
+)
 from app.services.audit import log_action
 from app.services.bulk_email.drafter import build_email, default_signature
+from app.services.bulk_email.resolver import (
+    Identity,
+    PersonQuery,
+    find_emails,
+    identify,
+    unsearchable_reason,
+)
 from app.services.email_providers import resolve_mailbox
+from app.services.enrichment.base import EnrichmentContact
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +64,18 @@ _LIVE_DRAFT_STATUSES = (
 
 
 def recipients_needing_drafts(db: Session, campaign_id: int) -> list[Contact]:
-    """Campaign recipients that have no email written for them yet."""
+    """Campaign recipients that have no email written for them yet.
+
+    People pasted without an address sit in the lookup queue instead: they are
+    only reachable once a found address has been accepted onto their contact.
+    """
     contacts = db.execute(
         select(Contact)
-        .where(Contact.bulk_campaign_id == campaign_id)
+        .where(
+            Contact.bulk_campaign_id == campaign_id,
+            Contact.email.is_not(None),
+            Contact.email != "",
+        )
         .order_by(Contact.id)
     ).scalars().all()
     drafted = set(
@@ -99,6 +121,33 @@ def launch_sending(campaign_id: int, draft_ids: Optional[list[int]] = None) -> N
         name=f"bulk-send-{campaign_id}",
         daemon=True,
     ).start()
+
+
+def launch_lookup(campaign_id: int, *, retry_failed: bool = False) -> None:
+    """Start hunting for the campaign's missing email addresses."""
+    threading.Thread(
+        target=_lookup_all,
+        args=(campaign_id, retry_failed),
+        name=f"bulk-lookup-{campaign_id}",
+        daemon=True,
+    ).start()
+
+
+def lookups_pending(db: Session, campaign_id: int, *, retry_failed: bool = False) -> list[BulkLookup]:
+    """Lookup rows still waiting to be searched for."""
+    statuses = [BulkLookupStatus.PENDING]
+    if retry_failed:
+        statuses += [BulkLookupStatus.ERROR, BulkLookupStatus.NOT_FOUND]
+    return list(
+        db.execute(
+            select(BulkLookup)
+            .where(
+                BulkLookup.campaign_id == campaign_id,
+                BulkLookup.status.in_(statuses),
+            )
+            .order_by(BulkLookup.id)
+        ).scalars().all()
+    )
 
 
 def recipient_payload(db: Session, contact: Contact) -> dict:
@@ -204,6 +253,149 @@ def _draft_all(campaign_id: int, regenerate: bool) -> None:
         _fail(db, campaign_id, str(exc))
     finally:
         db.close()
+
+
+def _lookup_all(campaign_id: int, retry_failed: bool) -> None:
+    """Identify each pending person on the web, then ask Apollo for an address."""
+    db = SessionLocal()
+    try:
+        campaign = db.get(BulkCampaign, campaign_id)
+        if campaign is None:
+            return
+        pending = lookups_pending(db, campaign_id, retry_failed=retry_failed)
+        if not pending:
+            _finish(db, campaign, _idle_status(campaign))
+            return
+
+        resume_status = _idle_status(campaign)
+        campaign.status = BulkCampaignStatus.LOOKING_UP
+        campaign.progress_total = len(pending)
+        campaign.progress_done = 0
+        campaign.cancel_requested = False
+        campaign.last_error = None
+        db.commit()
+
+        queries = {lookup.id: _person_query(db, lookup) for lookup in pending}
+        identities: dict[int, Identity] = {}
+        # People too thinly described to search for are settled here rather than
+        # being paid for and coming back empty.
+        searchable = {}
+        for lookup_id, query in queries.items():
+            refusal = unsearchable_reason(query)
+            if refusal:
+                identities[lookup_id] = Identity(ambiguous=True, reason=refusal)
+            else:
+                searchable[lookup_id] = query
+
+        done = len(identities)
+        campaign.progress_done = done
+        db.commit()
+        workers = max(1, settings.bulk_lookup_workers)
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {
+                pool.submit(identify, query): lookup_id
+                for lookup_id, query in searchable.items()
+            }
+            for future in as_completed(futures):
+                lookup_id = futures[future]
+                try:
+                    identities[lookup_id] = future.result()
+                except Exception as exc:  # noqa: BLE001 - record and carry on
+                    logger.warning("Identity lookup errored for %s: %s", lookup_id, exc)
+                    identities[lookup_id] = Identity(reason=str(exc))
+                done += 1
+                campaign.progress_done = done
+                db.commit()
+                if _cancelled(db, campaign):
+                    break
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        searched = [
+            (queries[lookup_id], identity) for lookup_id, identity in identities.items()
+        ]
+        matches = find_emails(searched)
+
+        for lookup in pending:
+            identity = identities.get(lookup.id)
+            if identity is None:
+                continue  # cancelled before this one was searched
+            _apply_identity(lookup, identity)
+            _apply_match(lookup, matches.get(lookup.id))
+        db.commit()
+
+        found = sum(1 for l in pending if l.status == BulkLookupStatus.FOUND)
+        log_action(
+            db,
+            AuditAction.ENRICHMENT,
+            entity_type="bulk_campaign",
+            entity_id=campaign_id,
+            summary=(
+                f"Looked up {len(identities)} pasted "
+                f"{'person' if len(identities) == 1 else 'people'} for campaign "
+                f"{campaign_id}: {found} address(es) found, awaiting review."
+            ),
+        )
+        _finish(db, campaign, resume_status)
+    except Exception as exc:  # noqa: BLE001 - never let the thread die silently
+        logger.exception("Bulk lookup failed for campaign %s", campaign_id)
+        _fail(db, campaign_id, str(exc))
+    finally:
+        db.close()
+
+
+def _person_query(db: Session, lookup: BulkLookup) -> PersonQuery:
+    contact = db.get(Contact, lookup.contact_id)
+    company = (
+        db.get(Company, contact.company_id) if contact and contact.company_id else None
+    )
+    return PersonQuery(
+        lookup_id=lookup.id,
+        name=(contact.name if contact else lookup.resolved_name) or "",
+        title=contact.title if contact else None,
+        company=company.name if company else None,
+        source_text=lookup.source_text,
+    )
+
+
+def _apply_identity(lookup: BulkLookup, identity: Identity) -> None:
+    lookup.resolved_name = identity.full_name or lookup.resolved_name
+    lookup.resolved_title = identity.title
+    lookup.resolved_org = identity.organization
+    lookup.resolved_domain = identity.domain
+    lookup.linkedin_url = identity.linkedin_url
+    lookup.location = identity.location
+    lookup.confidence = identity.confidence
+    lookup.reason = identity.reason
+    lookup.evidence = identity.sources or None
+    if identity.ambiguous:
+        lookup.status = BulkLookupStatus.AMBIGUOUS
+    elif not identity.found:
+        lookup.status = BulkLookupStatus.NOT_FOUND
+
+
+def _apply_match(lookup: BulkLookup, contact: Optional[EnrichmentContact]) -> None:
+    if lookup.status == BulkLookupStatus.AMBIGUOUS:
+        return
+    email = (contact.email if contact else None) or None
+    if not email:
+        lookup.status = BulkLookupStatus.NOT_FOUND
+        if not lookup.reason:
+            lookup.reason = "No address on file for this person."
+        return
+    lookup.email = email
+    lookup.email_status = contact.email_status if contact else None
+    lookup.status = BulkLookupStatus.FOUND
+    if contact and contact.linkedin_url and not lookup.linkedin_url:
+        lookup.linkedin_url = contact.linkedin_url
+
+
+def _idle_status(campaign: BulkCampaign) -> str:
+    """Where the campaign should sit once a lookup finishes."""
+    if campaign.status in (BulkCampaignStatus.READY, BulkCampaignStatus.SENT):
+        return campaign.status
+    return BulkCampaignStatus.COLLECTING
 
 
 def _send_all(campaign_id: int, draft_ids: Optional[list[int]]) -> None:

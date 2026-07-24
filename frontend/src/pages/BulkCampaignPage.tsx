@@ -3,23 +3,33 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  acceptBulkLookups,
   cancelBulkJob,
   deleteBulkCampaign,
   deleteEmail,
   getBulkCampaign,
+  listBulkLookups,
   listBulkRecipients,
   listEmails,
   regenerateEmail,
+  rejectBulkLookups,
   removeBulkRecipient,
   sendBulkChat,
   sendEmail,
+  setBulkLookupEmail,
   setEmailStatus,
   startBulkDrafting,
+  startBulkLookup,
   startBulkSending,
   updateBulkCampaign,
   updateEmail,
 } from "../api/client";
-import type { BulkCampaignDetail, BulkRecipient, EmailDraft } from "../types";
+import type {
+  BulkCampaignDetail,
+  BulkLookup,
+  BulkRecipient,
+  EmailDraft,
+} from "../types";
 import {
   Badge,
   Button,
@@ -30,7 +40,8 @@ import {
   StatusBadge,
 } from "../components/ui";
 
-const BUSY_STATUSES = ["drafting", "sending"];
+const BUSY_STATUSES = ["drafting", "sending", "looking_up"];
+type Tone = "green" | "red" | "amber" | "blue" | "slate" | "purple";
 const inputCls =
   "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none";
 
@@ -39,7 +50,7 @@ export default function BulkCampaignPage() {
   const campaignId = Number(id);
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"drafts" | "people">("drafts");
+  const [tab, setTab] = useState<"drafts" | "people" | "lookup">("drafts");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [note, setNote] = useState("");
 
@@ -66,11 +77,18 @@ export default function BulkCampaignPage() {
     enabled: Number.isFinite(campaignId),
     refetchInterval: busy ? 3000 : false,
   });
+  const { data: lookups } = useQuery({
+    queryKey: ["bulk-lookups", campaignId],
+    queryFn: () => listBulkLookups(campaignId),
+    enabled: Number.isFinite(campaignId),
+    refetchInterval: busy ? 3000 : false,
+  });
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["bulk-campaign", campaignId] });
     qc.invalidateQueries({ queryKey: ["bulk-drafts", campaignId] });
     qc.invalidateQueries({ queryKey: ["bulk-recipients", campaignId] });
+    qc.invalidateQueries({ queryKey: ["bulk-lookups", campaignId] });
   };
 
   // The campaign poll stops the moment the job finishes, which can leave the
@@ -80,6 +98,7 @@ export default function BulkCampaignPage() {
     if (wasBusy.current && !busy) {
       qc.invalidateQueries({ queryKey: ["bulk-drafts", campaignId] });
       qc.invalidateQueries({ queryKey: ["bulk-recipients", campaignId] });
+      qc.invalidateQueries({ queryKey: ["bulk-lookups", campaignId] });
     }
     wasBusy.current = busy;
   }, [busy, campaignId, qc]);
@@ -100,6 +119,15 @@ export default function BulkCampaignPage() {
       refresh();
     },
     onError: (e) => setNote(apiError(e, "Could not start sending.")),
+  });
+  const lookup = useMutation({
+    mutationFn: (retryFailed: boolean) => startBulkLookup(campaignId, retryFailed),
+    onSuccess: () => {
+      setNote("");
+      setTab("lookup");
+      refresh();
+    },
+    onError: (e) => setNote(apiError(e, "Could not start the search.")),
   });
   const cancel = useMutation({
     mutationFn: () => cancelBulkJob(campaignId),
@@ -161,6 +189,16 @@ export default function BulkCampaignPage() {
                 </Button>
               ) : (
                 <>
+                  {campaign.lookup_pending > 0 && (
+                    <Button
+                      variant="secondary"
+                      onClick={() => lookup.mutate(false)}
+                      disabled={lookup.isPending}
+                    >
+                      Find {campaign.lookup_pending} missing email
+                      {campaign.lookup_pending === 1 ? "" : "s"}
+                    </Button>
+                  )}
                   {campaign.recipients_pending_draft > 0 && (
                     <Button onClick={() => draftAll.mutate()} disabled={draftAll.isPending}>
                       Draft {campaign.recipients_pending_draft} email
@@ -207,8 +245,13 @@ export default function BulkCampaignPage() {
         </div>
 
         <div className="lg:col-span-3">
-          <div className="mb-4 grid grid-cols-4 gap-3">
+          <div className="mb-4 grid grid-cols-5 gap-3">
             <Tile label="People" value={campaign.recipients} />
+            <Tile
+              label="No address"
+              value={campaign.needs_email}
+              tone={campaign.lookup_found > 0 ? "amber" : undefined}
+            />
             <Tile label="To review" value={reviewable.length} />
             <Tile label="Sent" value={campaign.sent} />
             <Tile label="Replied" value={campaign.replied} tone="green" />
@@ -221,6 +264,11 @@ export default function BulkCampaignPage() {
             <TabButton active={tab === "people"} onClick={() => setTab("people")}>
               People ({campaign.recipients})
             </TabButton>
+            {(lookups?.length ?? 0) > 0 && (
+              <TabButton active={tab === "lookup"} onClick={() => setTab("lookup")}>
+                Needs email ({campaign.needs_email})
+              </TabButton>
+            )}
           </div>
 
           {tab === "drafts" ? (
@@ -266,11 +314,19 @@ export default function BulkCampaignPage() {
                 </div>
               )}
             </>
-          ) : (
+          ) : tab === "people" ? (
             <RecipientsTable
               campaignId={campaignId}
               recipients={recipients ?? []}
               onChanged={refresh}
+            />
+          ) : (
+            <LookupQueue
+              campaignId={campaignId}
+              lookups={lookups ?? []}
+              busy={busy}
+              onChanged={refresh}
+              onRetry={() => lookup.mutate(true)}
             />
           )}
         </div>
@@ -318,17 +374,19 @@ function ChatPanel({
       <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
         <div className="text-sm font-semibold text-slate-900">Campaign assistant</div>
         <div className="text-xs text-slate-500">
-          Paste your people, then say what the email should do.
+          Paste your people, then say what the email should do. Missing addresses can be
+          searched for.
         </div>
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {campaign.messages.length === 0 && (
           <div className="rounded-lg bg-slate-100 px-3 py-2 text-sm leading-relaxed text-slate-700">
-            Paste the people you want to email, straight out of your spreadsheet. Each row
-            needs an email address; names, titles, companies and any notes are used to
-            personalize. Then tell me what you want to say and I'll draft one email per
-            person for you to review.
+            Paste the people you want to email, straight out of your spreadsheet or a
+            roster. Names, titles, companies and any notes are used to personalize. Anyone
+            you paste without an address goes into a list I can search the web for, and you
+            approve each address I find. Then tell me what you want to say and I'll draft
+            one email per person for you to review.
           </div>
         )}
         {campaign.messages.map((m) =>
@@ -710,6 +768,297 @@ function RecipientsTable({
   );
 }
 
+// --- Missing address review -------------------------------------------------
+
+/** Apollo's own verdict on an address, and how much we trust it. */
+const EMAIL_STATUS_TONE: Record<string, Tone> = {
+  verified: "green",
+  likely: "blue",
+  provided: "slate",
+  guessed: "amber",
+};
+/** Addresses Apollo isn't sure about are never pre-selected. */
+const isUnsure = (lookup: BulkLookup) =>
+  (lookup.email_status ?? "").toLowerCase() === "guessed";
+
+function LookupQueue({
+  campaignId,
+  lookups,
+  busy,
+  onChanged,
+  onRetry,
+}: {
+  campaignId: number;
+  lookups: BulkLookup[];
+  busy: boolean;
+  onChanged: () => void;
+  onRetry: () => void;
+}) {
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [error, setError] = useState("");
+
+  const found = lookups.filter((l) => l.status === "found");
+  const unresolved = lookups.filter((l) =>
+    ["pending", "not_found", "ambiguous", "error"].includes(l.status)
+  );
+  const settled = lookups.filter((l) => ["accepted", "rejected"].includes(l.status));
+
+  const accept = useMutation({
+    mutationFn: (ids: number[]) => acceptBulkLookups(campaignId, ids),
+    onSuccess: () => {
+      setPicked(new Set());
+      setError("");
+      onChanged();
+    },
+    onError: (e) => setError(apiError(e, "Could not add those addresses.")),
+  });
+  const reject = useMutation({
+    mutationFn: (ids: number[]) => rejectBulkLookups(campaignId, ids),
+    onSuccess: () => {
+      setPicked(new Set());
+      setError("");
+      onChanged();
+    },
+    onError: (e) => setError(apiError(e, "Could not dismiss those people.")),
+  });
+
+  const toggle = (id: number) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const selectConfident = () =>
+    setPicked(new Set(found.filter((l) => !isUnsure(l)).map((l) => l.id)));
+
+  if (!lookups.length) {
+    return (
+      <Card>
+        <EmptyState message="Everyone you pasted came with an email address." />
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs leading-relaxed text-slate-500">
+            These people were pasted without an address. Each match below was found by
+            searching the web and then a contact database — check it against the sources
+            before you accept it. Nothing is emailed until you do.
+          </p>
+          {!busy && unresolved.some((l) => l.status !== "pending") && (
+            <Button variant="secondary" onClick={onRetry}>
+              Search again for the misses
+            </Button>
+          )}
+        </div>
+      </Card>
+
+      {error && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {found.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-300 bg-slate-900 px-4 py-3 text-sm text-white">
+          <span className="font-medium">
+            {picked.size
+              ? `${picked.size} selected`
+              : `${found.length} address${found.length === 1 ? "" : "es"} to review`}
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={selectConfident}>
+              Select confident matches
+            </Button>
+            {picked.size > 0 && (
+              <>
+                <Button
+                  variant="secondary"
+                  onClick={() => reject.mutate([...picked])}
+                  disabled={reject.isPending}
+                >
+                  Dismiss
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => accept.mutate([...picked])}
+                  disabled={accept.isPending}
+                >
+                  Add {picked.size} to the campaign
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {[...found, ...unresolved, ...settled].map((lookup) => (
+        <LookupCard
+          key={lookup.id}
+          campaignId={campaignId}
+          lookup={lookup}
+          picked={picked.has(lookup.id)}
+          onToggle={toggle}
+          onChanged={onChanged}
+        />
+      ))}
+    </div>
+  );
+}
+
+function LookupCard({
+  campaignId,
+  lookup,
+  picked,
+  onToggle,
+  onChanged,
+}: {
+  campaignId: number;
+  lookup: BulkLookup;
+  picked: boolean;
+  onToggle: (id: number) => void;
+  onChanged: () => void;
+}) {
+  const [manual, setManual] = useState("");
+  const [error, setError] = useState("");
+
+  const save = useMutation({
+    mutationFn: () => setBulkLookupEmail(campaignId, lookup.id, manual.trim()),
+    onSuccess: () => {
+      setManual("");
+      setError("");
+      onChanged();
+    },
+    onError: (e) => setError(apiError(e, "Could not save that address.")),
+  });
+
+  const hasEmail = lookup.status === "found";
+  const settled = lookup.status === "accepted" || lookup.status === "rejected";
+  const confidence =
+    lookup.confidence != null ? Math.round(lookup.confidence * 100) : null;
+
+  return (
+    <Card className={`overflow-hidden ${settled ? "opacity-60" : ""}`}>
+      <div className="flex items-start gap-3 border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+        {hasEmail && (
+          <input
+            type="checkbox"
+            checked={picked}
+            onChange={() => onToggle(lookup.id)}
+            className="mt-1"
+            aria-label={`Select ${lookup.name}`}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to={`/prospects/${lookup.contact_id}`}
+              className="text-sm font-semibold text-slate-900 hover:underline"
+            >
+              {lookup.name}
+            </Link>
+            <LookupBadge status={lookup.status} />
+            {lookup.email_status && (
+              <Badge tone={EMAIL_STATUS_TONE[lookup.email_status] ?? "slate"}>
+                {lookup.email_status}
+              </Badge>
+            )}
+            {confidence != null && lookup.status !== "pending" && (
+              <span className="text-xs text-slate-400">{confidence}% sure</span>
+            )}
+          </div>
+          {lookup.source_text && (
+            <div className="mt-1 text-xs italic text-slate-400">
+              Pasted as: {lookup.source_text}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-2 px-4 py-3">
+        {hasEmail && (
+          <div className="font-medium text-slate-900">{lookup.email}</div>
+        )}
+        {(lookup.resolved_org || lookup.resolved_title || lookup.location) && (
+          <div className="text-xs text-slate-600">
+            Identified as {lookup.resolved_name ?? lookup.name}
+            {lookup.resolved_title && `, ${lookup.resolved_title}`}
+            {lookup.resolved_org && ` at ${lookup.resolved_org}`}
+            {lookup.location && ` · ${lookup.location}`}
+          </div>
+        )}
+        {lookup.reason && <div className="text-xs text-slate-500">{lookup.reason}</div>}
+        {lookup.error && <div className="text-xs text-rose-600">{lookup.error}</div>}
+
+        {(lookup.linkedin_url || (lookup.evidence?.length ?? 0) > 0) && (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+            {lookup.linkedin_url && (
+              <a
+                href={lookup.linkedin_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                LinkedIn profile
+              </a>
+            )}
+            {(lookup.evidence ?? []).map((source) => (
+              <a
+                key={source.url}
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="max-w-[16rem] truncate text-slate-500 hover:text-slate-800 hover:underline"
+                title={source.title}
+              >
+                {source.title}
+              </a>
+            ))}
+          </div>
+        )}
+
+        {!hasEmail && !settled && (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <input
+              value={manual}
+              onChange={(e) => setManual(e.target.value)}
+              placeholder="Type their address if you know it"
+              className={`${inputCls} max-w-xs`}
+            />
+            <Button
+              variant="secondary"
+              onClick={() => save.mutate()}
+              disabled={!manual.includes("@") || save.isPending}
+            >
+              Add
+            </Button>
+          </div>
+        )}
+        {error && <p className="text-xs text-rose-600">{error}</p>}
+      </div>
+    </Card>
+  );
+}
+
+function LookupBadge({ status }: { status: string }) {
+  const map: Record<string, { label: string; tone: Tone }> = {
+    pending: { label: "not searched yet", tone: "slate" },
+    found: { label: "address found", tone: "blue" },
+    not_found: { label: "no address found", tone: "slate" },
+    ambiguous: { label: "could not identify", tone: "amber" },
+    accepted: { label: "added", tone: "green" },
+    rejected: { label: "dismissed", tone: "slate" },
+    error: { label: "search failed", tone: "red" },
+  };
+  const item = map[status] ?? { label: status, tone: "slate" as Tone };
+  return <Badge tone={item.tone}>{item.label}</Badge>;
+}
+
 // --- Small pieces -----------------------------------------------------------
 
 function ProgressBar({ campaign }: { campaign: BulkCampaignDetail }) {
@@ -720,7 +1069,11 @@ function ProgressBar({ campaign }: { campaign: BulkCampaignDetail }) {
     <div className="mb-4 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
       <div className="flex items-center justify-between text-sm text-slate-700">
         <span className="font-medium">
-          {campaign.status === "drafting" ? "Writing drafts" : "Sending emails"}
+          {campaign.status === "looking_up"
+            ? "Searching for missing addresses"
+            : campaign.status === "drafting"
+              ? "Writing drafts"
+              : "Sending emails"}
           {total ? ` · ${done} of ${total}` : "…"}
         </span>
         <span className="text-xs text-slate-400">{pct}%</span>
@@ -739,15 +1092,17 @@ function Tile({
 }: {
   label: string;
   value: number;
-  tone?: "slate" | "green";
+  tone?: "slate" | "green" | "amber";
 }) {
+  const valueCls =
+    tone === "green"
+      ? "text-emerald-600"
+      : tone === "amber"
+        ? "text-amber-600"
+        : "text-slate-900";
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
-      <div
-        className={`text-lg font-semibold tabular-nums ${
-          tone === "green" ? "text-emerald-600" : "text-slate-900"
-        }`}
-      >
+      <div className={`text-lg font-semibold tabular-nums ${valueCls}`}>
         {value}
       </div>
       <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>

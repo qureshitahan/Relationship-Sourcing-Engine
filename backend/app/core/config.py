@@ -165,6 +165,13 @@ class Settings(BaseSettings):
     # Max web searches per prospect insight research call. "Moderate" research =
     # one LLM call with up to this many quick web searches (cost control).
     insight_web_search_max_uses: int = 2
+    # Max web searches when identifying one pasted person for a bulk campaign.
+    # Higher than insight research: a name plus a job description usually needs
+    # a couple of searches before their employer and LinkedIn profile are clear.
+    bulk_lookup_web_search_max_uses: int = 4
+    # Concurrent identity lookups. Each is one Claude call with web search, so
+    # this is the main lever on how hard a big paste hits the API.
+    bulk_lookup_workers: int = 4
     # Only spend LLM research on prospects whose rule-based board-fit (0-100) is at
     # least this. People are imported above board_fit_min_keep (45) but we research
     # only the more plausible fits to keep cost down while staying personalized.

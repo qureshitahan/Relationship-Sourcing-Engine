@@ -20,13 +20,22 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.bulk_campaign import BulkCampaign, BulkChatMessage
+from app.models.bulk_campaign import BulkCampaign, BulkChatMessage, BulkLookup
 from app.models.company import Company
 from app.models.contact import Contact
-from app.models.enums import BulkCampaignStatus, ProspectStatus
+from app.models.enums import BulkCampaignStatus, BulkLookupStatus, ProspectStatus
 from app.services.bulk_email.llm import complete_json, llm_available
-from app.services.bulk_email.parser import ParsedRecipient, extract_recipients
-from app.services.bulk_email.runner import launch_drafting, recipients_needing_drafts
+from app.services.bulk_email.parser import (
+    ParsedRecipient,
+    extract_people,
+    extract_recipients,
+)
+from app.services.bulk_email.runner import (
+    launch_drafting,
+    launch_lookup,
+    lookups_pending,
+    recipients_needing_drafts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +61,23 @@ _INTENT_SYSTEM = (
     "about the content.\n"
     '- "signature": the exact sign-off the user asked to sign emails with, or null.\n'
     '- "action": "draft" if the user is asking for the emails to be written now, '
-    'otherwise "none".'
+    '"lookup" if they are asking you to find the email addresses of people whose '
+    'addresses they did not give, otherwise "none".'
 )
 
 _DRAFT_HINT_RE = re.compile(
     r"\b(draft|write|compose|generate|prepare)\b.{0,30}\b(email|emails|them|these|it)\b",
     re.IGNORECASE,
 )
+_LOOKUP_HINT_RE = re.compile(
+    r"\b(find|look\s?up|search\s+for|get|source)\b.{0,30}"
+    r"\b(email|emails|address|addresses|contact details)\b",
+    re.IGNORECASE,
+)
+# A message only goes through people-extraction when it looks like a pasted
+# list; short replies in the conversation should not cost an extra LLM call.
+_MIN_LIST_LINES = 4
+_MIN_LIST_CHARS = 200
 
 
 @dataclass
@@ -76,6 +95,9 @@ class ChatResult:
     duplicates: int = 0
     purpose_updated: bool = False
     drafting_started: bool = False
+    # People captured from the paste who still have no address.
+    needs_lookup: int = 0
+    lookup_started: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -87,6 +109,7 @@ def handle_message(db: Session, campaign: BulkCampaign, message: str) -> ChatRes
 
     parsed = extract_recipients(text)
     added, duplicates = _save_recipients(db, campaign, parsed)
+    needs_lookup = _save_people_needing_email(db, campaign, text, parsed)
 
     intent = _interpret(db, campaign, text)
     purpose_updated = False
@@ -102,7 +125,9 @@ def handle_message(db: Session, campaign: BulkCampaign, message: str) -> ChatRes
         recipients_added=added,
         duplicates=duplicates,
         purpose_updated=purpose_updated,
+        needs_lookup=needs_lookup,
     )
+    _maybe_start_lookup(db, campaign, intent, result)
     _maybe_start_drafting(db, campaign, intent, result)
     result.reply = _compose_reply(db, campaign, text, intent, result)
 
@@ -168,6 +193,77 @@ def _save_recipients(
     return added, duplicates
 
 
+def _save_people_needing_email(
+    db: Session,
+    campaign: BulkCampaign,
+    text: str,
+    with_email: list[ParsedRecipient],
+) -> int:
+    """Queue everyone the paste names but gives no address for.
+
+    They become contacts with no address plus a lookup row, so they show up in
+    the campaign immediately and can be searched for on demand.
+    """
+    if not _looks_like_a_list(text):
+        return 0
+    people = extract_people(text)
+    if not people:
+        return 0
+
+    seen = {_name_key(r.name) for r in with_email}
+    for contact in db.execute(
+        select(Contact).where(Contact.bulk_campaign_id == campaign.id)
+    ).scalars().all():
+        seen.add(_name_key(contact.name))
+
+    added = 0
+    for person in people:
+        key = _name_key(person.name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        contact = Contact(
+            name=person.name,
+            title=person.title,
+            has_email=False,
+            notes=person.notes or person.source_text or None,
+            source="bulk_paste",
+            bulk_campaign_id=campaign.id,
+            company_id=_company_id_for(db, person.company) if person.company else None,
+            status=ProspectStatus.APPROVED,
+            approved_for_outreach=True,
+        )
+        db.add(contact)
+        db.flush()
+        db.add(
+            BulkLookup(
+                campaign_id=campaign.id,
+                contact_id=contact.id,
+                status=BulkLookupStatus.PENDING,
+                source_text=person.source_text or person.name,
+                # Carried over so the review screen can warn before a credit is
+                # spent chasing a name the user already marked as approximate.
+                reason=(
+                    "The pasted list flags this spelling as approximate."
+                    if person.uncertain_name
+                    else None
+                ),
+            )
+        )
+        added += 1
+    db.commit()
+    return added
+
+
+def _looks_like_a_list(text: str) -> bool:
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    return len(lines) >= _MIN_LIST_LINES and len(text) >= _MIN_LIST_CHARS
+
+
+def _name_key(name: str) -> str:
+    return " ".join(re.split(r"[^a-z]+", (name or "").lower())).strip()
+
+
 def _company_id_for(db: Session, name: str) -> Optional[int]:
     """Reuse an existing organization by name, or record the pasted one."""
     label = (name or "").strip()
@@ -211,27 +307,29 @@ def _interpret(db: Session, campaign: BulkCampaign, text: str) -> Intent:
         reply=str(data.get("reply") or "").strip(),
         purpose=_optional(data.get("purpose")),
         signature=_optional(data.get("signature")),
-        action="draft" if action == "draft" else "none",
+        action=action if action in ("draft", "lookup") else "none",
     )
 
 
 def _heuristic_intent(campaign: BulkCampaign, text: str) -> Intent:
     """Keyword fallback so the chat still works without the model."""
     wants_draft = bool(_DRAFT_HINT_RE.search(text))
+    wants_lookup = bool(_LOOKUP_HINT_RE.search(text))
     # Anything that isn't part of the pasted list is treated as the brief, unless
     # the whole message was just the instruction to start drafting.
     prose = "\n".join(
         line for line in text.splitlines() if line.strip() and not _is_table_row(line)
     ).strip()
-    if wants_draft and len(prose) < 40:
+    if (wants_draft or wants_lookup) and len(prose) < 40:
         prose = ""
     merged = "\n\n".join(p for p in [(campaign.purpose or "").strip(), prose] if p)
-    return Intent(
-        reply="",
-        purpose=merged or None,
-        signature=None,
-        action="draft" if wants_draft else "none",
-    )
+    if wants_draft:
+        action = "draft"
+    elif wants_lookup:
+        action = "lookup"
+    else:
+        action = "none"
+    return Intent(reply="", purpose=merged or None, signature=None, action=action)
 
 
 def _is_table_row(line: str) -> bool:
@@ -239,12 +337,38 @@ def _is_table_row(line: str) -> bool:
     return "@" in line or "\t" in line or len(line.split("|")) > 2
 
 
+def _maybe_start_lookup(
+    db: Session, campaign: BulkCampaign, intent: Intent, result: ChatResult
+) -> None:
+    if intent.action != "lookup":
+        return
+    if _busy(campaign):
+        result.errors.append("A job is already running for this campaign.")
+        return
+    if not lookups_pending(db, campaign.id):
+        result.errors.append("Everyone on the list already has an address.")
+        return
+    campaign.status = BulkCampaignStatus.LOOKING_UP
+    campaign.last_error = None
+    db.commit()
+    launch_lookup(campaign.id)
+    result.lookup_started = True
+
+
+def _busy(campaign: BulkCampaign) -> bool:
+    return campaign.status in (
+        BulkCampaignStatus.DRAFTING,
+        BulkCampaignStatus.SENDING,
+        BulkCampaignStatus.LOOKING_UP,
+    )
+
+
 def _maybe_start_drafting(
     db: Session, campaign: BulkCampaign, intent: Intent, result: ChatResult
 ) -> None:
     if intent.action != "draft":
         return
-    if campaign.status in (BulkCampaignStatus.DRAFTING, BulkCampaignStatus.SENDING):
+    if _busy(campaign) or result.lookup_started:
         result.errors.append("A job is already running for this campaign.")
         return
     if not (campaign.purpose or "").strip():
@@ -282,14 +406,30 @@ def _compose_reply(
         )
     if result.duplicates:
         facts.append(f"Skipped {result.duplicates} already on the list.")
+    if result.needs_lookup:
+        facts.append(
+            f"Found {result.needs_lookup} more "
+            f"{'person' if result.needs_lookup == 1 else 'people'} with no email "
+            "address in that list."
+        )
     if result.purpose_updated:
         facts.append("Saved the brief for these emails.")
-    if "@" in text and not result.recipients_added and not result.duplicates:
+    if (
+        "@" in text
+        and not result.recipients_added
+        and not result.duplicates
+        and not result.needs_lookup
+    ):
         facts.append(
             "I couldn't read any contact rows out of that. Each row needs an email address."
         )
 
-    if result.drafting_started:
+    if result.lookup_started:
+        facts.append(
+            "Searching the web for their addresses now. Nothing is emailed to "
+            "them until you approve each one."
+        )
+    elif result.drafting_started:
         facts.append("Writing the drafts now, they'll appear below as they're ready.")
     else:
         facts.extend(result.errors)
@@ -303,15 +443,30 @@ def _next_step(db: Session, campaign: BulkCampaign) -> str:
     recipients = db.execute(
         select(func.count())
         .select_from(Contact)
-        .where(Contact.bulk_campaign_id == campaign.id)
+        .where(
+            Contact.bulk_campaign_id == campaign.id,
+            Contact.email.is_not(None),
+            Contact.email != "",
+        )
     ).scalar_one()
+    awaiting = len(lookups_pending(db, campaign.id))
     has_purpose = bool((campaign.purpose or "").strip())
+    if awaiting and not recipients:
+        return (
+            f"Say 'find their emails' and I'll search for the {awaiting} "
+            "missing address(es) for you to review."
+        )
     if not recipients and not has_purpose:
         return "Paste your list of people, then tell me what the email should say."
     if not recipients:
         return "Paste the people you want to email (each row needs an email address)."
     if not has_purpose:
         return "Now tell me what you want to say to them."
+    if awaiting:
+        return (
+            f"{awaiting} of them still have no address — say 'find their emails' "
+            "and I'll go looking."
+        )
     pending = len(recipients_needing_drafts(db, campaign.id))
     if pending:
         return f"Say 'draft the emails' when you're ready and I'll write all {pending}."

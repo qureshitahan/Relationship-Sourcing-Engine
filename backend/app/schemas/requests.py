@@ -388,6 +388,22 @@ class BulkSendRequest(BaseModel):
     draft_ids: Optional[List[int]] = None
 
 
+class BulkLookupRequest(BaseModel):
+    # Search again for people previously not found or errored, as well as the
+    # ones never tried.
+    retry_failed: bool = False
+
+
+class BulkLookupDecisionRequest(BaseModel):
+    # Which proposed addresses to take (or dismiss).
+    lookup_ids: List[int]
+
+
+class BulkLookupEmailRequest(BaseModel):
+    # Type in an address the search could not find.
+    email: str
+
+
 class FollowupGenerateRequest(BaseModel):
     # Draft follow-ups for people with no reply this many days after the last send.
     days: int = 3

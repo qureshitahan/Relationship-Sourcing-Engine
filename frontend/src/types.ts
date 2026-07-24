@@ -228,7 +228,7 @@ export interface BulkCampaign {
   mailbox_label?: string | null;
   from_email?: string | null;
   from_name?: string | null;
-  /** collecting | drafting | ready | sending | sent */
+  /** collecting | looking_up | drafting | ready | sending | sent */
   status: string;
   purpose?: string | null;
   signature?: string | null;
@@ -237,6 +237,10 @@ export interface BulkCampaign {
   approved: number;
   sent: number;
   replied: number;
+  /** Pasted people with no address: still to search / proposed / total unresolved. */
+  lookup_pending: number;
+  lookup_found: number;
+  needs_email: number;
   progress_total: number;
   progress_done: number;
   last_error?: string | null;
@@ -270,6 +274,40 @@ export interface BulkRecipient {
   replied_at?: string | null;
   reply_snippet?: string | null;
   open_count: number;
+}
+
+export interface BulkLookupEvidence {
+  title: string;
+  url: string;
+}
+
+export interface BulkLookup {
+  id: number;
+  contact_id: number;
+  /** pending | found | not_found | ambiguous | accepted | rejected | error */
+  status: string;
+  /** The person exactly as they were pasted. */
+  name: string;
+  source_text?: string | null;
+  title?: string | null;
+  company_name?: string | null;
+  /** Who the web search decided they are. */
+  resolved_name?: string | null;
+  resolved_title?: string | null;
+  resolved_org?: string | null;
+  resolved_domain?: string | null;
+  linkedin_url?: string | null;
+  location?: string | null;
+  confidence?: number | null;
+  reason?: string | null;
+  evidence?: BulkLookupEvidence[] | null;
+  /** The proposed address, not yet on the contact. */
+  email?: string | null;
+  /** verified | likely | guessed | provided | ... */
+  email_status?: string | null;
+  manual: boolean;
+  error?: string | null;
+  created_at: string;
 }
 
 export interface LinkedInMessage {

@@ -20,6 +20,8 @@ class EnrichmentContact:
     external_id: Optional[str] = None
     # Company domain this contact belongs to (helps re-match during reveal).
     domain: Optional[str] = None
+    # Employer name, used to match people we have no domain or provider id for.
+    organization_name: Optional[str] = None
 
 
 @dataclass

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Optional
 
 from app.core.config import settings
@@ -61,6 +62,85 @@ def complete_json(system: str, user: str, *, max_tokens: int = 2048) -> Optional
         logger.warning("Bulk email LLM call failed: %s", exc)
         inspect_anthropic_exception(exc)
         return None
+
+
+def research_json(
+    system: str,
+    user: str,
+    *,
+    max_tokens: int = 2048,
+    max_uses: Optional[int] = None,
+) -> tuple[Optional[Any], list[dict]]:
+    """A JSON completion Claude may run web searches for.
+
+    Returns the parsed value plus the sources the search actually opened, which
+    the caller shows as evidence. Falls back to a plain completion (and no
+    sources) when search is disabled or the call keeps failing.
+    """
+    if not llm_available():
+        return None, []
+    searches = (
+        settings.bulk_lookup_web_search_max_uses if max_uses is None else max_uses
+    )
+    if searches <= 0:
+        return complete_json(system, user, max_tokens=max_tokens), []
+
+    resp = None
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            resp = _get_client().messages.create(
+                model=settings.anthropic_model,
+                max_tokens=max_tokens,
+                system=system,
+                tools=[
+                    {
+                        "type": "web_search_20250305",
+                        "name": "web_search",
+                        "max_uses": searches,
+                    }
+                ],
+                messages=[{"role": "user", "content": user}],
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 - degrade rather than fail the batch
+            if attempt < attempts - 1:
+                time.sleep(2.0 * (2**attempt))
+                continue
+            logger.warning("Bulk lookup web search failed: %s", exc)
+            inspect_anthropic_exception(exc)
+            return complete_json(system, user, max_tokens=max_tokens), []
+
+    text_parts: list[str] = []
+    sources: list[dict] = []
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            text_parts.append(block.text)
+        elif btype == "web_search_tool_result":
+            for item in getattr(block, "content", []) or []:
+                if isinstance(item, dict):
+                    url, title = item.get("url"), item.get("title")
+                else:
+                    url = getattr(item, "url", None)
+                    title = getattr(item, "title", None)
+                if url:
+                    sources.append({"title": title or url, "url": url})
+
+    parsed = parse_json_value("".join(text_parts))
+    if parsed is not None:
+        record_provider_success("anthropic")
+    return parsed, _dedupe_sources(sources)
+
+
+def _dedupe_sources(sources: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for source in sources:
+        if source["url"] not in seen:
+            seen.add(source["url"])
+            out.append(source)
+    return out[:6]
 
 
 def parse_json_value(text: str) -> Any:

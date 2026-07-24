@@ -120,10 +120,27 @@ class BulkCampaignStatus:
     """Lifecycle of a pasted-list bulk email campaign."""
 
     COLLECTING = "collecting"  # gathering recipients + brief in the chat
+    LOOKING_UP = "looking_up"  # background job is finding missing email addresses
     DRAFTING = "drafting"      # background job is writing the emails
     READY = "ready"            # drafts written, awaiting review/approval
     SENDING = "sending"        # background job is sending approved emails
     SENT = "sent"              # everything drafted has been sent
+
+
+class BulkLookupStatus:
+    """Lifecycle of the hunt for one pasted person's email address.
+
+    A lookup only ever proposes an address: nothing reaches the recipient list
+    until a human moves it to ACCEPTED.
+    """
+
+    PENDING = "pending"        # queued, not looked up yet
+    FOUND = "found"            # an address was found, awaiting the user's call
+    NOT_FOUND = "not_found"    # identified the person, but no address available
+    AMBIGUOUS = "ambiguous"    # could not tell which real person this is
+    ACCEPTED = "accepted"      # user took the address; the contact can be emailed
+    REJECTED = "rejected"      # user dismissed this person
+    ERROR = "error"            # the lookup itself failed (API/network)
 
 
 class CallStatus:

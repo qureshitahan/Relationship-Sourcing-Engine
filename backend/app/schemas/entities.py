@@ -482,6 +482,35 @@ class BulkRecipientOut(BaseModel):
     open_count: int = 0
 
 
+class BulkLookupOut(BaseModel):
+    """A proposed email address for a pasted person, with its evidence."""
+
+    id: int
+    contact_id: int
+    status: str
+    # The person as the user pasted them.
+    name: str
+    source_text: Optional[str] = None
+    title: Optional[str] = None
+    company_name: Optional[str] = None
+    # Who the web search decided they are.
+    resolved_name: Optional[str] = None
+    resolved_title: Optional[str] = None
+    resolved_org: Optional[str] = None
+    resolved_domain: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    location: Optional[str] = None
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+    evidence: Optional[List[dict]] = None
+    # The proposal itself.
+    email: Optional[str] = None
+    email_status: Optional[str] = None
+    manual: bool = False
+    error: Optional[str] = None
+    created_at: datetime
+
+
 class BulkCampaignOut(BaseModel):
     """Header + counters for one bulk email campaign."""
 
@@ -499,6 +528,11 @@ class BulkCampaignOut(BaseModel):
     approved: int = 0
     sent: int = 0
     replied: int = 0
+    # People pasted without an address: still to search, already proposed, and
+    # the total that cannot be emailed yet.
+    lookup_pending: int = 0
+    lookup_found: int = 0
+    needs_email: int = 0
     progress_total: int = 0
     progress_done: int = 0
     last_error: Optional[str] = None

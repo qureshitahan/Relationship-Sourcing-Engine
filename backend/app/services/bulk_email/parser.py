@@ -41,6 +41,32 @@ _EXTRACT_SYSTEM = (
 )
 
 
+_PEOPLE_SYSTEM = (
+    "You extract people from a list a user pasted: a conference roster, meeting "
+    "minutes, an attendee table, or a spreadsheet. Rows often wrap across lines, "
+    "with a person's name on one line and their role on the next.\n\n"
+    "Return ONLY a JSON array. One object per person, with keys:\n"
+    '  "name" (their name, copied from the text),\n'
+    '  "title" (their role or job title, or null),\n'
+    '  "company" (their employer or organization, or null),\n'
+    '  "notes" (the rest of what the text says about them, or null),\n'
+    '  "uncertain_name" (true if the text itself flags the spelling as '
+    'approximate or offers alternative spellings, e.g. "(approx.)" or '
+    '"Smith/Smyth" — otherwise false).\n\n'
+    "HARD RULES:\n"
+    "- Never invent a person. Copy names from the text exactly as written, "
+    "minus any parenthetical spelling hints.\n"
+    "- Skip section headings, column headers, counts, and commentary that is "
+    "not about one specific person.\n"
+    "- A person can appear under a section heading such as an organization or a "
+    "session name: use that heading for company or notes when it applies.\n"
+    "- Return them in the order they appear."
+)
+# The roster style above wraps one person over several lines, so people are
+# extracted from windows of lines rather than line by line.
+_LINES_PER_PEOPLE_CALL = 60
+
+
 @dataclass
 class ParsedRecipient:
     name: str
@@ -48,6 +74,18 @@ class ParsedRecipient:
     title: Optional[str] = None
     company: Optional[str] = None
     notes: Optional[str] = None
+
+
+@dataclass
+class ParsedPerson:
+    """Someone named in the paste who has no email address in it."""
+
+    name: str
+    title: Optional[str] = None
+    company: Optional[str] = None
+    notes: Optional[str] = None
+    uncertain_name: bool = False
+    source_text: str = ""
 
 
 def find_emails(text: str) -> list[str]:
@@ -75,6 +113,115 @@ def extract_recipients(text: str) -> list[ParsedRecipient]:
             if key not in by_email:
                 by_email[key] = recipient
     return list(by_email.values())
+
+
+def extract_people(text: str) -> list[ParsedPerson]:
+    """Parse people the text names but gives no address for.
+
+    Lines carrying an address belong to :func:`extract_recipients`; everything
+    else is offered to the lookup queue instead of being silently dropped.
+    """
+    lines = [
+        ln.rstrip()
+        for ln in (text or "").splitlines()
+        if ln.strip() and not EMAIL_RE.search(ln)
+    ]
+    if not lines:
+        return []
+
+    by_name: dict[str, ParsedPerson] = {}
+    for chunk in _chunks(lines, _LINES_PER_PEOPLE_CALL):
+        for person in _people_from_chunk(chunk):
+            key = _name_key(person.name)
+            if key and key not in by_name:
+                by_name[key] = person
+    return list(by_name.values())
+
+
+def _people_from_chunk(lines: list[str]) -> list[ParsedPerson]:
+    data = complete_json(
+        _PEOPLE_SYSTEM,
+        "Extract the people from this text:\n\n" + "\n".join(lines),
+        max_tokens=8192,
+    )
+    if not isinstance(data, list):
+        return []
+    blob = "\n".join(lines)
+    rows = [item for item in data if isinstance(item, dict)]
+    names = [
+        name
+        for name in (_clean(item.get("name")) for item in rows)
+        # Anti-hallucination: the name has to be in the text it came from.
+        if name and _is_person_name(name) and _mentioned(name, blob)
+    ]
+    out: list[ParsedPerson] = []
+    for item in rows:
+        name = _clean(item.get("name"))
+        if name not in names:
+            continue
+        out.append(
+            ParsedPerson(
+                name=name,
+                title=_clean(item.get("title")) or None,
+                company=_clean(item.get("company")) or None,
+                notes=_clean(item.get("notes")) or None,
+                uncertain_name=bool(item.get("uncertain_name")),
+                source_text=_source_snippet(lines, name, names),
+            )
+        )
+    return out
+
+
+def _is_person_name(name: str) -> bool:
+    """Reject placeholders like "(ER/surgery physician)" that name nobody."""
+    if len(name) > 80 or any(ch.isdigit() for ch in name):
+        return False
+    return not any(ch in name for ch in "/()@")
+
+
+def _mentioned(name: str, text: str) -> bool:
+    """True when the text names this person.
+
+    Matching is per whole word so a first name never latches onto a longer
+    surname ("Steve" must not match "Stevenson").
+    """
+    words = [w for w in re.split(r"[^A-Za-z]+", name.lower()) if len(w) > 1]
+    if not words:
+        return False
+    lowered = text.lower()
+    return all(re.search(rf"\b{re.escape(word)}\b", lowered) for word in words)
+
+
+def _source_snippet(lines: list[str], name: str, all_names: list[str]) -> str:
+    """The pasted line(s) this person came from, for the review screen.
+
+    Roster tables put someone's role on the lines below their name, so the
+    following lines are included until the next person starts.
+    """
+    others = [other for other in all_names if other != name]
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if _mentioned(name, line)
+        # A line listing someone else belongs to them, not to this person: a
+        # bare "Elizabeth" must not borrow Elizabeth Hankla's row.
+        and not any(_mentioned(other, line) for other in others)
+    ] or [index for index, line in enumerate(lines) if _mentioned(name, line)]
+    if not starts:
+        return name
+
+    index = starts[0]
+    snippet = [lines[index].strip()]
+    for follower in lines[index + 1 : index + 3]:
+        text = follower.strip()
+        if not text or any(_mentioned(other, text) for other in others):
+            break
+        snippet.append(text)
+    return " — ".join(snippet)[:600]
+
+
+def _name_key(name: str) -> str:
+    return " ".join(re.split(r"[^a-z]+", (name or "").lower())).strip()
 
 
 def _chunks(items: list[str], size: int) -> Iterable[list[str]]:
