@@ -20,7 +20,8 @@ const NAV_SECTIONS = [
       { to: "/discover", label: "1. Discover", hint: "Find board influencers" },
       { to: "/prospects", label: "2. Prospects", hint: "Research, reveal & approve" },
       { to: "/emails", label: "3. Drafts", hint: "Edit, approve & send" },
-      { to: "/outreach", label: "4. Conversations", hint: "Replies & follow-ups" },
+      { to: "/linkedin", label: "4. LinkedIn", hint: "Connect & message on LinkedIn" },
+      { to: "/outreach", label: "5. Conversations", hint: "Replies & follow-ups" },
     ],
   },
   {

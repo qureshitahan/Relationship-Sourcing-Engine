@@ -36,11 +36,17 @@ REQUEST_TIMEOUT = 30.0
 class MicrosoftGraphEmailProvider(EmailProvider):
     name = "microsoft_graph"
 
-    def __init__(self) -> None:
+    def __init__(self, send_as_user: Optional[str] = None) -> None:
         self.tenant_id = settings.microsoft_tenant_id
         self.client_id = settings.microsoft_client_id
         self.client_secret = settings.microsoft_client_secret
-        self.send_as_user = settings.microsoft_send_as_user or settings.outreach_from_email
+        # Per-mailbox UPN when provided (multi-sender); the single Azure app can
+        # send as any mailbox in its tenant. Falls back to the global setting.
+        self.send_as_user = (
+            send_as_user
+            or settings.microsoft_send_as_user
+            or settings.outreach_from_email
+        )
         self._access_token: Optional[str] = None
 
     def send(

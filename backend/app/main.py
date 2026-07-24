@@ -9,6 +9,10 @@ from app.core.config import settings
 from app.db.session import init_db
 from app.services.agent_scheduler import start_agent_scheduler, stop_agent_scheduler
 from app.services.email_scheduler import start_scheduler, stop_scheduler
+from app.services.linkedin_scheduler import (
+    start_linkedin_scheduler,
+    stop_linkedin_scheduler,
+)
 
 
 def create_app() -> FastAPI:
@@ -34,11 +38,14 @@ def create_app() -> FastAPI:
         start_scheduler()
         # Runs the autonomous daily outreach agent on schedule.
         start_agent_scheduler()
+        # Auto-sends LinkedIn messages after invites are accepted + tracks replies.
+        start_linkedin_scheduler()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         stop_scheduler()
         stop_agent_scheduler()
+        stop_linkedin_scheduler()
 
     @app.get("/health", tags=["meta"])
     def health() -> dict:

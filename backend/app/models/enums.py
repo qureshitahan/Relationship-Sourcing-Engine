@@ -129,6 +129,25 @@ class CallStatus:
     FAILED = "failed"
 
 
+class LinkedInStatus:
+    """Lifecycle of a LinkedIn outreach message.
+
+    draft -> approved -> [invite_sent (awaiting acceptance) -> sent] or [sent]
+    sent -> replied. failed/not_interested are terminal.
+    """
+
+    DRAFT = "draft"
+    APPROVED = "approved"
+    # Not connected yet: a connection invitation was sent; the message auto-sends
+    # once the invite is accepted (detected by the poller).
+    INVITE_SENT = "invite_sent"
+    # Direct message delivered (either they were connected, or invite accepted).
+    SENT = "sent"
+    REPLIED = "replied"
+    NOT_INTERESTED = "not_interested"
+    FAILED = "failed"
+
+
 class ApprovalStatus:
     PENDING = "pending"
     APPROVED = "approved"
@@ -158,4 +177,8 @@ class AuditAction:
     CALL_SCRIPT = "call_script"
     CALL_APPROVAL = "call_approval"
     CALL_PLACED = "call_placed"
+    LINKEDIN_DRAFT = "linkedin_draft"
+    LINKEDIN_APPROVAL = "linkedin_approval"
+    LINKEDIN_SEND = "linkedin_send"
+    LINKEDIN_INVITE = "linkedin_invite"
     SUPPRESSION = "suppression"

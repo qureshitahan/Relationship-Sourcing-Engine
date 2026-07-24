@@ -192,6 +192,10 @@ class EmailDraftOut(ORMModel):
     open_count: int = 0
     first_opened_at: Optional[datetime] = None
     last_opened_at: Optional[datetime] = None
+    # Selected sending mailbox (null = default). ``from_email``/``from_name`` are
+    # resolved from it for the review UI.
+    from_mailbox: Optional[str] = None
+    from_name: Optional[str] = None
     # Enriched for the outreach review UI (not stored on the draft row).
     principal_name: Optional[str] = None
     from_email: Optional[str] = None
@@ -199,6 +203,40 @@ class EmailDraftOut(ORMModel):
     contact_email: Optional[str] = None
     contact_title: Optional[str] = None
     company_name: Optional[str] = None
+    discovery_run_id: Optional[int] = None
+
+
+class LinkedInMessageOut(ORMModel):
+    id: int
+    principal_id: Optional[int] = None
+    campaign_id: Optional[int] = None
+    company_id: Optional[int] = None
+    contact_id: Optional[int] = None
+    insight_id: Optional[int] = None
+    body: str
+    invitation_note: Optional[str] = None
+    status: str
+    provider: Optional[str] = None
+    network_distance: Optional[str] = None
+    connected: bool = False
+    public_identifier: Optional[str] = None
+    provider_chat_id: Optional[str] = None
+    approved_by: Optional[str] = None
+    created_at: datetime
+    invitation_sent_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    replied_at: Optional[datetime] = None
+    reply_snippet: Optional[str] = None
+    reply_body: Optional[str] = None
+    last_reply_check_at: Optional[datetime] = None
+    last_status_check_at: Optional[datetime] = None
+    error: Optional[str] = None
+    # Enriched for the review UI (not stored on the row).
+    principal_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
+    company_name: Optional[str] = None
+    linkedin_url: Optional[str] = None
     discovery_run_id: Optional[int] = None
 
 

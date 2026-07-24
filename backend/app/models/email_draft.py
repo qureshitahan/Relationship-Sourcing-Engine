@@ -40,6 +40,9 @@ class EmailDraft(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(30), default=EmailStatus.DRAFT, index=True, nullable=False
     )
+    # Which selectable mailbox to send from (see email_providers/mailboxes.py).
+    # Null = the legacy default sender, so existing rows keep current behaviour.
+    from_mailbox: Mapped[Optional[str]] = mapped_column(String(64))
     # Provider used / message id once sent (future milestone).
     provider: Mapped[Optional[str]] = mapped_column(String(50))
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255))

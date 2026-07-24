@@ -7,6 +7,7 @@ import {
   getDiscoveryRun,
   listDiscoveryRuns,
   listEmails,
+  listMailboxes,
   listProspects,
   regenerateEmail,
   regenerateRunDrafts,
@@ -88,6 +89,17 @@ function DraftCard({
   const [body, setBody] = useState(draft.body);
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleAt, setScheduleAt] = useState(defaultScheduleValue);
+
+  // Selectable sending mailboxes (shared/deduped across cards by react-query).
+  const { data: mailboxes = [] } = useQuery({
+    queryKey: ["mailboxes"],
+    queryFn: listMailboxes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const setMailbox = useMutation({
+    mutationFn: (id: string) => updateEmail(draft.id, { from_mailbox: id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["emails"] }),
+  });
 
   // Keep the textarea in sync when the server body changes (e.g. bulk signature).
   useEffect(() => {
@@ -222,12 +234,30 @@ function DraftCard({
       {/* Email compose fields */}
       <div className="px-5 py-2">
         <FieldRow label="From">
-          <span className="text-sm text-slate-800">
-            {draft.principal_name ?? "Principal"}
-            {draft.from_email && (
-              <span className="text-slate-500"> &lt;{draft.from_email}&gt;</span>
-            )}
-          </span>
+          {mailboxes.length > 1 && !locked ? (
+            <select
+              value={draft.from_mailbox ?? ""}
+              onChange={(e) => setMailbox.mutate(e.target.value)}
+              disabled={setMailbox.isPending}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 focus:border-slate-400 focus:outline-none"
+            >
+              <option value="">
+                Default{draft.from_email ? ` (${draft.from_email})` : ""}
+              </option>
+              {mailboxes.map((mb) => (
+                <option key={mb.id} value={mb.id}>
+                  {mb.label} — {mb.from_email}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-sm text-slate-800">
+              {draft.principal_name ?? "Principal"}
+              {draft.from_email && (
+                <span className="text-slate-500"> &lt;{draft.from_email}&gt;</span>
+              )}
+            </span>
+          )}
         </FieldRow>
 
         <FieldRow
@@ -281,7 +311,7 @@ function DraftCard({
       {/* Actions */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 bg-slate-50/50 px-5 py-3">
         <span className="text-xs text-slate-400">
-          Sending as {draft.principal_name ?? "principal"} via Outlook
+          Sending from {draft.from_email ?? "default mailbox"}
         </span>
         <div className="flex flex-wrap gap-2">
           {dirty && !locked && (

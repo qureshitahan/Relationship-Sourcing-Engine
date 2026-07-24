@@ -1,0 +1,619 @@
+"""LinkedIn outreach: draft generation, approval, sending (invite/DM), replies.
+
+LinkedIn only permits direct messages to 1st-degree connections. On send we
+resolve the prospect's profile: if connected we DM immediately (status ``sent``);
+otherwise we send a connection invitation (status ``invite_sent``) and the stored
+message auto-delivers once the invite is accepted (see ``scan_linkedin_updates``,
+driven by the background poller).
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.db.session import get_db
+from app.models.company import Company
+from app.models.contact import Contact
+from app.models.discovery_run import DiscoveryRun
+from app.models.enums import AuditAction, LinkedInStatus
+from app.models.linkedin_message import LinkedInMessage
+from app.models.principal import Principal
+from app.models.relevance_insight import RelevanceInsight
+from app.models.suppression import OutreachHistory
+from app.schemas.entities import LinkedInMessageOut, Page
+from app.schemas.requests import (
+    LinkedInConnectRequest,
+    LinkedInGenerateRequest,
+    LinkedInGenerateRunRequest,
+    LinkedInReplyRequest,
+    LinkedInSelectAccountRequest,
+    LinkedInStatusRequest,
+    LinkedInUpdateRequest,
+)
+from app.services.app_settings import get_setting, set_setting
+from app.services.audit import log_action
+from app.services.linkedin_outreach import generate_linkedin_content
+from app.services.linkedin_providers import (
+    ACTIVE_ACCOUNT_SETTING,
+    get_linkedin_provider,
+    public_identifier_from_url,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/linkedin", tags=["linkedin"])
+
+_OPEN_STATUSES = [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
+
+
+class SendError(Exception):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def _latest_insight(db: Session, principal_id: int, contact_id: int):
+    return db.execute(
+        select(RelevanceInsight)
+        .where(
+            RelevanceInsight.principal_id == principal_id,
+            RelevanceInsight.contact_id == contact_id,
+        )
+        .order_by(RelevanceInsight.created_at.desc())
+    ).scalars().first()
+
+
+def _msg_out(db: Session, msg: LinkedInMessage) -> LinkedInMessageOut:
+    contact = db.get(Contact, msg.contact_id) if msg.contact_id else None
+    company = db.get(Company, msg.company_id) if msg.company_id else None
+    principal = db.get(Principal, msg.principal_id) if msg.principal_id else None
+    return LinkedInMessageOut(
+        id=msg.id,
+        principal_id=msg.principal_id,
+        campaign_id=msg.campaign_id,
+        company_id=msg.company_id,
+        contact_id=msg.contact_id,
+        insight_id=msg.insight_id,
+        body=msg.body,
+        invitation_note=msg.invitation_note,
+        status=msg.status,
+        provider=msg.provider,
+        network_distance=msg.network_distance,
+        connected=bool(msg.connected),
+        public_identifier=msg.public_identifier,
+        provider_chat_id=msg.provider_chat_id,
+        approved_by=msg.approved_by,
+        created_at=msg.created_at,
+        invitation_sent_at=msg.invitation_sent_at,
+        sent_at=msg.sent_at,
+        replied_at=msg.replied_at,
+        reply_snippet=msg.reply_snippet,
+        reply_body=msg.reply_body,
+        last_reply_check_at=msg.last_reply_check_at,
+        last_status_check_at=msg.last_status_check_at,
+        error=msg.error,
+        principal_name=principal.name if principal else None,
+        contact_name=contact.name if contact else None,
+        contact_title=contact.title if contact else None,
+        company_name=company.name if company else None,
+        linkedin_url=contact.linkedin_url if contact else None,
+        discovery_run_id=contact.discovery_run_id if contact else None,
+    )
+
+
+def _active_account_id() -> Optional[str]:
+    return get_setting(ACTIVE_ACCOUNT_SETTING) or settings.unipile_account_id or None
+
+
+@router.get("/account")
+def linkedin_account():
+    """Report the configured LinkedIn provider + connection health for a banner."""
+    provider = get_linkedin_provider()
+    configured = settings.linkedin_provider == "unipile" and bool(
+        settings.unipile_api_key and settings.unipile_dsn
+    )
+    return {
+        "provider": provider.name,
+        "configured": configured or provider.name == "stub",
+        "account_id": _active_account_id(),
+    }
+
+
+@router.get("/accounts")
+def list_accounts():
+    """List connected LinkedIn accounts + which one is active (for the picker)."""
+    provider = get_linkedin_provider()
+    lister = getattr(provider, "list_accounts", None)
+    accounts = lister() if lister else []
+    return {
+        "provider": provider.name,
+        "active_account_id": _active_account_id(),
+        "accounts": accounts,
+    }
+
+
+@router.post("/connect-link")
+def create_connect_link(payload: LinkedInConnectRequest, db: Session = Depends(get_db)):
+    """Create a Unipile hosted-auth link to connect a LinkedIn account from the UI."""
+    provider = get_linkedin_provider()
+    maker = getattr(provider, "create_hosted_auth_link", None)
+    if maker is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Connecting accounts requires the Unipile provider (LINKEDIN_PROVIDER=unipile).",
+        )
+    base = (settings.app_public_url or "").strip().rstrip("/")
+    success_url = f"{base}/linkedin?connected=1" if base else None
+    url, error = maker(
+        name=payload.name or "rse-user",
+        success_redirect_url=success_url,
+        failure_redirect_url=success_url,
+    )
+    if not url:
+        raise HTTPException(status_code=502, detail=error or "Could not create link")
+    return {"url": url}
+
+
+@router.post("/select-account")
+def select_account(payload: LinkedInSelectAccountRequest):
+    """Set the active connected LinkedIn account used for sending."""
+    account_id = (payload.account_id or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=400, detail="account_id is required")
+    set_setting(ACTIVE_ACCOUNT_SETTING, account_id)
+    return {"active_account_id": account_id}
+
+
+@router.get("", response_model=Page[LinkedInMessageOut])
+def list_messages(
+    db: Session = Depends(get_db),
+    status: Optional[str] = None,
+    contact_id: Optional[int] = None,
+    principal_id: Optional[int] = None,
+    campaign_id: Optional[int] = None,
+    discovery_run_id: Optional[int] = None,
+    limit: int = Query(50, le=1000),
+    offset: int = 0,
+):
+    query = select(LinkedInMessage)
+    count_query = select(func.count()).select_from(LinkedInMessage)
+    if discovery_run_id is not None:
+        run_filter = Contact.discovery_run_id == discovery_run_id
+        query = query.join(Contact, LinkedInMessage.contact_id == Contact.id).where(run_filter)
+        count_query = (
+            select(func.count())
+            .select_from(LinkedInMessage)
+            .join(Contact, LinkedInMessage.contact_id == Contact.id)
+            .where(run_filter)
+        )
+    if status:
+        query = query.where(LinkedInMessage.status == status)
+        count_query = count_query.where(LinkedInMessage.status == status)
+    if contact_id is not None:
+        query = query.where(LinkedInMessage.contact_id == contact_id)
+        count_query = count_query.where(LinkedInMessage.contact_id == contact_id)
+    if principal_id is not None:
+        query = query.where(LinkedInMessage.principal_id == principal_id)
+        count_query = count_query.where(LinkedInMessage.principal_id == principal_id)
+    if campaign_id is not None:
+        query = query.where(LinkedInMessage.campaign_id == campaign_id)
+        count_query = count_query.where(LinkedInMessage.campaign_id == campaign_id)
+    query = query.order_by(LinkedInMessage.created_at.desc()).limit(limit).offset(offset)
+    items = db.execute(query).scalars().all()
+    total = db.execute(count_query).scalar_one()
+    return Page[LinkedInMessageOut](
+        items=[_msg_out(db, m) for m in items], total=total, limit=limit, offset=offset
+    )
+
+
+def _existing_open_message(db: Session, principal_id: int, contact_id: int):
+    return db.execute(
+        select(LinkedInMessage)
+        .where(
+            LinkedInMessage.principal_id == principal_id,
+            LinkedInMessage.contact_id == contact_id,
+            LinkedInMessage.status.in_(_OPEN_STATUSES),
+        )
+        .order_by(LinkedInMessage.created_at.desc())
+    ).scalars().first()
+
+
+@router.post("/generate", response_model=LinkedInMessageOut)
+def generate_message(payload: LinkedInGenerateRequest, db: Session = Depends(get_db)):
+    principal = db.get(Principal, payload.principal_id)
+    contact = db.get(Contact, payload.contact_id)
+    if not principal or not contact:
+        raise HTTPException(status_code=404, detail="Principal or prospect not found")
+    if not public_identifier_from_url(contact.linkedin_url or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="Prospect has no personal LinkedIn profile URL (a /in/ link). "
+            "Company pages can't be messaged.",
+        )
+    if contact.do_not_contact:
+        raise HTTPException(status_code=400, detail="Prospect is on do-not-contact list")
+
+    if not payload.regenerate:
+        existing = _existing_open_message(db, principal.id, contact.id)
+        if existing is not None:
+            return _msg_out(db, existing)
+
+    company = db.get(Company, contact.company_id) if contact.company_id else None
+    insight = _latest_insight(db, principal.id, contact.id)
+    content = generate_linkedin_content(
+        db, principal, contact, company, insight, outreach_goal=payload.outreach_goal
+    )
+    msg = LinkedInMessage(
+        principal_id=principal.id,
+        company_id=contact.company_id,
+        contact_id=contact.id,
+        insight_id=insight.id if insight else None,
+        body=content.body,
+        invitation_note=content.invitation_note,
+        status=LinkedInStatus.DRAFT,
+    )
+    db.add(msg)
+    log_action(
+        db,
+        AuditAction.LINKEDIN_DRAFT,
+        entity_type="linkedin_message",
+        summary=f"Drafted LinkedIn message for principal {principal.id} -> prospect {contact.id}",
+    )
+    db.commit()
+    db.refresh(msg)
+    return _msg_out(db, msg)
+
+
+@router.post("/generate-run")
+def generate_run_messages(payload: LinkedInGenerateRunRequest, db: Session = Depends(get_db)):
+    """Draft LinkedIn messages for approved prospects (with a LinkedIn URL) in a run."""
+    run = db.get(DiscoveryRun, payload.discovery_run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    principal_id = payload.principal_id or run.principal_id
+    if principal_id is None:
+        raise HTTPException(status_code=400, detail="No principal for this run")
+    principal = db.get(Principal, principal_id)
+    if principal is None:
+        raise HTTPException(status_code=404, detail="Principal not found")
+
+    approved = list(
+        db.execute(
+            select(Contact)
+            .where(
+                Contact.discovery_run_id == payload.discovery_run_id,
+                Contact.approved_for_outreach.is_(True),
+            )
+            .order_by(Contact.id)
+        ).scalars().all()
+    )
+    generated = 0
+    skipped = 0
+    errors: list[str] = []
+    for contact in approved:
+        # Only personal /in/ profiles can be messaged; skip company pages / blanks.
+        if not public_identifier_from_url(contact.linkedin_url or "") or contact.do_not_contact:
+            skipped += 1
+            continue
+        if _existing_open_message(db, principal.id, contact.id) is not None:
+            skipped += 1
+            continue
+        try:
+            company = db.get(Company, contact.company_id) if contact.company_id else None
+            insight = _latest_insight(db, principal.id, contact.id)
+            content = generate_linkedin_content(
+                db, principal, contact, company, insight,
+                outreach_goal=payload.outreach_goal,
+            )
+            db.add(
+                LinkedInMessage(
+                    principal_id=principal.id,
+                    company_id=contact.company_id,
+                    contact_id=contact.id,
+                    insight_id=insight.id if insight else None,
+                    body=content.body,
+                    invitation_note=content.invitation_note,
+                    status=LinkedInStatus.DRAFT,
+                )
+            )
+            generated += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{contact.name or contact.id}: {exc}")
+    if generated:
+        log_action(
+            db,
+            AuditAction.LINKEDIN_DRAFT,
+            entity_type="discovery_run",
+            summary=f"Generated {generated} LinkedIn message(s) for run {payload.discovery_run_id}",
+        )
+        db.commit()
+    return {
+        "discovery_run_id": payload.discovery_run_id,
+        "candidates": len(approved),
+        "generated": generated,
+        "skipped": skipped,
+        "errors": errors[:10],
+    }
+
+
+@router.patch("/{message_id}", response_model=LinkedInMessageOut)
+def update_message(
+    message_id: int, payload: LinkedInUpdateRequest, db: Session = Depends(get_db)
+):
+    msg = db.get(LinkedInMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if msg.status in (LinkedInStatus.SENT, LinkedInStatus.REPLIED, LinkedInStatus.INVITE_SENT):
+        raise HTTPException(status_code=400, detail="Cannot edit a sent/invited message")
+    if payload.body is not None:
+        msg.body = payload.body
+    if payload.invitation_note is not None:
+        msg.invitation_note = payload.invitation_note[:300]
+    db.commit()
+    db.refresh(msg)
+    return _msg_out(db, msg)
+
+
+@router.post("/{message_id}/status", response_model=LinkedInMessageOut)
+def set_status(
+    message_id: int, payload: LinkedInStatusRequest, db: Session = Depends(get_db)
+):
+    msg = db.get(LinkedInMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    msg.status = payload.status
+    if payload.status == LinkedInStatus.APPROVED:
+        msg.approved_by = payload.approved_by
+        msg.approved_at = datetime.utcnow()
+    log_action(
+        db,
+        AuditAction.LINKEDIN_APPROVAL,
+        entity_type="linkedin_message",
+        entity_id=msg.id,
+        actor=payload.approved_by or "user",
+        summary=f"LinkedIn status -> {payload.status}",
+    )
+    db.commit()
+    db.refresh(msg)
+    return _msg_out(db, msg)
+
+
+@router.delete("/{message_id}", status_code=204)
+def delete_message(message_id: int, db: Session = Depends(get_db)):
+    msg = db.get(LinkedInMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if msg.status in (LinkedInStatus.SENT, LinkedInStatus.REPLIED, LinkedInStatus.INVITE_SENT):
+        raise HTTPException(status_code=400, detail="Cannot delete a sent/invited message")
+    db.delete(msg)
+    db.commit()
+
+
+def perform_linkedin_send(db: Session, msg: LinkedInMessage) -> LinkedInMessage:
+    """Send a message: DM if connected, else a connection invitation.
+
+    Shared by the manual /send endpoint. Commits on success; raises SendError.
+    """
+    if msg.status not in (LinkedInStatus.APPROVED, LinkedInStatus.INVITE_SENT):
+        raise SendError("Message must be APPROVED before sending")
+    contact = db.get(Contact, msg.contact_id) if msg.contact_id else None
+    if not contact or not (contact.linkedin_url or "").strip():
+        raise SendError("Prospect has no LinkedIn URL")
+    if not public_identifier_from_url(contact.linkedin_url or ""):
+        raise SendError(
+            "This prospect's LinkedIn URL is a company/invalid page, not a personal "
+            "profile — can't message on LinkedIn."
+        )
+    if contact.do_not_contact:
+        raise SendError("Prospect is on do-not-contact list")
+
+    provider = get_linkedin_provider()
+    profile = provider.resolve_profile(contact.linkedin_url)
+    if not profile.found or not profile.provider_id:
+        raise SendError(profile.error or "Could not resolve LinkedIn profile", status_code=502)
+
+    msg.provider = provider.name
+    msg.linkedin_provider_id = profile.provider_id
+    msg.public_identifier = profile.public_identifier
+    msg.network_distance = profile.network_distance
+    msg.connected = profile.is_connected
+
+    if profile.is_connected:
+        result = provider.send_message(provider_id=profile.provider_id, text=msg.body)
+        if not result.sent:
+            msg.error = result.error
+            db.commit()
+            raise SendError(result.error or "LinkedIn send failed", status_code=502)
+        msg.provider_chat_id = result.chat_id
+        msg.provider_message_id = result.message_id
+        msg.status = LinkedInStatus.SENT
+        msg.sent_at = datetime.utcnow()
+        msg.error = None
+        action, detail = AuditAction.LINKEDIN_SEND, "Sent LinkedIn DM"
+    else:
+        note = (msg.invitation_note or msg.body or "")[:300]
+        invite = provider.send_invitation(provider_id=profile.provider_id, note=note)
+        if invite.already_connected:
+            # Race: they're actually connected — DM instead.
+            result = provider.send_message(provider_id=profile.provider_id, text=msg.body)
+            if not result.sent:
+                msg.error = result.error
+                db.commit()
+                raise SendError(result.error or "LinkedIn send failed", status_code=502)
+            msg.connected = True
+            msg.provider_chat_id = result.chat_id
+            msg.provider_message_id = result.message_id
+            msg.status = LinkedInStatus.SENT
+            msg.sent_at = datetime.utcnow()
+            msg.error = None
+            action, detail = AuditAction.LINKEDIN_SEND, "Sent LinkedIn DM (already connected)"
+        elif not invite.sent:
+            msg.error = invite.error
+            db.commit()
+            raise SendError(invite.error or "LinkedIn invitation failed", status_code=502)
+        else:
+            msg.provider_invitation_id = invite.invitation_id
+            msg.status = LinkedInStatus.INVITE_SENT
+            msg.invitation_sent_at = datetime.utcnow()
+            msg.error = None
+            action, detail = AuditAction.LINKEDIN_INVITE, "Sent LinkedIn connection invitation"
+
+    db.add(
+        OutreachHistory(
+            company_id=msg.company_id,
+            contact_id=msg.contact_id,
+            channel="linkedin",
+            detail=f"{detail} via {provider.name}",
+        )
+    )
+    log_action(
+        db,
+        action,
+        entity_type="linkedin_message",
+        entity_id=msg.id,
+        summary=f"{detail} to prospect {msg.contact_id}",
+    )
+    db.commit()
+    db.refresh(msg)
+    return msg
+
+
+@router.post("/{message_id}/send", response_model=LinkedInMessageOut)
+def send_message(message_id: int, db: Session = Depends(get_db)):
+    msg = db.get(LinkedInMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    try:
+        perform_linkedin_send(db, msg)
+    except SendError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return _msg_out(db, msg)
+
+
+@router.post("/{message_id}/reply", response_model=LinkedInMessageOut)
+def reply_in_thread(
+    message_id: int, payload: LinkedInReplyRequest, db: Session = Depends(get_db)
+):
+    """Send a follow-up message in an existing LinkedIn chat."""
+    msg = db.get(LinkedInMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if not msg.provider_chat_id:
+        raise HTTPException(status_code=400, detail="No LinkedIn chat to reply in yet")
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Reply body is required")
+    provider = get_linkedin_provider()
+    sender = getattr(provider, "send_message_in_chat", None)
+    if sender is None:
+        raise HTTPException(status_code=400, detail="Provider does not support replies")
+    result = sender(chat_id=msg.provider_chat_id, text=body)
+    if not result.sent:
+        raise HTTPException(status_code=502, detail=result.error or "Reply failed")
+    log_action(
+        db,
+        AuditAction.LINKEDIN_SEND,
+        entity_type="linkedin_message",
+        entity_id=msg.id,
+        summary=f"Replied in LinkedIn chat to prospect {msg.contact_id}",
+    )
+    db.commit()
+    db.refresh(msg)
+    return _msg_out(db, msg)
+
+
+def scan_linkedin_updates(db: Session) -> dict:
+    """Poll: auto-DM accepted invites, and detect replies to sent messages.
+
+    Shared by the /check-updates route and the background poller. Degrades
+    gracefully when the provider does not support tracking (e.g. stub).
+    """
+    provider = get_linkedin_provider()
+    if not provider.supports_tracking():
+        return {"supported": False, "accepted": 0, "replied": 0}
+
+    now = datetime.utcnow()
+    accepted = 0
+    replied = 0
+
+    # 1) Invitations awaiting acceptance -> auto-send the queued message.
+    pending = db.execute(
+        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.INVITE_SENT)
+    ).scalars().all()
+    for msg in pending:
+        msg.last_status_check_at = now
+        identifier = msg.public_identifier or msg.linkedin_provider_id
+        if not identifier:
+            continue
+        profile = provider.resolve_profile(identifier)
+        if not profile.found:
+            continue
+        msg.network_distance = profile.network_distance
+        if not profile.is_connected:
+            continue
+        msg.connected = True
+        result = provider.send_message(
+            provider_id=profile.provider_id or msg.linkedin_provider_id, text=msg.body
+        )
+        if result.sent:
+            msg.provider_chat_id = result.chat_id
+            msg.provider_message_id = result.message_id
+            msg.status = LinkedInStatus.SENT
+            msg.sent_at = now
+            msg.error = None
+            accepted += 1
+            log_action(
+                db,
+                AuditAction.LINKEDIN_SEND,
+                entity_type="linkedin_message",
+                entity_id=msg.id,
+                summary=f"Auto-sent LinkedIn DM after invite accepted (prospect {msg.contact_id})",
+            )
+        else:
+            msg.error = result.error
+
+    # 2) Sent messages -> detect a reply.
+    sent = db.execute(
+        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.SENT)
+    ).scalars().all()
+    for msg in sent:
+        if not msg.provider_chat_id:
+            continue
+        msg.last_reply_check_at = now
+        result = provider.check_reply(
+            chat_id=msg.provider_chat_id,
+            provider_id=msg.linkedin_provider_id or "",
+            since=msg.sent_at or msg.created_at,
+        )
+        if result.found:
+            msg.status = LinkedInStatus.REPLIED
+            msg.replied_at = result.received_at or now
+            msg.reply_snippet = result.snippet
+            msg.reply_body = result.body or result.snippet
+            replied += 1
+            contact = db.get(Contact, msg.contact_id) if msg.contact_id else None
+            if contact and contact.status not in ("connected", "closed"):
+                contact.status = "connected"
+            log_action(
+                db,
+                AuditAction.LINKEDIN_APPROVAL,
+                entity_type="linkedin_message",
+                entity_id=msg.id,
+                summary=f"Detected LinkedIn reply from prospect {msg.contact_id}",
+            )
+
+    db.commit()
+    return {"supported": True, "accepted": accepted, "replied": replied}
+
+
+@router.post("/check-updates")
+def check_updates(db: Session = Depends(get_db)):
+    """Manually poll for accepted invitations and new replies."""
+    return scan_linkedin_updates(db)

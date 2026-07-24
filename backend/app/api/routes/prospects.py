@@ -343,6 +343,14 @@ def set_approval(
         blockers = outreach_draft_blockers(
             db, principal_id=principal.id, contact=contact
         )
+        # A prospect reachable on LinkedIn (a personal /in/ profile) can be
+        # approved without a revealed email (email drafting still enforces its
+        # own email requirement). Company pages don't count — they can't be
+        # messaged. This lets multi-channel outreach not miss anyone.
+        from app.services.linkedin_providers import public_identifier_from_url
+
+        if public_identifier_from_url(contact.linkedin_url or ""):
+            blockers = [b for b in blockers if b != "email not revealed"]
         if blockers:
             raise HTTPException(
                 status_code=400,

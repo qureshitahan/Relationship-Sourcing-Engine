@@ -35,7 +35,12 @@ from app.schemas.requests import (
 )
 from app.services.outreach_goal import outreach_goal_for_run
 from app.services.audit import log_action
-from app.services.email_providers import get_email_provider
+from app.services.email_providers import (
+    get_email_provider,
+    list_mailboxes,
+    provider_for_mailbox,
+    resolve_mailbox,
+)
 from app.services.insights.engine import (
     apply_signature,
     generate_followup,
@@ -58,6 +63,7 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
     contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
     company = db.get(Company, draft.company_id) if draft.company_id else None
     principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+    mailbox = resolve_mailbox(draft.from_mailbox)
     return EmailDraftOut(
         id=draft.id,
         principal_id=draft.principal_id,
@@ -81,14 +87,33 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
         open_count=draft.open_count or 0,
         first_opened_at=draft.first_opened_at,
         last_opened_at=draft.last_opened_at,
+        from_mailbox=draft.from_mailbox,
+        from_name=mailbox.from_name or None,
         principal_name=principal.name if principal else None,
-        from_email=settings.outreach_from_email or None,
+        from_email=mailbox.from_email or settings.outreach_from_email or None,
         contact_name=contact.name if contact else None,
         contact_email=contact.email if contact else None,
         contact_title=contact.title if contact else None,
         company_name=company.name if company else None,
         discovery_run_id=contact.discovery_run_id if contact else None,
     )
+
+
+@router.get("/mailboxes")
+def get_mailboxes():
+    """List selectable sending mailboxes for the 'Send from' picker."""
+    return {
+        "mailboxes": [
+            {
+                "id": mb.id,
+                "label": mb.label,
+                "from_email": mb.from_email,
+                "from_name": mb.from_name,
+                "provider": mb.provider,
+            }
+            for mb in list_mailboxes()
+        ]
+    }
 
 
 @router.get("", response_model=Page[EmailDraftOut])
@@ -697,6 +722,8 @@ def reply_to_thread(draft_id: int, payload: EmailReplyRequest, db: Session = Dep
         insight_id=previous.insight_id,
         subject=subject,
         body=body,
+        # Reply from the same mailbox the original was sent from.
+        from_mailbox=previous.from_mailbox,
         status=EmailStatus.APPROVED,
         approved_by="user",
         approved_at=datetime.utcnow(),
@@ -794,6 +821,8 @@ def update_draft(draft_id: int, payload: EmailUpdateRequest, db: Session = Depen
         draft.subject = payload.subject
     if payload.body is not None:
         draft.body = payload.body
+    if payload.from_mailbox is not None:
+        draft.from_mailbox = payload.from_mailbox or None
     db.commit()
     db.refresh(draft)
     return _draft_out(db, draft)
@@ -897,13 +926,14 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
         if pixel:
             html_body = _html_with_pixel(draft.body, pixel)
 
-    provider = get_email_provider()
+    mailbox = resolve_mailbox(draft.from_mailbox)
+    provider = provider_for_mailbox(mailbox)
     result = provider.send(
         to_email=contact.email,
         subject=draft.subject,
         body=draft.body,
-        from_email=settings.outreach_from_email,
-        from_name=settings.outreach_from_name,
+        from_email=mailbox.from_email or settings.outreach_from_email,
+        from_name=mailbox.from_name or settings.outreach_from_name,
         html_body=html_body,
     )
     if not result.sent:
@@ -988,7 +1018,8 @@ def schedule_email(
         draft.approved_at = datetime.utcnow()
     draft.approved_by = payload.approved_by
 
-    provider = get_email_provider()
+    mailbox = resolve_mailbox(draft.from_mailbox)
+    provider = provider_for_mailbox(mailbox)
     outlook = False
     if provider.supports_scheduled_send():
         # Hand off to Outlook for server-side deferred delivery.
@@ -1001,8 +1032,8 @@ def schedule_email(
             to_email=contact.email,
             subject=draft.subject,
             body=draft.body,
-            from_email=settings.outreach_from_email,
-            from_name=settings.outreach_from_name,
+            from_email=mailbox.from_email or settings.outreach_from_email,
+            from_name=mailbox.from_name or settings.outreach_from_name,
             html_body=html_body,
             send_at=when,
         )
@@ -1051,7 +1082,7 @@ def unschedule_email(draft_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Draft is not scheduled")
 
     if draft.outlook_scheduled and draft.provider_message_id:
-        provider = get_email_provider()
+        provider = provider_for_mailbox(resolve_mailbox(draft.from_mailbox))
         cancelled = provider.cancel_scheduled(
             remote_message_id=draft.provider_message_id
         )
@@ -1083,15 +1114,18 @@ def scan_replies(db: Session) -> dict:
     prospect to CONNECTED, and triggers deep research on reply. Degrades gracefully
     if Mail.Read is not granted.
     """
-    provider = get_email_provider()
-    if not provider.supports_reply_tracking():
+    # Reply tracking works per-mailbox: a Gmail-sent email is checked via Gmail
+    # IMAP, a Graph-sent one via Graph. Supported if ANY mailbox supports it.
+    if not any(
+        provider_for_mailbox(mb).supports_reply_tracking() for mb in list_mailboxes()
+    ):
         return {
             "checked": 0,
             "replied": 0,
             "supported": False,
             "message": (
-                "Reply tracking needs Microsoft Graph with Mail.Read. Set the "
-                "Microsoft credentials and ask IT to grant Mail.Read on the Azure app."
+                "Reply tracking needs Microsoft Graph (Mail.Read) or Gmail (IMAP). "
+                "Configure at least one sending mailbox with reply access."
             ),
         }
 
@@ -1109,6 +1143,9 @@ def scan_replies(db: Session) -> dict:
     for draft in sent_drafts:
         contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
         if not contact or not contact.email or not draft.sent_at:
+            continue
+        provider = provider_for_mailbox(resolve_mailbox(draft.from_mailbox))
+        if not provider.supports_reply_tracking():
             continue
         checked += 1
         result = provider.check_reply(

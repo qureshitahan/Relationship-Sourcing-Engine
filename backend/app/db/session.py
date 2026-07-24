@@ -87,6 +87,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "relevance_note": "TEXT",
     },
     "email_drafts": {
+        "from_mailbox": "VARCHAR(64)",
         "conversation_id": "VARCHAR(255)",
         "internet_message_id": "VARCHAR(512)",
         "replied_at": "DATETIME",
