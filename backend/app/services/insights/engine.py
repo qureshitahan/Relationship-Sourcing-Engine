@@ -333,7 +333,14 @@ def refresh_principal_draft_signatures(
     *,
     previous_signature: Optional[str] = None,
 ) -> int:
-    """Re-apply ``principal``'s signature on every unsent draft. Returns count updated."""
+    """Re-apply ``principal``'s signature on their unsent outreach.
+
+    Covers drafts, approved, and in-app scheduled emails, so editing the
+    signature updates everything still waiting to go out. Outlook server-side
+    deferred sends are skipped: their queued copy already lives at Microsoft, so
+    rewriting the local body would drift from what actually gets delivered.
+    Returns how many emails were updated.
+    """
     from app.models.email_draft import EmailDraft
     from app.models.enums import EmailStatus
 
@@ -349,6 +356,8 @@ def refresh_principal_draft_signatures(
     ).scalars().all()
     updated = 0
     for draft in drafts:
+        if draft.status == EmailStatus.SCHEDULED and draft.outlook_scheduled:
+            continue
         new_body = apply_signature(
             draft.body or "",
             principal,
