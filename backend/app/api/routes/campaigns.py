@@ -402,8 +402,8 @@ def schedule_approved_emails(campaign_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Nothing to schedule — no approved emails are waiting, or the "
-                "principal's daily cap is already used up for today."
+                "Nothing to schedule — no approved emails with a valid address "
+                "are waiting."
             ),
         )
     log_action(

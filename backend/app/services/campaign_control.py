@@ -92,15 +92,17 @@ def unschedule_campaign_emails(db: Session, campaign_id: int) -> UnscheduleResul
 def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
     """Re-queue a campaign's approved-but-unscheduled emails with AI timing.
 
-    Used when resuming after a pause: rather than making the user send each
-    email by hand, everything that was pulled back is scheduled again using the
-    same per-recipient timing the agent uses (good local business hour in the
-    recipient's timezone, spaced out, A/B time buckets). Respects the
-    principal's shared daily cap. Returns how many were scheduled.
+    Schedules the *entire* approved backlog in one click, packed across days so
+    each day stays within the principal's shared mailbox cap (e.g. 120/day).
+    Today's remaining capacity is used first; the rest spill into tomorrow,
+    the day after, and so on. Returns how many were scheduled.
     """
     import random
-    from datetime import datetime
+    from datetime import datetime, timedelta
 
+    from sqlalchemy import func
+
+    from app.core.config import settings
     from app.models.agent_config import AgentConfig
     from app.models.contact import Contact
     from app.models.principal import Principal
@@ -110,7 +112,6 @@ def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
         personalized_send_time_utc,
         staggered_send_times_utc,
     )
-    from app.core.config import settings
 
     config = db.get(AgentConfig, campaign_id)
     if config is None or config.paused:
@@ -131,30 +132,45 @@ def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
     if not candidates:
         return 0
 
-    # Don't blow through the principal's shared daily cap in one go; the rest
-    # stay approved and get picked up on the next resume/run.
-    from app.services.agent.orchestrator import _remaining_daily_cap
-
-    remaining = _remaining_daily_cap(db, principal)
-    if remaining <= 0:
-        return 0
-
     sendable: List[EmailDraft] = []
     for draft in candidates:
         contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
         if not contact or not contact.email or contact.do_not_contact:
             continue
         sendable.append(draft)
-        if len(sendable) >= remaining:
-            break
     if not sendable:
         return 0
+
+    # Pack across days using the shared mailbox cap. Cap of 0 means "unlimited"
+    # for this re-queue path (still stagger times so nothing fires as one burst).
+    from app.services.agent.orchestrator import _sent_today
+
+    cap = max(0, int(getattr(principal, "mailbox_daily_cap", None) or 0))
+    day_cap = cap if cap > 0 else max(len(sendable), 1)
+
+    start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    already_queued_today = int(
+        db.execute(
+            select(func.count())
+            .select_from(EmailDraft)
+            .where(
+                EmailDraft.principal_id == principal.id,
+                EmailDraft.status == EmailStatus.SCHEDULED,
+                EmailDraft.scheduled_at.isnot(None),
+                EmailDraft.scheduled_at >= start,
+                EmailDraft.scheduled_at < end,
+            )
+        ).scalar_one()
+    )
+    sent_today = _sent_today(db, principal.id)
 
     auto_schedule = bool(getattr(config, "auto_schedule", True))
     winning_bucket = best_send_bucket(db, principal)
     delay = max(0, int(settings.send_batch_delay_seconds or 120))
     gap_minutes = max(1, delay // 60) if delay else 2
 
+    # Precompute fixed-window times for the whole backlog when auto_schedule is off.
     fixed_times: List = []
     if not auto_schedule:
         fixed_times = staggered_send_times_utc(
@@ -167,25 +183,66 @@ def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
 
     now = datetime.utcnow()
     scheduled = 0
-    for idx, draft in enumerate(sendable):
+
+    # Seed today's occupancy so we don't double-book the remaining cap.
+    # Keyed by UTC date — close enough for packing; send times themselves stay
+    # recipient-local via personalized_send_time_utc.
+    from collections import defaultdict
+
+    day_counts: dict = defaultdict(int)
+    day_counts[start.date()] = already_queued_today + sent_today
+
+    for global_idx, draft in enumerate(sendable):
         contact = db.get(Contact, draft.contact_id)
         bucket_index: Optional[int] = None
         if auto_schedule:
             if winning_bucket is not None and random.random() < (1 - EXPLORE_EPSILON):
                 bucket_index = winning_bucket
             else:
-                bucket_index = idx % len(AB_SEND_BUCKETS)
-            when = personalized_send_time_utc(
-                location=contact.location if contact else None,
-                order_index=idx,
-                ab_index=bucket_index,
-            )
+                bucket_index = global_idx % len(AB_SEND_BUCKETS)
+
+            # Walk forward day by day until we find one under the daily cap.
+            day_offset = 0
+            when = now
+            for _ in range(60):  # safety: never loop forever
+                intended = (now + timedelta(days=day_offset)).date()
+                if day_counts[intended] >= day_cap:
+                    day_offset += 1
+                    continue
+                # How many of THIS batch already land on the intended day.
+                order_index = max(
+                    0,
+                    day_counts[intended]
+                    - (already_queued_today + sent_today if intended == start.date() else 0),
+                )
+                when = personalized_send_time_utc(
+                    location=contact.location if contact else None,
+                    order_index=order_index,
+                    ab_index=bucket_index if bucket_index is not None else 0,
+                    day_offset=day_offset,
+                )
+                if when <= now:
+                    day_offset += 1
+                    continue
+                landed = when.date()
+                if day_counts[landed] >= day_cap:
+                    day_offset = max(day_offset + 1, (landed - start.date()).days + 1)
+                    continue
+                day_counts[landed] += 1
+                break
+            else:
+                when = now + timedelta(days=day_offset, minutes=global_idx * gap_minutes)
+                day_counts[when.date()] += 1
         else:
-            when = fixed_times[idx] if idx < len(fixed_times) else now
-        # Never schedule in the past — a resumed email should go out on the next
-        # good slot, not fire instantly for everyone at once.
-        if when <= now:
-            continue
+            when = (
+                fixed_times[global_idx]
+                if global_idx < len(fixed_times)
+                else now + timedelta(minutes=global_idx * gap_minutes)
+            )
+            if when <= now:
+                when = now + timedelta(minutes=max(2, gap_minutes) * (global_idx + 1))
+            day_counts[when.date()] += 1
+
         draft.send_bucket_index = bucket_index
         draft.status = EmailStatus.SCHEDULED
         draft.scheduled_at = when
@@ -193,6 +250,7 @@ def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
         if not draft.approved_at:
             draft.approved_at = now
         scheduled += 1
+
     return scheduled
 
 

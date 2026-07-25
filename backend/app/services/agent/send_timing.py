@@ -75,6 +75,7 @@ def personalized_send_time_utc(
     order_index: int,
     ab_index: int,
     gap_minutes: int = 7,
+    day_offset: int = 0,
     default_tz: str = _EASTERN,
 ) -> datetime:
     """Pick a UTC send time at a good local hour in the RECIPIENT'S timezone.
@@ -83,20 +84,34 @@ def personalized_send_time_utc(
       agent can A/B test morning vs. afternoon sends.
     - ``order_index`` spaces sends out (``gap_minutes`` apart) so a batch never
       fires all at once from the same mailbox.
-    - If the local slot has already passed today, it rolls to the next day.
+    - ``day_offset`` starts on a future calendar day (0 = today) so large
+      batches can be packed across days without blowing a daily send cap.
+    - Stagger is clamped so the slot stays before 6pm local on the intended day.
+    - If today's slot has already passed, it rolls to the next day.
     """
     tz = ZoneInfo(timezone_for_location(location, default_tz))
     bucket = AB_SEND_BUCKETS[ab_index % len(AB_SEND_BUCKETS)]
+    gap = max(1, int(gap_minutes))
     now_local = datetime.now(tz)
-    # Stagger by pushing later recipients forward in real time.
-    target = now_local.replace(
+    day_offset = max(0, int(day_offset))
+
+    # Clamp stagger so we never leave business hours on the intended day
+    # (otherwise large batches quietly spill into the following day).
+    end_minute = 17 * 60 + 45  # ~5:45pm local
+    bucket_minute = bucket[0] * 60 + bucket[1]
+    max_steps = max(0, (end_minute - bucket_minute) // gap)
+    stagger = min(max(0, int(order_index)), max_steps) * gap
+
+    base_day = now_local + timedelta(days=day_offset)
+    target = base_day.replace(
         hour=bucket[0], minute=bucket[1], second=0, microsecond=0
-    ) + timedelta(minutes=order_index * max(1, gap_minutes))
-    # Keep inside ~business hours; if past 6pm local, move to tomorrow's bucket.
-    if target <= now_local or target.hour >= 18:
+    ) + timedelta(minutes=stagger)
+
+    # Only roll forward when the intended day is today and the slot is gone.
+    if day_offset == 0 and target <= now_local:
         target = (now_local + timedelta(days=1)).replace(
             hour=bucket[0], minute=bucket[1], second=0, microsecond=0
-        ) + timedelta(minutes=order_index * max(1, gap_minutes))
+        ) + timedelta(minutes=stagger)
     return target.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
 

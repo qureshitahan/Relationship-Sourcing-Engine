@@ -673,7 +673,7 @@ export default function CampaignDashboard() {
     onSuccess: (d) => {
       notify(
         d.scheduled_count > 0
-          ? `Campaign resumed — ${d.scheduled_count} email(s) re-scheduled at AI-picked times.`
+          ? `Campaign resumed — ${d.scheduled_count} email(s) re-scheduled across the next few days.`
           : "Campaign resumed. Daily automation stays off until you turn it on."
       );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
@@ -685,7 +685,9 @@ export default function CampaignDashboard() {
   const scheduleApproved = useMutation({
     mutationFn: () => scheduleApprovedEmails(campaignId),
     onSuccess: (d) => {
-      notify(`Queued — ${d.scheduled_count} email(s) scheduled at AI-picked times.`);
+      notify(
+        `Queued ${d.scheduled_count} email(s) at AI-picked times across the next few days.`
+      );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
