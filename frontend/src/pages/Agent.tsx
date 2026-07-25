@@ -6,10 +6,11 @@ import { listCampaigns, listPrincipals } from "../api/client";
 import { Badge, Button, Loading } from "../components/ui";
 import type { CampaignSummary } from "../types";
 
-type Tone = "green" | "blue" | "amber" | "slate";
+type Tone = "green" | "blue" | "amber" | "slate" | "red";
 
 const STATUS_TONE: Record<CampaignSummary["status"], Tone> = {
   running: "blue",
+  paused: "red",
   ready: "green",
   draft: "amber",
 };
