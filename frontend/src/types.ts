@@ -14,6 +14,7 @@ export interface Principal {
   linkedin_url?: string | null;
   phone?: string | null;
   email_signature?: string | null;
+  outreach_mailbox_id?: string | null;
   objective?: string | null;
   document_focus?: string | null;
   bio?: string | null;

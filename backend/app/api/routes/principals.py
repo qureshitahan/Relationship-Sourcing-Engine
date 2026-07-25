@@ -26,6 +26,22 @@ from app.services.principal_docs.ingest import (
 router = APIRouter(prefix="/principals", tags=["principals"])
 
 
+def _validated_mailbox_id(mailbox_id: Optional[str]) -> Optional[str]:
+    """Reject unknown mailbox ids so outreach can't be bound to a dead sender."""
+    cleaned = (mailbox_id or "").strip()
+    if not cleaned:
+        return None
+    from app.services.email_providers import list_mailboxes
+
+    known = {mb.id for mb in list_mailboxes()}
+    if cleaned not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown mailbox '{cleaned}'. Available: {', '.join(sorted(known))}",
+        )
+    return cleaned
+
+
 @router.get("", response_model=Page[PrincipalOut])
 def list_principals(
     db: Session = Depends(get_db),
@@ -52,6 +68,7 @@ def create_principal(payload: PrincipalRequest, db: Session = Depends(get_db)):
         linkedin_url=payload.linkedin_url,
         phone=payload.phone,
         email_signature=(payload.email_signature or "").strip() or None,
+        outreach_mailbox_id=_validated_mailbox_id(payload.outreach_mailbox_id),
         objective=payload.objective,
         document_focus=payload.document_focus,
         bio=payload.bio,
@@ -102,6 +119,8 @@ def update_principal(
     data = payload.model_dump(exclude_unset=True)
     if "email_signature" in data:
         data["email_signature"] = (data["email_signature"] or "").strip() or None
+    if "outreach_mailbox_id" in data:
+        data["outreach_mailbox_id"] = _validated_mailbox_id(data["outreach_mailbox_id"])
     for field, value in data.items():
         setattr(principal, field, value)
     # Keep unsent drafts in sync when the sign-off changes so campaigns pick

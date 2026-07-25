@@ -42,7 +42,11 @@ from app.models.search_definition import SearchDefinition
 from app.services.agent.planner import criteria_from_dict
 from app.services.audit import log_action
 from app.services.discovery import run_discovery
-from app.services.email_providers import get_email_provider
+from app.services.email_providers import (
+    MailboxUnassignedError,
+    mailbox_for_principal,
+    provider_for_mailbox,
+)
 from app.services.enrichment.base import DiscoveryCriteria
 from app.services.insights.engine import generate_insight, generate_outreach
 from app.services.outreach_eligibility import outreach_draft_blockers
@@ -456,6 +460,16 @@ def execute_run(run_id: int) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Copy variant setup failed; using default copy: %s", exc)
 
+        # This principal's own send-from mailbox. Stop the run rather than draft
+        # a batch that would go out from somebody else's address.
+        try:
+            principal_mailbox_id = mailbox_for_principal(principal).id
+        except MailboxUnassignedError as exc:
+            errors.append(str(exc))
+            _stage(run, "draft", drafted=0, note=str(exc))
+            db.commit()
+            return
+
         drafted_ids: list[int] = []
         drafted_people: list[str] = []
         for cid in qualified_ids:
@@ -526,6 +540,9 @@ def execute_run(run_id: int) -> None:
                     copy_variant_id=copy_variant.id if copy_variant else None,
                     subject=content.subject,
                     body=content.body,
+                    # Stamp the principal's own mailbox so the sender is explicit
+                    # in the review UI, not a global default resolved at send time.
+                    from_mailbox=principal_mailbox_id,
                     status=EmailStatus.APPROVED if config.auto_send else EmailStatus.DRAFT,
                 )
                 if copy_variant is not None:
@@ -1001,15 +1018,18 @@ def _send_digest(
     ]
     body = "\n".join(lines)
 
-    provider = get_email_provider()
+    # Internal digest to the operator — not prospect outreach, so a default
+    # sender is acceptable here.
+    mailbox = mailbox_for_principal(principal, strict=False)
+    provider = provider_for_mailbox(mailbox)
     for to_email in recipients:
         try:
             provider.send(
                 to_email=to_email,
                 subject=subject,
                 body=body,
-                from_email=settings.outreach_from_email,
-                from_name=settings.outreach_from_name or "Sourcing Agent",
+                from_email=mailbox.from_email or settings.outreach_from_email,
+                from_name=mailbox.from_name or settings.outreach_from_name or "Sourcing Agent",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Digest send to %s failed: %s", to_email, exc)

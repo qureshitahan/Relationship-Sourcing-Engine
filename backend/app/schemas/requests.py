@@ -23,6 +23,8 @@ class PrincipalRequest(BaseModel):
     phone: str = ""
     # Exact sign-off appended to outreach emails. Blank = default name + LinkedIn.
     email_signature: Optional[str] = None
+    # Which configured mailbox this principal's outreach is sent FROM.
+    outreach_mailbox_id: Optional[str] = None
     objective: Optional[str] = None  # deprecated — use Agent/Discover goal instead
     document_focus: Optional[str] = None
     bio: Optional[str] = None

@@ -62,6 +62,12 @@ class Principal(Base, TimestampMixin):
     # looking like spam). Enforced by the agent's send step.
     mailbox_daily_cap: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
 
+    # Which configured mailbox this principal's outreach is sent FROM. Ids come
+    # from OUTREACH_MAILBOXES (see services/email_providers/mailboxes.py). Blank
+    # is only safe when a single mailbox is configured — otherwise the send is
+    # refused rather than going out as the wrong person.
+    outreach_mailbox_id: Mapped[Optional[str]] = mapped_column(String(64))
+
     search_definitions = relationship(
         "SearchDefinition", back_populates="principal", cascade="all, delete-orphan"
     )

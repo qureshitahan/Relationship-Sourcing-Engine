@@ -117,14 +117,72 @@ def list_mailboxes() -> List[Mailbox]:
     return configured or [default_mailbox()]
 
 
+def find_mailbox(mailbox_id: Optional[str]) -> Optional[Mailbox]:
+    """Look up a mailbox by id, or None when it is unset/unknown."""
+    if not mailbox_id:
+        return None
+    for mb in list_mailboxes():
+        if mb.id == mailbox_id:
+            return mb
+    return None
+
+
 def resolve_mailbox(mailbox_id: Optional[str]) -> Mailbox:
     """Resolve a draft's ``from_mailbox`` id to a Mailbox.
 
-    Unknown/empty ids fall back to the legacy default so a draft can never
-    become unsendable because of a missing/renamed mailbox.
+    Unknown/empty ids fall back to the configured default (or the legacy
+    default) so a draft can never become unsendable because of a missing or
+    renamed mailbox.
     """
-    if mailbox_id:
-        for mb in list_mailboxes():
-            if mb.id == mailbox_id:
-                return mb
+    found = find_mailbox(mailbox_id)
+    if found:
+        return found
+    fallback = find_mailbox(settings.default_outreach_mailbox_id)
+    if fallback:
+        return fallback
     return default_mailbox()
+
+
+class MailboxUnassignedError(RuntimeError):
+    """A principal's send-from mailbox is ambiguous, so we refuse to send.
+
+    Raised instead of silently falling back to the global default, which would
+    deliver the email from the wrong person's address.
+    """
+
+    def __init__(self, principal_name: str):
+        self.principal_name = principal_name
+        super().__init__(
+            f'No send-from mailbox is set for "{principal_name}". Open the '
+            "Principals page and choose their outreach mailbox — refusing to "
+            "send from another principal's address."
+        )
+
+
+def mailbox_for_principal(principal: object, *, strict: bool = True) -> Mailbox:
+    """The mailbox a principal's outreach must be sent from.
+
+    Uses ``principal.outreach_mailbox_id`` when set. When it is not set we only
+    fall back if there is exactly one mailbox configured (no ambiguity about
+    who the sender is); otherwise ``strict`` callers get
+    ``MailboxUnassignedError`` so an email never goes out under the wrong
+    identity. Non-strict callers (digests, previews) take the default.
+    """
+    assigned = getattr(principal, "outreach_mailbox_id", None) if principal else None
+    found = find_mailbox(assigned)
+    if found:
+        return found
+
+    boxes = list_mailboxes()
+    if len(boxes) == 1:
+        return boxes[0]
+
+    if assigned:
+        logger.warning(
+            "Principal mailbox %r is not in OUTREACH_MAILBOXES; treating as unassigned.",
+            assigned,
+        )
+    if strict:
+        name = getattr(principal, "name", None) or "this principal"
+        raise MailboxUnassignedError(str(name))
+    return resolve_mailbox(None)

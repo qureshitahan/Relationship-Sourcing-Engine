@@ -113,6 +113,10 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("outreach_mailboxes", "OUTREACH_MAILBOXES"),
     )
+    # Mailbox id used when a draft/principal has none. Only applies as a fallback
+    # for non-outreach mail (digests); principal outreach requires an explicit
+    # mailbox when several are configured.
+    default_outreach_mailbox_id: str = ""
     outreach_from_email: str = "dalbir.bains@galaxypharma.net"
     outreach_from_name: str = "Dalbir Bains"
     # Appended to outreach email signatures when the principal has no linkedin_url set.

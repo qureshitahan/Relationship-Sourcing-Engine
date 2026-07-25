@@ -35,8 +35,12 @@ from app.schemas.requests import (
 from app.services.outreach_goal import outreach_goal_for_run
 from app.services.audit import log_action
 from app.services.email_providers import (
+    Mailbox,
+    MailboxUnassignedError,
+    find_mailbox,
     get_email_provider,
     list_mailboxes,
+    mailbox_for_principal,
     provider_for_mailbox,
     resolve_mailbox,
 )
@@ -59,12 +63,46 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/emails", tags=["emails"])
 
 
+def _principal_mailbox_id(principal: Principal) -> Optional[str]:
+    """The principal's mailbox id for stamping on a new draft.
+
+    Returns None when it can't be determined; the send path then blocks with a
+    clear message rather than the draft silently inheriting a global default.
+    """
+    try:
+        return mailbox_for_principal(principal).id
+    except MailboxUnassignedError:
+        return None
+
+
+def mailbox_for_draft(db: Session, draft: EmailDraft) -> Mailbox:
+    """The mailbox a draft must be sent from.
+
+    An explicit ``from_mailbox`` (per-draft picker, bulk campaign) always wins.
+    Otherwise the principal's own mailbox is used — never a global default, which
+    would deliver a principal's email from somebody else's address.
+    """
+    explicit = find_mailbox(draft.from_mailbox)
+    if explicit:
+        return explicit
+    principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
+    if principal is not None:
+        return mailbox_for_principal(principal)
+    return resolve_mailbox(draft.from_mailbox)
+
+
 def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
     """Build API response with recipient/sender context for the review UI."""
     contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
     company = db.get(Company, draft.company_id) if draft.company_id else None
     principal = db.get(Principal, draft.principal_id) if draft.principal_id else None
-    mailbox = resolve_mailbox(draft.from_mailbox)
+    try:
+        mailbox = mailbox_for_draft(db, draft)
+    except MailboxUnassignedError:
+        # Surface the gap in the UI instead of implying a sender we won't use.
+        mailbox = Mailbox(
+            id="", label="", provider="", from_email="", from_name=""
+        )
     return EmailDraftOut(
         id=draft.id,
         principal_id=draft.principal_id,
@@ -92,7 +130,7 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
         from_mailbox=draft.from_mailbox,
         from_name=mailbox.from_name or None,
         principal_name=principal.name if principal else None,
-        from_email=mailbox.from_email or settings.outreach_from_email or None,
+        from_email=mailbox.from_email or None,
         contact_name=contact.name if contact else None,
         contact_email=contact.email if contact else None,
         contact_title=contact.title if contact else None,
@@ -237,6 +275,7 @@ def generate_draft(payload: EmailGenerateRequest, db: Session = Depends(get_db))
         insight_id=insight.id if insight else None,
         subject=content.subject,
         body=content.body,
+        from_mailbox=_principal_mailbox_id(principal),
         status=EmailStatus.DRAFT,
     )
     db.add(draft)
@@ -419,6 +458,7 @@ def generate_run_drafts(payload: EmailGenerateRunRequest, db: Session = Depends(
                 insight_id=insight.id if insight else None,
                 subject=result.subject,
                 body=result.body,
+                from_mailbox=_principal_mailbox_id(principal),
                 status=EmailStatus.DRAFT,
             )
             db.add(draft)
@@ -569,6 +609,9 @@ def _build_followup(db: Session, previous: EmailDraft, approve: bool) -> EmailDr
         insight_id=insight.id if insight else None,
         subject=content.subject,
         body=content.body,
+        # Follow up from the same mailbox as the original, so the thread stays
+        # with one sender identity.
+        from_mailbox=previous.from_mailbox or mailbox_for_principal(principal).id,
         status=EmailStatus.APPROVED if approve else EmailStatus.DRAFT,
     )
     if approve:
@@ -958,24 +1001,37 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
     if contact.do_not_contact:
         raise SendError("Prospect is on do-not-contact list")
 
+    # Send as the principal who owns this outreach — never a global default.
+    try:
+        mailbox = mailbox_for_draft(db, draft)
+    except MailboxUnassignedError as exc:
+        raise SendError(str(exc))
+
     # Always send a polished HTML alternative so signatures look professional.
     # Keep draft.body as plain text for editing; Gmail multipart includes both.
     pixel = _pixel_url(draft.id) if settings.track_opens else None
     html_body = _draft_html(db, draft, pixel_url=pixel)
 
-    mailbox = resolve_mailbox(draft.from_mailbox)
+    if not mailbox.from_email:
+        raise SendError(
+            f'Mailbox "{mailbox.id}" has no from_email configured. Fix '
+            "OUTREACH_MAILBOXES before sending."
+        )
+
     provider = provider_for_mailbox(mailbox)
     result = provider.send(
         to_email=contact.email,
         subject=draft.subject,
         body=draft.body,
-        from_email=mailbox.from_email or settings.outreach_from_email,
-        from_name=mailbox.from_name or settings.outreach_from_name,
+        from_email=mailbox.from_email,
+        from_name=mailbox.from_name,
         html_body=html_body,
     )
     if not result.sent:
         raise SendError(result.error or "Send failed", status_code=502)
 
+    # Record which mailbox actually sent it, so history can't be ambiguous.
+    draft.from_mailbox = mailbox.id
     draft.status = EmailStatus.SENT
     draft.provider = result.provider
     draft.provider_message_id = result.message_id
@@ -1055,7 +1111,10 @@ def schedule_email(
         draft.approved_at = datetime.utcnow()
     draft.approved_by = payload.approved_by
 
-    mailbox = resolve_mailbox(draft.from_mailbox)
+    try:
+        mailbox = mailbox_for_draft(db, draft)
+    except MailboxUnassignedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     provider = provider_for_mailbox(mailbox)
     outlook = False
     if provider.supports_scheduled_send():
@@ -1066,8 +1125,8 @@ def schedule_email(
             to_email=contact.email,
             subject=draft.subject,
             body=draft.body,
-            from_email=mailbox.from_email or settings.outreach_from_email,
-            from_name=mailbox.from_name or settings.outreach_from_name,
+            from_email=mailbox.from_email,
+            from_name=mailbox.from_name,
             html_body=html_body,
             send_at=when,
         )
@@ -1085,6 +1144,8 @@ def schedule_email(
     draft.status = EmailStatus.SCHEDULED
     draft.scheduled_at = when
     draft.outlook_scheduled = outlook
+    # Pin the sender now so a later config change can't reroute a queued send.
+    draft.from_mailbox = mailbox.id
     log_action(
         db,
         AuditAction.EMAIL_APPROVAL,

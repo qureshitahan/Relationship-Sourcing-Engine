@@ -42,8 +42,11 @@ def provider_for_mailbox(mailbox: "Mailbox") -> EmailProvider:
 
 from app.services.email_providers.mailboxes import (  # noqa: E402  (avoid cycle)
     Mailbox,
+    MailboxUnassignedError,
     default_mailbox,
+    find_mailbox,
     list_mailboxes,
+    mailbox_for_principal,
     resolve_mailbox,
 )
 
@@ -53,7 +56,10 @@ __all__ = [
     "get_email_provider",
     "provider_for_mailbox",
     "Mailbox",
+    "MailboxUnassignedError",
     "list_mailboxes",
+    "find_mailbox",
+    "mailbox_for_principal",
     "resolve_mailbox",
     "default_mailbox",
 ]

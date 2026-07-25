@@ -65,6 +65,7 @@ export interface PrincipalPayload {
   linkedin_url: string;
   phone: string;
   email_signature?: string | null;
+  outreach_mailbox_id?: string | null;
   document_focus?: string;
   bio?: string;
   background?: string;

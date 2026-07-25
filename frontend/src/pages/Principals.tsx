@@ -6,6 +6,7 @@ import {
   deletePrincipal,
   deletePrincipalDocument,
   getPrincipalDossier,
+  listMailboxes,
   listPrincipals,
   updatePrincipal,
   type PrincipalPayload,
@@ -20,6 +21,7 @@ interface FormState {
   phone: string;
   document_focus: string;
   email_signature: string;
+  outreach_mailbox_id: string;
 }
 
 const EMPTY: FormState = {
@@ -28,6 +30,7 @@ const EMPTY: FormState = {
   phone: "",
   document_focus: "",
   email_signature: "",
+  outreach_mailbox_id: "",
 };
 
 function fromPrincipal(p: Principal): FormState {
@@ -37,6 +40,7 @@ function fromPrincipal(p: Principal): FormState {
     phone: p.phone ?? "",
     document_focus: p.document_focus ?? "",
     email_signature: p.email_signature ?? "",
+    outreach_mailbox_id: p.outreach_mailbox_id ?? "",
   };
 }
 
@@ -47,6 +51,7 @@ function toPayload(f: FormState): PrincipalPayload {
     phone: f.phone,
     document_focus: f.document_focus || undefined,
     email_signature: f.email_signature.trim() || null,
+    outreach_mailbox_id: f.outreach_mailbox_id || null,
   };
 }
 
@@ -258,6 +263,80 @@ function Field({
   );
 }
 
+/** Which mailbox this principal's outreach is sent FROM. */
+function MailboxPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const { data: mailboxes = [], isLoading } = useQuery({
+    queryKey: ["mailboxes"],
+    queryFn: listMailboxes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const selected = mailboxes.find((m) => m.id === value);
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-700">Send outreach from</span>
+      <p className="mt-0.5 text-xs text-slate-400">
+        Every campaign email for this principal is sent from this mailbox. Required
+        when more than one mailbox is configured — we refuse to send as someone else.
+      </p>
+      <select
+        className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <option value="">
+          {isLoading ? "Loading mailboxes…" : "— Select a mailbox —"}
+        </option>
+        {mailboxes.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label} · {m.from_email}
+          </option>
+        ))}
+      </select>
+      {value && selected && (
+        <p className="mt-1.5 text-xs text-slate-500">
+          Sends as <span className="font-medium text-slate-700">{selected.from_email}</span>
+        </p>
+      )}
+      {!value && mailboxes.length > 1 && (
+        <p className="mt-1.5 text-xs text-amber-700">
+          No mailbox set — this principal's campaigns cannot send until you pick one.
+        </p>
+      )}
+    </label>
+  );
+}
+
+/** Read-only view of the mailbox a principal sends from. */
+function MailboxSummary({ mailboxId }: { mailboxId: string }) {
+  const { data: mailboxes = [] } = useQuery({
+    queryKey: ["mailboxes"],
+    queryFn: listMailboxes,
+    staleTime: 5 * 60 * 1000,
+  });
+  const selected = mailboxes.find((m) => m.id === mailboxId);
+  if (!mailboxId || !selected) {
+    return (
+      <p className="mt-1.5 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 ring-1 ring-amber-200">
+        {mailboxes.length > 1
+          ? "Not set — campaigns for this principal will not send. Click Edit and choose their mailbox."
+          : "Using the only configured mailbox."}
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1.5 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">
+      <span className="font-semibold">{selected.from_email}</span>
+      <span className="text-slate-400"> · {selected.label}</span>
+    </p>
+  );
+}
+
 function statusTone(s: string): "green" | "amber" | "red" | "slate" {
   if (s === "indexed") return "green";
   if (s === "peripheral") return "amber";
@@ -395,6 +474,10 @@ function PrincipalProfile({
                   onChange={set("phone")}
                   placeholder="e.g. +1 555 123 4567"
                 />
+                <MailboxPicker
+                  value={form.outreach_mailbox_id}
+                  onChange={set("outreach_mailbox_id")}
+                />
                 <Field
                   label="Email signature"
                   hint="Paste freely — we format it for drafts and style it as HTML when the email is sent (clickable LinkedIn/websites, Book a call button)."
@@ -470,6 +553,12 @@ function PrincipalProfile({
                     files.
                   </p>
                 )}
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Sends outreach from
+                  </p>
+                  <MailboxSummary mailboxId={principal.outreach_mailbox_id ?? ""} />
+                </div>
                 <div className="mt-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Email signature
@@ -736,6 +825,10 @@ function NewPrincipalForm({
           value={form.phone}
           onChange={(v) => setForm((f) => ({ ...f, phone: v }))}
           placeholder="e.g. +1 555 123 4567"
+        />
+        <MailboxPicker
+          value={form.outreach_mailbox_id}
+          onChange={(v) => setForm((f) => ({ ...f, outreach_mailbox_id: v }))}
         />
         <Field
           label="Email signature"
