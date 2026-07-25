@@ -274,7 +274,23 @@ def _digits_only(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())
 
 
-def apply_signature(body: str, principal: Principal) -> str:
+def _strip_exact_signature(body: str, signature: str) -> str:
+    """Remove ``signature`` when it is the exact trailing block in ``body``."""
+    clean_body = (body or "").rstrip()
+    block = (signature or "").strip()
+    if not block:
+        return clean_body
+    if clean_body == block:
+        return ""
+    suffix = f"\n\n{block}"
+    if clean_body.endswith(suffix):
+        return clean_body[: -len(suffix)].rstrip()
+    return clean_body
+
+
+def apply_signature(
+    body: str, principal: Principal, *, previous_signature: Optional[str] = None
+) -> str:
     """Replace any trailing sign-off in ``body`` with the principal's signature.
 
     Idempotent: strips trailing blank/closer/name/URL/phone lines and any line
@@ -283,6 +299,7 @@ def apply_signature(body: str, principal: Principal) -> str:
     """
     if not body:
         return body
+    body = _strip_exact_signature(body, previous_signature or "")
     signature = build_signature(principal)
     signature_lines = {
         ln.strip().lower() for ln in signature.split("\n") if ln.strip()
@@ -311,7 +328,10 @@ def apply_signature(body: str, principal: Principal) -> str:
 
 
 def refresh_principal_draft_signatures(
-    db: Session, principal: Principal
+    db: Session,
+    principal: Principal,
+    *,
+    previous_signature: Optional[str] = None,
 ) -> int:
     """Re-apply ``principal``'s signature on every unsent draft. Returns count updated."""
     from app.models.email_draft import EmailDraft
@@ -329,7 +349,11 @@ def refresh_principal_draft_signatures(
     ).scalars().all()
     updated = 0
     for draft in drafts:
-        new_body = apply_signature(draft.body or "", principal)
+        new_body = apply_signature(
+            draft.body or "",
+            principal,
+            previous_signature=previous_signature,
+        )
         if new_body != (draft.body or ""):
             draft.body = new_body
             updated += 1

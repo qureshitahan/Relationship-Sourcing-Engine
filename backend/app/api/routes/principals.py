@@ -96,7 +96,9 @@ def update_principal(
     principal = db.get(Principal, principal_id)
     if not principal:
         raise HTTPException(status_code=404, detail="Principal not found")
-    before_signature = (principal.email_signature or "").strip()
+    from app.services.insights.engine import build_signature
+
+    before_signature = build_signature(principal)
     data = payload.model_dump(exclude_unset=True)
     if "email_signature" in data:
         data["email_signature"] = (data["email_signature"] or "").strip() or None
@@ -104,13 +106,14 @@ def update_principal(
         setattr(principal, field, value)
     # Keep unsent drafts in sync when the sign-off changes so campaigns pick
     # up the new block without regenerating every email.
-    after_signature = (principal.email_signature or "").strip()
-    if after_signature != before_signature or any(
-        field in data for field in ("name", "linkedin_url", "phone", "email_signature")
-    ):
+    if any(field in data for field in ("name", "linkedin_url", "phone", "email_signature")):
         from app.services.insights.engine import refresh_principal_draft_signatures
 
-        refresh_principal_draft_signatures(db, principal)
+        refresh_principal_draft_signatures(
+            db,
+            principal,
+            previous_signature=before_signature,
+        )
     log_action(
         db,
         AuditAction.PRINCIPAL,
