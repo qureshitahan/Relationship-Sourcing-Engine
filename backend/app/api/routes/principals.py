@@ -51,6 +51,7 @@ def create_principal(payload: PrincipalRequest, db: Session = Depends(get_db)):
         headline=payload.headline,
         linkedin_url=payload.linkedin_url,
         phone=payload.phone,
+        email_signature=(payload.email_signature or "").strip() or None,
         objective=payload.objective,
         document_focus=payload.document_focus,
         bio=payload.bio,
@@ -95,8 +96,21 @@ def update_principal(
     principal = db.get(Principal, principal_id)
     if not principal:
         raise HTTPException(status_code=404, detail="Principal not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    before_signature = (principal.email_signature or "").strip()
+    data = payload.model_dump(exclude_unset=True)
+    if "email_signature" in data:
+        data["email_signature"] = (data["email_signature"] or "").strip() or None
+    for field, value in data.items():
         setattr(principal, field, value)
+    # Keep unsent drafts in sync when the sign-off changes so campaigns pick
+    # up the new block without regenerating every email.
+    after_signature = (principal.email_signature or "").strip()
+    if after_signature != before_signature or any(
+        field in data for field in ("name", "linkedin_url", "phone", "email_signature")
+    ):
+        from app.services.insights.engine import refresh_principal_draft_signatures
+
+        refresh_principal_draft_signatures(db, principal)
     log_action(
         db,
         AuditAction.PRINCIPAL,

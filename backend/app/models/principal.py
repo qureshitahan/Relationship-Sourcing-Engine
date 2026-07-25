@@ -26,6 +26,9 @@ class Principal(Base, TimestampMixin):
     linkedin_url: Mapped[Optional[str]] = mapped_column(String(512))
     # Contact phone for signature / scheduling (required for new principals).
     phone: Mapped[Optional[str]] = mapped_column(String(64))
+    # Full email sign-off block used on every drafted/sent outreach email.
+    # When set, this replaces the default "Thanks, / <name> / <LinkedIn>" block.
+    email_signature: Mapped[Optional[str]] = mapped_column(Text)
     bio: Mapped[Optional[str]] = mapped_column(Text)
     # Long-form career narrative used to ground AI insight + personalization.
     background: Mapped[Optional[str]] = mapped_column(Text)

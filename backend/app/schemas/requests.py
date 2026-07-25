@@ -21,6 +21,8 @@ class PrincipalRequest(BaseModel):
     headline: Optional[str] = None
     linkedin_url: str = ""
     phone: str = ""
+    # Exact sign-off appended to outreach emails. Blank = default name + LinkedIn.
+    email_signature: Optional[str] = None
     objective: Optional[str] = None  # deprecated — use Agent/Discover goal instead
     document_focus: Optional[str] = None
     bio: Optional[str] = None

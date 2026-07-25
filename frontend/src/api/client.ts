@@ -64,6 +64,7 @@ export interface PrincipalPayload {
   headline?: string;
   linkedin_url: string;
   phone: string;
+  email_signature?: string | null;
   document_focus?: string;
   bio?: string;
   background?: string;

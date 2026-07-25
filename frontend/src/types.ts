@@ -13,6 +13,7 @@ export interface Principal {
   headline?: string | null;
   linkedin_url?: string | null;
   phone?: string | null;
+  email_signature?: string | null;
   objective?: string | null;
   document_focus?: string | null;
   bio?: string | null;

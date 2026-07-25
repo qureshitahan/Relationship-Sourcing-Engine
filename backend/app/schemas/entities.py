@@ -58,6 +58,7 @@ class PrincipalOut(ORMModel):
     headline: Optional[str] = None
     linkedin_url: Optional[str] = None
     phone: Optional[str] = None
+    email_signature: Optional[str] = None
     objective: Optional[str] = None
     document_focus: Optional[str] = None
     bio: Optional[str] = None

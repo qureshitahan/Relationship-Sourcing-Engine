@@ -63,6 +63,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "principals": {
         "linkedin_url": "VARCHAR(512)",
         "phone": "VARCHAR(64)",
+        "email_signature": "TEXT",
         "objective": "TEXT",
         "document_focus": "TEXT",
         "mailbox_daily_cap": "INTEGER DEFAULT 50",

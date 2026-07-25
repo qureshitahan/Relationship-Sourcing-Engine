@@ -19,9 +19,16 @@ interface FormState {
   linkedin_url: string;
   phone: string;
   document_focus: string;
+  email_signature: string;
 }
 
-const EMPTY: FormState = { name: "", linkedin_url: "", phone: "", document_focus: "" };
+const EMPTY: FormState = {
+  name: "",
+  linkedin_url: "",
+  phone: "",
+  document_focus: "",
+  email_signature: "",
+};
 
 function fromPrincipal(p: Principal): FormState {
   return {
@@ -29,6 +36,7 @@ function fromPrincipal(p: Principal): FormState {
     linkedin_url: p.linkedin_url ?? "",
     phone: p.phone ?? "",
     document_focus: p.document_focus ?? "",
+    email_signature: p.email_signature ?? "",
   };
 }
 
@@ -38,6 +46,7 @@ function toPayload(f: FormState): PrincipalPayload {
     linkedin_url: f.linkedin_url,
     phone: f.phone,
     document_focus: f.document_focus || undefined,
+    email_signature: f.email_signature.trim() || null,
   };
 }
 
@@ -66,6 +75,7 @@ function Field({
   onChange,
   placeholder,
   multiline,
+  rows = 2,
 }: {
   label: string;
   hint?: string;
@@ -73,6 +83,7 @@ function Field({
   onChange: (v: string) => void;
   placeholder?: string;
   multiline?: boolean;
+  rows?: number;
 }) {
   return (
     <label className="block">
@@ -80,8 +91,8 @@ function Field({
       {hint && <p className="mt-0.5 text-xs text-slate-400">{hint}</p>}
       {multiline ? (
         <textarea
-          className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
-          rows={2}
+          className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm leading-relaxed focus:border-slate-500 focus:outline-none"
+          rows={rows}
           value={value}
           placeholder={placeholder}
           onChange={(e) => onChange(e.target.value)}
@@ -223,17 +234,26 @@ function PrincipalProfile({
                 />
                 <Field
                   label="LinkedIn URL"
-                  hint="Required — appended to every outreach email signature."
+                  hint="Required — used on the profile and as a fallback in the default signature."
                   value={form.linkedin_url}
                   onChange={set("linkedin_url")}
                   placeholder="https://www.linkedin.com/in/…"
                 />
                 <Field
                   label="Phone number"
-                  hint="Required — used for principal profile and scheduling."
+                  hint="Required — used for the profile and scheduling."
                   value={form.phone}
                   onChange={set("phone")}
                   placeholder="e.g. +1 555 123 4567"
+                />
+                <Field
+                  label="Email signature"
+                  hint="Appended to every outreach email from this principal's campaigns. Leave blank to use a short Thanks / name / LinkedIn default. The app never stacks this — it replaces any trailing sign-off."
+                  value={form.email_signature}
+                  onChange={set("email_signature")}
+                  placeholder={`Thanks,\nTaha Qureshi\nLead AI Architect\nhttps://www.linkedin.com/in/qureshitaha/\n+1 857 832 0365\nTekhqs AI (Subsidiary of Tekhqs INC)\nWebsites:\nhttps://tekhqs.com/\nhttps://tekhqs.ai/`}
+                  multiline
+                  rows={9}
                 />
                 <Field
                   label="Document focus"
@@ -300,6 +320,21 @@ function PrincipalProfile({
                     files.
                   </p>
                 )}
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Email signature
+                  </p>
+                  {principal.email_signature?.trim() ? (
+                    <pre className="mt-1.5 whitespace-pre-wrap rounded-lg bg-slate-50 px-3 py-2 font-mono text-sm leading-relaxed text-slate-700 ring-1 ring-slate-200">
+                      {principal.email_signature}
+                    </pre>
+                  ) : (
+                    <p className="mt-1.5 text-sm text-slate-500">
+                      Using the short default (Thanks / name / LinkedIn). Edit to set a
+                      full signature for this principal's campaigns.
+                    </p>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -538,7 +573,8 @@ function NewPrincipalForm({
     <Card className="p-5">
       <h2 className="text-lg font-semibold text-slate-900">New principal</h2>
       <p className="mt-1 text-sm text-slate-500">
-        Full name, LinkedIn, and phone are required for email signatures and outreach.
+        Full name, LinkedIn, and phone are required. Set an email signature now or later —
+        campaigns will use whatever is saved on this principal.
       </p>
       <div className="mt-5 space-y-4">
         <Field
@@ -559,6 +595,15 @@ function NewPrincipalForm({
           value={form.phone}
           onChange={(v) => setForm((f) => ({ ...f, phone: v }))}
           placeholder="e.g. +1 555 123 4567"
+        />
+        <Field
+          label="Email signature"
+          hint="Optional — exact sign-off for every outreach email from this person."
+          value={form.email_signature}
+          onChange={(v) => setForm((f) => ({ ...f, email_signature: v }))}
+          placeholder={`Thanks,\nYour Name\nTitle\nhttps://www.linkedin.com/in/…\n+1 …\nCompany\nWebsites:\nhttps://…`}
+          multiline
+          rows={9}
         />
         <Field
           label="Document focus"

@@ -239,7 +239,9 @@ def resolve_linkedin_url(principal: Principal) -> str:
 
 
 def principal_signature_ready(principal: Principal) -> bool:
-    """True when the principal has the fields needed for outreach signatures."""
+    """True when we can build an outreach signature for this principal."""
+    if (principal.email_signature or "").strip():
+        return True
     name = (principal.name or "").strip()
     return (
         len(name.split()) >= 2
@@ -249,7 +251,15 @@ def principal_signature_ready(principal: Principal) -> bool:
 
 
 def build_signature(principal: Principal) -> str:
-    """The standard email sign-off: 'Thanks, / <Full name> / <LinkedIn URL>'."""
+    """The email sign-off for this principal.
+
+    Prefer the custom ``email_signature`` when set so each principal can own
+    their full block (title, company, websites, phone). Otherwise fall back to
+    the short default of Thanks / name / LinkedIn.
+    """
+    custom = (principal.email_signature or "").strip()
+    if custom:
+        return custom
     name = (principal.name or "").strip()
     lines = ["Thanks,"]
     if name:
@@ -260,16 +270,27 @@ def build_signature(principal: Principal) -> str:
     return "\n".join(lines)
 
 
+def _digits_only(value: str) -> str:
+    return "".join(ch for ch in value if ch.isdigit())
+
+
 def apply_signature(body: str, principal: Principal) -> str:
     """Replace any trailing sign-off in ``body`` with the principal's signature.
 
-    Idempotent: strips trailing blank/closer/name/URL lines first, so applying
-    it repeatedly (e.g. backfilling drafts) never duplicates the block.
+    Idempotent: strips trailing blank/closer/name/URL/phone lines and any line
+    that already appears in the target signature, so applying it repeatedly
+    (e.g. after editing the principal signature) never stacks the block.
     """
     if not body:
         return body
+    signature = build_signature(principal)
+    signature_lines = {
+        ln.strip().lower() for ln in signature.split("\n") if ln.strip()
+    }
     name = (principal.name or "").strip().lower()
     first = name.split()[0] if name else ""
+    phone = (principal.phone or "").strip()
+    phone_digits = _digits_only(phone)
     lines = body.rstrip().split("\n")
     while lines:
         last = lines[-1].strip()
@@ -277,13 +298,42 @@ def apply_signature(body: str, principal: Principal) -> str:
         is_url = last.lower().startswith("http")
         is_name = bool(name) and (normalized == name or (first and normalized == first))
         is_closer = normalized in _CLOSERS
-        if last == "" or is_url or is_name or is_closer:
+        is_phone = bool(phone_digits) and _digits_only(last) == phone_digits and len(last) < 40
+        is_sig_line = bool(normalized) and normalized in signature_lines
+        if last == "" or is_url or is_name or is_closer or is_phone or is_sig_line:
             lines.pop()
             continue
         break
     cleaned = "\n".join(lines).rstrip()
-    signature = build_signature(principal)
+    if not signature:
+        return cleaned
     return f"{cleaned}\n\n{signature}".strip()
+
+
+def refresh_principal_draft_signatures(
+    db: Session, principal: Principal
+) -> int:
+    """Re-apply ``principal``'s signature on every unsent draft. Returns count updated."""
+    from app.models.email_draft import EmailDraft
+    from app.models.enums import EmailStatus
+
+    if not principal_signature_ready(principal):
+        return 0
+    drafts = db.execute(
+        select(EmailDraft).where(
+            EmailDraft.principal_id == principal.id,
+            EmailDraft.status.in_(
+                [EmailStatus.DRAFT, EmailStatus.APPROVED, EmailStatus.SCHEDULED]
+            ),
+        )
+    ).scalars().all()
+    updated = 0
+    for draft in drafts:
+        new_body = apply_signature(draft.body or "", principal)
+        if new_body != (draft.body or ""):
+            draft.body = new_body
+            updated += 1
+    return updated
 
 
 def generate_outreach(

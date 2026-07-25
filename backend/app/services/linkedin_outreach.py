@@ -37,6 +37,13 @@ def _strip_signature(body: str, principal: Principal) -> str:
     """Remove a trailing email signature/closer block from a message body."""
     if not body:
         return ""
+    from app.services.insights.engine import build_signature
+
+    signature_lines = {
+        ln.strip().lower()
+        for ln in build_signature(principal).split("\n")
+        if ln.strip()
+    }
     name = (principal.name or "").strip().lower()
     first = name.split()[0] if name else ""
     lines = body.rstrip().split("\n")
@@ -47,7 +54,8 @@ def _strip_signature(body: str, principal: Principal) -> str:
         is_contact = "@" in last or any(ch.isdigit() for ch in last) and len(last) < 40
         is_name = bool(name) and (normalized == name or (first and normalized == first))
         is_closer = normalized in _CLOSERS
-        if last == "" or is_url or is_name or is_closer or is_contact:
+        is_sig_line = bool(normalized) and normalized in signature_lines
+        if last == "" or is_url or is_name or is_closer or is_contact or is_sig_line:
             lines.pop()
             continue
         break
