@@ -374,8 +374,8 @@ function ChatPanel({
       <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
         <div className="text-sm font-semibold text-slate-900">Campaign assistant</div>
         <div className="text-xs text-slate-500">
-          Paste your people, then say what the email should do. Missing addresses can be
-          searched for.
+          Name or paste your people, then say what the email should do. Missing addresses
+          can be searched for.
         </div>
       </div>
 
@@ -383,10 +383,11 @@ function ChatPanel({
         {campaign.messages.length === 0 && (
           <div className="rounded-lg bg-slate-100 px-3 py-2 text-sm leading-relaxed text-slate-700">
             Paste the people you want to email, straight out of your spreadsheet or a
-            roster. Names, titles, companies and any notes are used to personalize. Anyone
-            you paste without an address goes into a list I can search the web for, and you
-            approve each address I find. Then tell me what you want to say and I'll draft
-            one email per person for you to review.
+            roster — or just tell me who, like "email Dana Cole at Mercy Health". Names,
+            titles, companies and any notes are used to personalize. Anyone without an
+            address goes into a list I can search the web for, and you approve each address
+            I find. Then tell me what you want to say and I'll draft one email per person
+            for you to review.
           </div>
         )}
         {campaign.messages.map((m) =>
@@ -420,7 +421,7 @@ function ChatPanel({
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           }}
           rows={4}
-          placeholder="Paste your list here, or write the purpose of these emails…"
+          placeholder="Paste your list, name who to email, or write the purpose of these emails…"
           className={`${inputCls} resize-y`}
         />
         <div className="mt-2 flex items-center justify-between">
@@ -698,7 +699,7 @@ function RecipientsTable({
   if (!recipients.length) {
     return (
       <Card>
-        <EmptyState message="No one on this list yet. Paste your people into the chat." />
+          <EmptyState message="No one on this list yet. Paste or name your people in the chat." />
       </Card>
     );
   }
@@ -846,7 +847,7 @@ function LookupQueue({
       <Card className="px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs leading-relaxed text-slate-500">
-            These people were pasted without an address. Each match below was found by
+            These people came in without an address. Each match below was found by
             searching the web and then a contact database — check it against the sources
             before you accept it. Nothing is emailed until you do.
           </p>
@@ -974,7 +975,7 @@ function LookupCard({
           </div>
           {lookup.source_text && (
             <div className="mt-1 text-xs italic text-slate-400">
-              Pasted as: {lookup.source_text}
+              From: {lookup.source_text}
             </div>
           )}
         </div>

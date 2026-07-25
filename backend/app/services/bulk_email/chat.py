@@ -26,6 +26,7 @@ from app.models.contact import Contact
 from app.models.enums import BulkCampaignStatus, BulkLookupStatus, ProspectStatus
 from app.services.bulk_email.llm import complete_json, llm_available
 from app.services.bulk_email.parser import (
+    ParsedPerson,
     ParsedRecipient,
     extract_people,
     extract_recipients,
@@ -35,6 +36,7 @@ from app.services.bulk_email.runner import (
     launch_lookup,
     lookups_pending,
     recipients_needing_drafts,
+    sender_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,12 +46,17 @@ _INTENT_TEXT_LIMIT = 2500
 
 _INTENT_SYSTEM = (
     "You are the assistant inside a bulk email tool. The user pastes lists of "
-    "people (usually copied out of a spreadsheet) and describes, in plain "
-    "language, the email they want sent to all of them.\n\n"
-    "Your only job is to interpret their latest message and maintain the campaign "
-    "brief. You never write or send the emails yourself; a separate step does "
-    "that, and the app tells the user what happened.\n\n"
-    "Return ONLY JSON with these keys:\n"
+    "people (usually copied out of a spreadsheet), or just names them in "
+    "conversation, and describes in plain language the email they want sent.\n\n"
+    "Your only job is to interpret their latest message: maintain the campaign "
+    "brief and pick out who they want to email. You never write or send the "
+    "emails yourself; a separate step does that, and the app tells the user what "
+    "happened. The app can search the web for an address the user does not have, "
+    "so never ask them for an email address they have already said they lack.\n\n"
+    "Return ONLY a single JSON object — never a bare array — of exactly this "
+    'shape: {"reply": string, "purpose": string|null, "recipients": array, '
+    '"signature": string|null, "action": string}\n\n'
+    "The keys mean:\n"
     '- "reply": one or two short sentences to the user. NEVER claim you added '
     "recipients, wrote drafts, or sent anything. If the brief or the recipient "
     "list is still missing, ask for it. Otherwise confirm what you understood.\n"
@@ -58,7 +65,16 @@ _INTENT_SYSTEM = (
     "instructions for the email writer, keeping the user's context, tone and ask. "
     "Preserve the concrete details they gave exactly: when and where they met, "
     "event names, dates, and the specific ask. Null if this message added nothing "
-    "about the content.\n"
+    "about the content. Never put a recipient's name or employer in here (those "
+    'belong in "recipients"), and never put the sender\'s name or sign-off in '
+    "here (the app adds the signature).\n"
+    '- "recipients": array of people this message names as someone to email '
+    "WITHOUT giving their address, each as an object with \"name\", \"title\" and "
+    '"company" (use null for anything not stated). Empty array if the message '
+    "names nobody new. Never include the sender, the person signing the emails, "
+    "or someone mentioned only as context (e.g. a colleague who made an "
+    "introduction). If a message gives a correction such as \"the company is "
+    'Acme", repeat the person with the corrected detail.\n'
     '- "signature": the exact sign-off the user asked to sign emails with, or null.\n'
     '- "action": "draft" if the user is asking for the emails to be written now, '
     '"lookup" if they are asking you to find the email addresses of people whose '
@@ -74,10 +90,14 @@ _LOOKUP_HINT_RE = re.compile(
     r"\b(email|emails|address|addresses|contact details)\b",
     re.IGNORECASE,
 )
-# A message only goes through people-extraction when it looks like a pasted
-# list; short replies in the conversation should not cost an extra LLM call.
+# Only a message that looks like a pasted list goes through the dedicated
+# people-extraction call; people named in conversation come back from the intent
+# call instead, which runs on every message anyway.
 _MIN_LIST_LINES = 4
 _MIN_LIST_CHARS = 200
+# Adding a couple of people conversationally can start their lookup right away;
+# a pasted crowd waits for an explicit go-ahead.
+_AUTO_LOOKUP_MAX = 10
 
 
 @dataclass
@@ -86,6 +106,8 @@ class Intent:
     purpose: Optional[str] = None
     signature: Optional[str] = None
     action: str = "none"
+    # People the message named as recipients without giving an address.
+    recipients: list[ParsedPerson] = field(default_factory=list)
 
 
 @dataclass
@@ -109,9 +131,11 @@ def handle_message(db: Session, campaign: BulkCampaign, message: str) -> ChatRes
 
     parsed = extract_recipients(text)
     added, duplicates = _save_recipients(db, campaign, parsed)
-    needs_lookup = _save_people_needing_email(db, campaign, text, parsed)
 
     intent = _interpret(db, campaign, text)
+    needs_lookup = _save_people_needing_email(
+        db, campaign, text, parsed, intent.recipients
+    )
     purpose_updated = False
     if intent.purpose and intent.purpose.strip() != (campaign.purpose or "").strip():
         campaign.purpose = intent.purpose.strip()
@@ -127,7 +151,7 @@ def handle_message(db: Session, campaign: BulkCampaign, message: str) -> ChatRes
         purpose_updated=purpose_updated,
         needs_lookup=needs_lookup,
     )
-    _maybe_start_lookup(db, campaign, intent, result)
+    _maybe_start_lookup(db, campaign, text, intent, result)
     _maybe_start_drafting(db, campaign, intent, result)
     result.reply = _compose_reply(db, campaign, text, intent, result)
 
@@ -198,19 +222,26 @@ def _save_people_needing_email(
     campaign: BulkCampaign,
     text: str,
     with_email: list[ParsedRecipient],
+    mentioned: list[ParsedPerson],
 ) -> int:
-    """Queue everyone the paste names but gives no address for.
+    """Queue everyone this message wants emailed but gives no address for.
 
-    They become contacts with no address plus a lookup row, so they show up in
-    the campaign immediately and can be searched for on demand.
+    Covers both ways people arrive: named in conversation ("email Taha Qureshi
+    at tekhqs") and pasted in bulk. Either way they become contacts with no
+    address plus a lookup row, so they show up in the campaign immediately and
+    can be searched for on demand.
     """
-    if not _looks_like_a_list(text):
-        return 0
-    people = extract_people(text)
+    # Paste extraction goes first: it keeps each person's own row as their
+    # context, which is better than the whole message a mention carries.
+    people = extract_people(text) if _looks_like_a_list(text) else []
+    people += mentioned
     if not people:
         return 0
 
     seen = {_name_key(r.name) for r in with_email}
+    sender = _name_key(sender_context(campaign).get("name") or "")
+    if sender:
+        seen.add(sender)
     for contact in db.execute(
         select(Contact).where(Contact.bulk_campaign_id == campaign.id)
     ).scalars().all():
@@ -260,6 +291,26 @@ def _looks_like_a_list(text: str) -> bool:
     return len(lines) >= _MIN_LIST_LINES and len(text) >= _MIN_LIST_CHARS
 
 
+def _awaiting_names(db: Session, campaign_id: int, limit: int = 12) -> str:
+    """Who is already queued for a lookup, so the assistant doesn't re-ask."""
+    pending = lookups_pending(db, campaign_id)
+    if not pending:
+        return "(nobody)"
+    names = [
+        (db.get(Contact, lookup.contact_id).name or "?") for lookup in pending[:limit]
+    ]
+    more = len(pending) - len(names)
+    return ", ".join(names) + (f", and {more} more" if more > 0 else "")
+
+
+def _people_count(db: Session, campaign_id: int) -> int:
+    return db.execute(
+        select(func.count())
+        .select_from(Contact)
+        .where(Contact.bulk_campaign_id == campaign_id)
+    ).scalar_one()
+
+
 def _name_key(name: str) -> str:
     return " ".join(re.split(r"[^a-z]+", (name or "").lower())).strip()
 
@@ -295,11 +346,19 @@ def _interpret(db: Session, campaign: BulkCampaign, text: str) -> Intent:
     data = complete_json(
         _INTENT_SYSTEM,
         f"CAMPAIGN: {campaign.name}\n"
+        f"SENDING AS: {sender_context(campaign).get('name')}\n"
         f"RECIPIENTS ALREADY ADDED: {recipients}\n"
+        f"ALREADY AWAITING AN ADDRESS: {_awaiting_names(db, campaign.id)}\n"
         f"CURRENT BRIEF: {(campaign.purpose or '(none yet)').strip()}\n\n"
         f"USER MESSAGE:\n{_trim(text)}",
         max_tokens=1024,
     )
+    if isinstance(data, list):
+        # Asked for several keys at once, the model sometimes answers with just
+        # the recipients array. Keep those and fall back for the rest.
+        intent = _heuristic_intent(campaign, text)
+        intent.recipients = _mentioned_people(data, text)
+        return intent
     if not isinstance(data, dict):
         return _heuristic_intent(campaign, text)
     action = str(data.get("action") or "none").strip().lower()
@@ -308,7 +367,32 @@ def _interpret(db: Session, campaign: BulkCampaign, text: str) -> Intent:
         purpose=_optional(data.get("purpose")),
         signature=_optional(data.get("signature")),
         action=action if action in ("draft", "lookup") else "none",
+        recipients=_mentioned_people(data.get("recipients"), text),
     )
+
+
+def _mentioned_people(value: object, text: str) -> list[ParsedPerson]:
+    """People the model picked out of a conversational message."""
+    if not isinstance(value, list):
+        return []
+    people: list[ParsedPerson] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = _optional(item.get("name"))
+        if not name:
+            continue
+        people.append(
+            ParsedPerson(
+                name=name,
+                title=_optional(item.get("title")),
+                company=_optional(item.get("company")),
+                # The sentence they came from is the only context the writer and
+                # the review screen have for someone named in passing.
+                source_text=text[:400],
+            )
+        )
+    return people
 
 
 def _heuristic_intent(campaign: BulkCampaign, text: str) -> Intent:
@@ -338,15 +422,31 @@ def _is_table_row(line: str) -> bool:
 
 
 def _maybe_start_lookup(
-    db: Session, campaign: BulkCampaign, intent: Intent, result: ChatResult
+    db: Session, campaign: BulkCampaign, text: str, intent: Intent, result: ChatResult
 ) -> None:
     if intent.action != "lookup":
+        return
+    if campaign.status == BulkCampaignStatus.LOOKING_UP:
+        result.errors.append("I'm already out searching for the missing addresses.")
         return
     if _busy(campaign):
         result.errors.append("A job is already running for this campaign.")
         return
-    if not lookups_pending(db, campaign.id):
-        result.errors.append("Everyone on the list already has an address.")
+    pending = lookups_pending(db, campaign.id)
+    if not pending:
+        result.errors.append(
+            "There's nobody waiting on an address."
+            if _people_count(db, campaign.id)
+            else "Tell me who to email first — a name and where they work is enough."
+        )
+        return
+    # Searching costs money per person, so a big queue is confirmed rather than
+    # started off the back of a message that merely mentioned addresses.
+    if len(pending) > _AUTO_LOOKUP_MAX and not _LOOKUP_HINT_RE.search(text):
+        result.errors.append(
+            f"That's {len(pending)} people to look up. Say 'find their emails' "
+            "and I'll start searching."
+        )
         return
     campaign.status = BulkCampaignStatus.LOOKING_UP
     campaign.last_error = None
@@ -408,9 +508,9 @@ def _compose_reply(
         facts.append(f"Skipped {result.duplicates} already on the list.")
     if result.needs_lookup:
         facts.append(
-            f"Found {result.needs_lookup} more "
+            f"Added {result.needs_lookup} "
             f"{'person' if result.needs_lookup == 1 else 'people'} with no email "
-            "address in that list."
+            "address yet."
         )
     if result.purpose_updated:
         facts.append("Saved the brief for these emails.")
@@ -451,22 +551,27 @@ def _next_step(db: Session, campaign: BulkCampaign) -> str:
     ).scalar_one()
     awaiting = len(lookups_pending(db, campaign.id))
     has_purpose = bool((campaign.purpose or "").strip())
-    if awaiting and not recipients:
+    if campaign.status == BulkCampaignStatus.LOOKING_UP:
         return (
-            f"Say 'find their emails' and I'll search for the {awaiting} "
-            "missing address(es) for you to review."
+            "The addresses I find will appear under 'Needs email' for you to "
+            "approve before anything is drafted."
         )
-    if not recipients and not has_purpose:
-        return "Paste your list of people, then tell me what the email should say."
+    if awaiting:
+        one = awaiting == 1
+        found = "find their email" if one else "find their emails"
+        return (
+            f"Say '{found}' and I'll search the web for "
+            f"{'that missing address' if one else f'those {awaiting} missing addresses'}"
+            " for you to approve."
+        )
     if not recipients:
-        return "Paste the people you want to email (each row needs an email address)."
+        who = (
+            "Tell me who to email — paste a list, or just give me a name and where "
+            "they work and I'll find the address."
+        )
+        return who if has_purpose else f"{who} Then tell me what the email should say."
     if not has_purpose:
         return "Now tell me what you want to say to them."
-    if awaiting:
-        return (
-            f"{awaiting} of them still have no address — say 'find their emails' "
-            "and I'll go looking."
-        )
     pending = len(recipients_needing_drafts(db, campaign.id))
     if pending:
         return f"Say 'draft the emails' when you're ready and I'll write all {pending}."

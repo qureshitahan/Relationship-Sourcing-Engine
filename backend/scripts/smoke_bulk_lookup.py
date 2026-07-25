@@ -30,7 +30,19 @@ from app.services.bulk_email.resolver import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("paste", type=Path, help="File holding the pasted list")
+    parser.add_argument(
+        "paste",
+        type=Path,
+        nargs="?",
+        help="File holding the pasted list (omit when using --say)",
+    )
+    parser.add_argument(
+        "--say",
+        action="append",
+        default=[],
+        metavar="MESSAGE",
+        help="Send a conversational turn instead of a paste; repeatable",
+    )
     parser.add_argument("--resolve", action="store_true", help="Run the paid lookup stage")
     parser.add_argument("--limit", type=int, default=3, help="People to resolve")
     parser.add_argument(
@@ -52,12 +64,18 @@ def main() -> int:
         db.add(campaign)
         db.commit()
 
-        result = handle_message(db, campaign, args.paste.read_text())
-        print(f"recipients with an address : {result.recipients_added}")
-        print(f"people needing a lookup    : {result.needs_lookup}")
-        print(f"brief captured             : {bool(campaign.purpose)}")
-        print("\n--- assistant reply ---")
-        print(result.reply)
+        turns = list(args.say) or [args.paste.read_text()]
+        for turn in turns:
+            result = handle_message(db, campaign, turn)
+            print(f"\n=== you: {turn[:90]}")
+            print("--- assistant ---")
+            print(result.reply)
+            print(
+                f"[with address +{result.recipients_added} | "
+                f"needing lookup +{result.needs_lookup} | "
+                f"brief {'set' if campaign.purpose else 'empty'}]"
+            )
+        print(f"\nbrief: {campaign.purpose}")
 
         lookups = db.query(BulkLookup).filter_by(campaign_id=campaign.id).all()
         print(f"\n--- queued for lookup ({len(lookups)}) ---")
@@ -91,6 +109,7 @@ def main() -> int:
                 lookup_id=lookup.id,
                 name=contact.name,
                 title=contact.title,
+                company=contact.company.name if contact.company else None,
                 source_text=lookup.source_text,
             )
             identity = identify(query)
