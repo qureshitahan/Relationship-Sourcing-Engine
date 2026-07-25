@@ -316,23 +316,34 @@ def _name_key(name: str) -> str:
 
 
 def _company_id_for(db: Session, name: str) -> Optional[int]:
-    """Reuse an existing organization by name, or record the pasted one."""
+    """Reuse an existing organization by name, or record the pasted one.
+
+    Company matching is best-effort: a corrupted organizations table must not
+    take the whole chat turn down when we already know the person's name.
+    """
     label = (name or "").strip()
     if not label:
         return None
     normalized = label.lower()
-    company = db.execute(
-        select(Company).where(Company.normalized_name == normalized)
-    ).scalars().first()
-    if company is None:
-        company = Company(
-            name=label,
-            normalized_name=normalized,
-            enrichment_source="bulk_paste",
-        )
-        db.add(company)
-        db.flush()
-    return company.id
+    try:
+        # SAVEPOINT so a failed company lookup cannot unwind contacts already
+        # staged in this same turn.
+        with db.begin_nested():
+            company = db.execute(
+                select(Company).where(Company.normalized_name == normalized)
+            ).scalars().first()
+            if company is None:
+                company = Company(
+                    name=label,
+                    normalized_name=normalized,
+                    enrichment_source="bulk_paste",
+                )
+                db.add(company)
+                db.flush()
+            return company.id
+    except Exception:
+        logger.exception("Could not attach company %r — continuing without it", label)
+        return None
 
 
 def _interpret(db: Session, campaign: BulkCampaign, text: str) -> Intent:
