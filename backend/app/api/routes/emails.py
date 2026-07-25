@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import html as html_lib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -41,8 +40,10 @@ from app.services.email_providers import (
     provider_for_mailbox,
     resolve_mailbox,
 )
+from app.services.email_html import plain_body_to_html
 from app.services.insights.engine import (
     apply_signature,
+    build_signature,
     generate_followup,
     generate_insight,
     generate_outreach,
@@ -918,19 +919,23 @@ def _pixel_url(draft_id: int) -> Optional[str]:
     return f"{base}/api/emails/track/{draft_id}.gif?t={_open_token(draft_id)}"
 
 
+def _draft_html(db: Session, draft: EmailDraft, *, pixel_url: Optional[str] = None) -> str:
+    """HTML body for outbound mail — polished signature + optional open pixel."""
+    signature = None
+    if draft.principal_id:
+        principal = db.get(Principal, draft.principal_id)
+        if principal:
+            signature = build_signature(principal) or None
+            # Prefer the raw custom text for parsing (richer structure).
+            custom = (principal.email_signature or "").strip()
+            if custom:
+                signature = custom
+    return plain_body_to_html(draft.body or "", signature=signature, pixel_url=pixel_url)
+
+
 def _html_with_pixel(body: str, pixel_url: Optional[str]) -> str:
-    """Render a plain-text body as minimal HTML with an invisible tracking pixel."""
-    escaped = html_lib.escape(body or "").replace("\n", "<br>\n")
-    pixel = (
-        f'<img src="{pixel_url}" width="1" height="1" alt="" '
-        'style="display:none;max-width:0;max-height:0;overflow:hidden" />'
-        if pixel_url
-        else ""
-    )
-    return (
-        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;'
-        f'color:#222;line-height:1.5">{escaped}</div>{pixel}'
-    )
+    """Legacy helper — prefer ``_draft_html`` when a draft is available."""
+    return plain_body_to_html(body, pixel_url=pixel_url)
 
 
 def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
@@ -953,12 +958,10 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
     if contact.do_not_contact:
         raise SendError("Prospect is on do-not-contact list")
 
-    # Open tracking: send HTML with an invisible pixel when enabled + reachable.
-    html_body = None
-    if settings.track_opens:
-        pixel = _pixel_url(draft.id)
-        if pixel:
-            html_body = _html_with_pixel(draft.body, pixel)
+    # Always send a polished HTML alternative so signatures look professional.
+    # Keep draft.body as plain text for editing; Gmail multipart includes both.
+    pixel = _pixel_url(draft.id) if settings.track_opens else None
+    html_body = _draft_html(db, draft, pixel_url=pixel)
 
     mailbox = resolve_mailbox(draft.from_mailbox)
     provider = provider_for_mailbox(mailbox)
@@ -1057,11 +1060,8 @@ def schedule_email(
     outlook = False
     if provider.supports_scheduled_send():
         # Hand off to Outlook for server-side deferred delivery.
-        html_body = None
-        if settings.track_opens:
-            pixel = _pixel_url(draft.id)
-            if pixel:
-                html_body = _html_with_pixel(draft.body, pixel)
+        pixel = _pixel_url(draft.id) if settings.track_opens else None
+        html_body = _draft_html(db, draft, pixel_url=pixel)
         result = provider.send(
             to_email=contact.email,
             subject=draft.subject,

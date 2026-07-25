@@ -68,6 +68,155 @@ function initials(name: string): string {
     .join("");
 }
 
+const CLOSER_RE =
+  /^(thanks|thank you|best|best regards|regards|cheers|sincerely|all the best|warmly)\b[,!. ]*$/i;
+const PHONE_RE = /^\+?[\d\s().-]{7,}$/;
+const LABEL_RE =
+  /^(websites?|links?|phone|mobile|tel|linkedin|email|e-mail|calendar|book a call|schedule)\s*:?\s*$/i;
+const URL_RE = /https?:\/\/[^\s]+/gi;
+
+interface ParsedSignature {
+  closer: string;
+  name: string;
+  details: string[];
+  phone: string;
+  linkedin: string;
+  websites: string[];
+  calendly: string;
+}
+
+function displayHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+function parseSignature(raw: string): ParsedSignature {
+  const parts: ParsedSignature = {
+    closer: "Thanks,",
+    name: "",
+    details: [],
+    phone: "",
+    linkedin: "",
+    websites: [],
+    calendly: "",
+  };
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) return parts;
+
+  let start = 0;
+  if (CLOSER_RE.test(lines[0])) {
+    let closer = lines[0].replace(/\.$/, "");
+    if (!closer.endsWith(",")) closer = `${closer.replace(/[,!]+$/, "")},`;
+    parts.closer = closer;
+    start = 1;
+  }
+
+  for (const line of lines.slice(start)) {
+    if (LABEL_RE.test(line)) continue;
+    const urls = line.match(URL_RE) ?? [];
+    if (urls.length) {
+      for (const rawUrl of urls) {
+        const url = rawUrl.replace(/[.,);]+$/, "");
+        const low = url.toLowerCase();
+        if (low.includes("linkedin.com") && !parts.linkedin) parts.linkedin = url;
+        else if (low.includes("calendly.com") && !parts.calendly) parts.calendly = url;
+        else parts.websites.push(url);
+      }
+      continue;
+    }
+    if (PHONE_RE.test(line) && (line.match(/\d/g) ?? []).length >= 7) {
+      if (!parts.phone) parts.phone = line;
+      continue;
+    }
+    if (!parts.name) parts.name = line;
+    else parts.details.push(line);
+  }
+  return parts;
+}
+
+/** How the signature will look in the emails recipients open. */
+function SignaturePreview({ text }: { text: string }) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return (
+      <p className="mt-1.5 text-sm text-slate-500">
+        Using the short default (Thanks / name / LinkedIn). Recipients will see a
+        clean styled block — paste a fuller signature above to customize it.
+      </p>
+    );
+  }
+  const p = parseSignature(trimmed);
+  return (
+    <div className="mt-1.5 rounded-xl bg-white px-4 py-4 ring-1 ring-slate-200">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        How recipients see it
+      </p>
+      <div className="mt-3 border-t border-slate-200 pt-3 text-sm leading-relaxed text-slate-600">
+        <p className="mb-2.5 text-slate-500">{p.closer}</p>
+        {p.name && (
+          <p className="text-[15px] font-bold text-slate-900">{p.name}</p>
+        )}
+        {p.details.map((d) => (
+          <p key={d} className="mt-0.5 text-slate-600">
+            {d}
+          </p>
+        ))}
+        {(p.linkedin || p.phone) && (
+          <p className="mt-2.5 text-[13px]">
+            {p.linkedin && (
+              <a
+                href={p.linkedin}
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 hover:underline"
+              >
+                LinkedIn
+              </a>
+            )}
+            {p.linkedin && p.phone && (
+              <span className="px-2 text-slate-300">·</span>
+            )}
+            {p.phone && <span className="text-slate-700">{p.phone}</span>}
+          </p>
+        )}
+        {p.websites.length > 0 && (
+          <p className="mt-1.5 text-[13px]">
+            {p.websites.map((url, i) => (
+              <span key={url}>
+                {i > 0 && <span className="px-2 text-slate-300">·</span>}
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 hover:underline"
+                >
+                  {displayHost(url)}
+                </a>
+              </span>
+            ))}
+          </p>
+        )}
+        {p.calendly && (
+          <a
+            href={p.calendly}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-block rounded-md bg-slate-900 px-3.5 py-2 text-[13px] font-semibold text-white hover:bg-slate-800"
+          >
+            Book a 30-min call
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Field({
   label,
   hint,
@@ -248,13 +397,14 @@ function PrincipalProfile({
                 />
                 <Field
                   label="Email signature"
-                  hint="Appended to every outreach email from this principal's campaigns. Leave blank to use a short Thanks / name / LinkedIn default. The app never stacks this — it replaces any trailing sign-off."
+                  hint="Paste freely — we format it for drafts and style it as HTML when the email is sent (clickable LinkedIn/websites, Book a call button)."
                   value={form.email_signature}
                   onChange={set("email_signature")}
-                  placeholder={`Thanks,\nTaha Qureshi\nLead AI Architect\nhttps://www.linkedin.com/in/qureshitaha/\n+1 857 832 0365\nTekhqs AI (Subsidiary of Tekhqs INC)\nWebsites:\nhttps://tekhqs.com/\nhttps://tekhqs.ai/`}
+                  placeholder={`Thanks,\nTaha Qureshi\nLead AI Architect\nhttps://www.linkedin.com/in/qureshitaha/\n+1 857 832 0365\nTekhqs AI (Subsidiary of Tekhqs INC)\nWebsites:\nhttps://tekhqs.com/\nhttps://tekhqs.ai/\nhttps://calendly.com/…`}
                   multiline
                   rows={9}
                 />
+                <SignaturePreview text={form.email_signature} />
                 <Field
                   label="Document focus"
                   hint="Optional — emphasize a niche from their files (e.g. AI Engineering). Leave blank for everything relevant."
@@ -324,16 +474,7 @@ function PrincipalProfile({
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                     Email signature
                   </p>
-                  {principal.email_signature?.trim() ? (
-                    <pre className="mt-1.5 whitespace-pre-wrap rounded-lg bg-slate-50 px-3 py-2 font-mono text-sm leading-relaxed text-slate-700 ring-1 ring-slate-200">
-                      {principal.email_signature}
-                    </pre>
-                  ) : (
-                    <p className="mt-1.5 text-sm text-slate-500">
-                      Using the short default (Thanks / name / LinkedIn). Edit to set a
-                      full signature for this principal's campaigns.
-                    </p>
-                  )}
+                  <SignaturePreview text={principal.email_signature ?? ""} />
                 </div>
               </>
             )}
@@ -598,13 +739,14 @@ function NewPrincipalForm({
         />
         <Field
           label="Email signature"
-          hint="Optional — exact sign-off for every outreach email from this person."
+          hint="Optional — paste freely; we format and style it when emails go out."
           value={form.email_signature}
           onChange={(v) => setForm((f) => ({ ...f, email_signature: v }))}
           placeholder={`Thanks,\nYour Name\nTitle\nhttps://www.linkedin.com/in/…\n+1 …\nCompany\nWebsites:\nhttps://…`}
           multiline
           rows={9}
         />
+        <SignaturePreview text={form.email_signature} />
         <Field
           label="Document focus"
           hint="Optional — e.g. AI Engineering. Leave blank to use all relevant content."

@@ -254,20 +254,24 @@ def build_signature(principal: Principal) -> str:
     """The email sign-off for this principal.
 
     Prefer the custom ``email_signature`` when set so each principal can own
-    their full block (title, company, websites, phone). Otherwise fall back to
-    the short default of Thanks / name / LinkedIn.
+    their full block (title, company, websites, phone). Freeform text is
+    normalized into a readable layout (name/title grouped, labeled links).
+    Otherwise fall back to the short default of Thanks / name / LinkedIn.
     """
+    from app.services.email_html import format_signature_plain
+
     custom = (principal.email_signature or "").strip()
     if custom:
-        return custom
+        return format_signature_plain(custom)
     name = (principal.name or "").strip()
-    lines = ["Thanks,"]
+    lines = ["Thanks,", ""]
     if name:
         lines.append(name)
     url = resolve_linkedin_url(principal)
     if url:
-        lines.append(url)
-    return "\n".join(lines)
+        lines.append("")
+        lines.append(f"LinkedIn: {url}")
+    return "\n".join(lines).strip()
 
 
 def _digits_only(value: str) -> str:
@@ -294,30 +298,53 @@ def apply_signature(
     """Replace any trailing sign-off in ``body`` with the principal's signature.
 
     Idempotent: strips trailing blank/closer/name/URL/phone lines and any line
-    that already appears in the target signature, so applying it repeatedly
-    (e.g. after editing the principal signature) never stacks the block.
+    that already appears in the target (or previous) signature, so applying it
+    repeatedly (e.g. after editing the principal signature) never stacks the block.
     """
     if not body:
         return body
-    body = _strip_exact_signature(body, previous_signature or "")
+    raw_custom = (principal.email_signature or "").strip()
     signature = build_signature(principal)
+    # Strip exact previous/raw/polished blocks so layout changes don't leave
+    # a leftover copy of the old sign-off.
+    for block in (previous_signature or "", raw_custom, signature):
+        body = _strip_exact_signature(body, block)
     signature_lines = {
-        ln.strip().lower() for ln in signature.split("\n") if ln.strip()
+        ln.strip().lower()
+        for block in (previous_signature or "", raw_custom, signature)
+        for ln in block.split("\n")
+        if ln.strip()
     }
+    # Also match "LinkedIn: url" / "Book a call: url" variants by URL alone.
+    for block in (previous_signature or "", raw_custom, signature):
+        for ln in block.split("\n"):
+            for token in ln.split():
+                if token.lower().startswith("http"):
+                    signature_lines.add(token.strip().lower())
     name = (principal.name or "").strip().lower()
     first = name.split()[0] if name else ""
     phone = (principal.phone or "").strip()
     phone_digits = _digits_only(phone)
+    label_only = {
+        "websites",
+        "website",
+        "links",
+        "link",
+        "phone",
+        "linkedin",
+        "email",
+    }
     lines = body.rstrip().split("\n")
     while lines:
         last = lines[-1].strip()
-        normalized = last.lower().rstrip(",").strip()
-        is_url = last.lower().startswith("http")
+        normalized = last.lower().rstrip(",:").strip()
+        is_url = "http://" in last.lower() or "https://" in last.lower()
         is_name = bool(name) and (normalized == name or (first and normalized == first))
         is_closer = normalized in _CLOSERS
         is_phone = bool(phone_digits) and _digits_only(last) == phone_digits and len(last) < 40
         is_sig_line = bool(normalized) and normalized in signature_lines
-        if last == "" or is_url or is_name or is_closer or is_phone or is_sig_line:
+        is_label = normalized in label_only
+        if last == "" or is_url or is_name or is_closer or is_phone or is_sig_line or is_label:
             lines.pop()
             continue
         break
