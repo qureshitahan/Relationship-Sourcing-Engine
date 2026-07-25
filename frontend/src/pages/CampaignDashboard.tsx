@@ -6,6 +6,7 @@ import {
   cancelCampaignRun,
   pauseCampaign,
   resumeCampaign,
+  scheduleApprovedEmails,
   deleteCampaign,
   getCampaign,
   getCampaignProspects,
@@ -669,12 +670,31 @@ export default function CampaignDashboard() {
 
   const resume = useMutation({
     mutationFn: () => resumeCampaign(campaignId),
-    onSuccess: () => {
-      notify("Campaign resumed. Daily automation stays off until you turn it on.");
+    onSuccess: (d) => {
+      notify(
+        d.scheduled_count > 0
+          ? `Campaign resumed — ${d.scheduled_count} email(s) re-scheduled at AI-picked times.`
+          : "Campaign resumed. Daily automation stays off until you turn it on."
+      );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
     onError: () => notify("Could not resume the campaign."),
+  });
+
+  const scheduleApproved = useMutation({
+    mutationFn: () => scheduleApprovedEmails(campaignId),
+    onSuccess: (d) => {
+      notify(`Queued — ${d.scheduled_count} email(s) scheduled at AI-picked times.`);
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: (e: unknown) => {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not schedule the approved emails.";
+      notify(String(msg));
+    },
   });
 
   const toggleEnabled = useMutation({
@@ -714,6 +734,7 @@ export default function CampaignDashboard() {
   const running = campaign.status === "running";
   const paused = campaign.paused;
   const queued = campaign.scheduled_count ?? 0;
+  const readyToQueue = campaign.approved_unscheduled ?? 0;
   const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
   const canContinue =
     !running &&
@@ -808,6 +829,18 @@ export default function CampaignDashboard() {
                 </Button>
               )}
             </>
+          )}
+          {!paused && readyToQueue > 0 && (
+            <Button
+              variant="secondary"
+              onClick={() => scheduleApproved.mutate()}
+              disabled={scheduleApproved.isPending}
+              title="Give every approved email an AI-picked send time"
+            >
+              {scheduleApproved.isPending
+                ? "Scheduling…"
+                : `Schedule ${readyToQueue} approved`}
+            </Button>
           )}
           {!paused && (
             <Button

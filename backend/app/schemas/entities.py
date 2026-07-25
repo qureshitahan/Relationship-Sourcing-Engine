@@ -415,6 +415,8 @@ class CampaignDetailOut(BaseModel):
     paused: bool = False
     # Emails queued to send that a pause/stop would pull back.
     scheduled_count: int = 0
+    # Approved emails with no send time yet (schedulable in one click).
+    approved_unscheduled: int = 0
     status: str  # running | paused | ready | draft
     objective: Optional[str] = None
     playbook_id: Optional[int] = None

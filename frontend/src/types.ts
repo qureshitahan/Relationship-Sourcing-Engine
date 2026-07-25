@@ -604,6 +604,7 @@ export interface CampaignDetail {
   enabled: boolean;
   paused: boolean;
   scheduled_count: number;
+  approved_unscheduled: number;
   status: "running" | "paused" | "ready" | "draft";
   objective?: string | null;
   playbook_id?: number | null;

@@ -39,6 +39,7 @@ from app.services.agent.planner import criteria_from_dict
 from app.services.audit import log_action
 from app.services.campaign_control import (
     request_run_cancel,
+    reschedule_campaign_emails,
     unschedule_campaign_emails,
 )
 
@@ -354,16 +355,63 @@ def pause_campaign(campaign_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{campaign_id}/resume", response_model=CampaignDetailOut)
-def resume_campaign(campaign_id: int, db: Session = Depends(get_db)):
-    """Lift a pause. Daily automation stays off until turned back on."""
+def resume_campaign(
+    campaign_id: int,
+    reschedule: bool = Query(
+        True, description="Re-queue emails the pause cancelled, using AI send timing"
+    ),
+    db: Session = Depends(get_db),
+):
+    """Lift a pause and re-queue what it cancelled.
+
+    Emails pulled back by the pause are scheduled again with the same
+    per-recipient timing the agent uses, so resuming doesn't leave a pile of
+    approved drafts to send by hand. Daily automation stays off until turned
+    back on.
+    """
     config = _get_campaign(db, campaign_id)
     config.paused = False
+    db.flush()
+    scheduled = reschedule_campaign_emails(db, campaign_id) if reschedule else 0
     log_action(
         db,
         AuditAction.CAMPAIGN,
         entity_type="campaign",
         entity_id=campaign_id,
-        summary="Resumed campaign",
+        summary=f"Resumed campaign. Re-scheduled {scheduled} email(s).",
+    )
+    db.commit()
+    return campaign_detail(db, campaign_id)
+
+
+@router.post("/{campaign_id}/schedule-approved", response_model=CampaignDetailOut)
+def schedule_approved_emails(campaign_id: int, db: Session = Depends(get_db)):
+    """Queue this campaign's approved-but-unscheduled emails with AI send timing.
+
+    Lets a batch left over from a pause (or an earlier run that hit the daily
+    cap) go out on sensible per-recipient times instead of being sent by hand.
+    """
+    config = _get_campaign(db, campaign_id)
+    if config.paused:
+        raise HTTPException(
+            status_code=409,
+            detail="This campaign is paused. Resume it before scheduling sends.",
+        )
+    scheduled = reschedule_campaign_emails(db, campaign_id)
+    if not scheduled:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nothing to schedule — no approved emails are waiting, or the "
+                "principal's daily cap is already used up for today."
+            ),
+        )
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary=f"Scheduled {scheduled} approved email(s)",
     )
     db.commit()
     return campaign_detail(db, campaign_id)

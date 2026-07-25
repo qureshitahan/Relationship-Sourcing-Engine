@@ -417,6 +417,16 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
             )
         ).scalar_one()
     )
+    # Approved but not queued — schedulable without any further review.
+    approved_unscheduled = int(
+        db.execute(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.campaign_id == campaign_id,
+                EmailDraft.status == EmailStatus.APPROVED,
+                EmailDraft.scheduled_at.is_(None),
+            )
+        ).scalar_one()
+    )
 
     return {
         "id": config.id,
@@ -426,6 +436,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "enabled": bool(config.enabled),
         "paused": bool(config.paused),
         "scheduled_count": scheduled_count,
+        "approved_unscheduled": approved_unscheduled,
         "status": status,
         "objective": (playbook.objective_prompt if playbook else None),
         "playbook_id": playbook.id if playbook else None,
