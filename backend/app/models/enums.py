@@ -198,6 +198,7 @@ class AuditAction:
     PROSPECT_APPROVAL = "prospect_approval"
     PRINCIPAL = "principal"
     SEARCH_DEFINITION = "search_definition"
+    CAMPAIGN = "campaign"
     EMAIL_DRAFT = "email_draft"
     EMAIL_APPROVAL = "email_approval"
     EMAIL_SEND = "email_send"

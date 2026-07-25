@@ -44,6 +44,7 @@ from app.services.email_providers import (
     provider_for_mailbox,
     resolve_mailbox,
 )
+from app.services.campaign_control import campaign_is_paused
 from app.services.email_html import plain_body_to_html
 from app.services.insights.engine import (
     apply_signature,
@@ -990,6 +991,8 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
     """
     if draft.status not in (EmailStatus.APPROVED, EmailStatus.SCHEDULED):
         raise SendError("Email must be APPROVED before sending")
+    if campaign_is_paused(db, draft.campaign_id):
+        raise SendError("This campaign is paused. Resume it before sending.")
     if draft.outlook_scheduled:
         raise SendError(
             "This email is queued in Outlook for deferred delivery. Unschedule it first."
@@ -1092,6 +1095,11 @@ def schedule_email(
         raise HTTPException(status_code=404, detail="Draft not found")
     if draft.status in (EmailStatus.SENT, EmailStatus.REPLIED):
         raise HTTPException(status_code=400, detail="Email already sent")
+    if campaign_is_paused(db, draft.campaign_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This campaign is paused. Resume it before scheduling sends.",
+        )
 
     contact = db.get(Contact, draft.contact_id) if draft.contact_id else None
     if not contact or not contact.email:

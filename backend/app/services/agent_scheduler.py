@@ -31,7 +31,10 @@ def _tick_once() -> None:
     try:
         now = datetime.utcnow()
         configs = db.execute(
-            select(AgentConfig).where(AgentConfig.enabled.is_(True))
+            select(AgentConfig).where(
+                AgentConfig.enabled.is_(True),
+                AgentConfig.paused.is_(False),
+            )
         ).scalars().all()
         for config in configs:
             if now.hour != config.run_hour_utc:

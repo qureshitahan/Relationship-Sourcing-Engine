@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   cancelCampaignRun,
+  pauseCampaign,
+  resumeCampaign,
   deleteCampaign,
   getCampaign,
   getCampaignProspects,
@@ -633,11 +635,46 @@ export default function CampaignDashboard() {
   const stopRun = useMutation({
     mutationFn: () => cancelCampaignRun(campaignId),
     onSuccess: () => {
-      notify("Stop requested — the run will finish the current step and halt.");
+      notify(
+        "Stopping — the run halts after the current step and queued emails were cancelled."
+      );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
-    onError: () => notify("Could not stop the run."),
+    onError: (e: unknown) => {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not stop the run.";
+      notify(String(msg));
+    },
+  });
+
+  const pause = useMutation({
+    mutationFn: () => pauseCampaign(campaignId),
+    onSuccess: () => {
+      notify("Campaign paused — scheduled emails cancelled. Nothing sends until resumed.");
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: (e: unknown) => {
+      // 207 means paused, but some Outlook-queued copies could not be deleted.
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not pause the campaign.";
+      notify(String(msg));
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+  });
+
+  const resume = useMutation({
+    mutationFn: () => resumeCampaign(campaignId),
+    onSuccess: () => {
+      notify("Campaign resumed. Daily automation stays off until you turn it on.");
+      qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
+      qc.invalidateQueries({ queryKey: ["campaigns"] });
+    },
+    onError: () => notify("Could not resume the campaign."),
   });
 
   const toggleEnabled = useMutation({
@@ -675,6 +712,8 @@ export default function CampaignDashboard() {
 
   const t = campaign.totals;
   const running = campaign.status === "running";
+  const paused = campaign.paused;
+  const queued = campaign.scheduled_count ?? 0;
   const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
   const canContinue =
     !running &&
@@ -713,8 +752,18 @@ export default function CampaignDashboard() {
             </p>
           </div>
           <div className="flex flex-col items-end gap-1.5">
-            <Badge tone={running ? "blue" : campaign.enabled ? "green" : "amber"}>
-              {running ? "Running now" : campaign.enabled ? "Runs daily" : "Ready"}
+            <Badge
+              tone={
+                paused ? "red" : running ? "blue" : campaign.enabled ? "green" : "amber"
+              }
+            >
+              {paused
+                ? "Paused"
+                : running
+                  ? "Running now"
+                  : campaign.enabled
+                    ? "Runs daily"
+                    : "Ready"}
             </Badge>
             <Badge tone={campaign.auto_send ? "green" : "purple"}>
               {campaign.auto_send ? "Autopilot" : "Review before send"}
@@ -722,8 +771,19 @@ export default function CampaignDashboard() {
           </div>
         </div>
 
+        {paused && (
+          <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-800 ring-1 ring-rose-200">
+            This campaign is paused. Scheduled emails were cancelled and nothing will
+            send — including approved drafts — until you resume it.
+          </div>
+        )}
+
         <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
-          {running ? (
+          {paused ? (
+            <Button onClick={() => resume.mutate()} disabled={resume.isPending}>
+              {resume.isPending ? "Resuming…" : "Resume campaign"}
+            </Button>
+          ) : running ? (
             <Button
               variant="secondary"
               className="!text-rose-600 hover:!bg-rose-50"
@@ -749,14 +809,39 @@ export default function CampaignDashboard() {
               )}
             </>
           )}
+          {!paused && (
+            <Button
+              variant="secondary"
+              className="!text-rose-600 hover:!bg-rose-50"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    queued > 0
+                      ? `Pause this campaign? ${queued} scheduled email(s) will be cancelled and nothing will send until you resume.`
+                      : "Pause this campaign? Nothing will send until you resume it."
+                  )
+                ) {
+                  pause.mutate();
+                }
+              }}
+              disabled={pause.isPending}
+              title="Stop everything, including already-scheduled emails, until resumed"
+            >
+              {pause.isPending ? "Pausing…" : "Pause campaign"}
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={() => toggleEnabled.mutate(!campaign.enabled)}
-            disabled={toggleEnabled.isPending || running}
+            disabled={toggleEnabled.isPending || running || paused}
           >
             {campaign.enabled ? "Turn off daily" : "Turn on daily"}
           </Button>
-          <Button variant="secondary" onClick={() => setEditing((v) => !v)} disabled={running}>
+          <Button
+            variant="secondary"
+            onClick={() => setEditing((v) => !v)}
+            disabled={running}
+          >
             {editing ? "Close editor" : "Edit"}
           </Button>
           <Button

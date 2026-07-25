@@ -581,7 +581,8 @@ export interface CampaignSummary {
   playbook_name?: string | null;
   objective_preview?: string | null;
   enabled: boolean;
-  status: "running" | "ready" | "draft";
+  paused: boolean;
+  status: "running" | "paused" | "ready" | "draft";
   current_run_id?: number | null;
   current_run_discovered?: number | null;
   current_run_sent?: number | null;
@@ -601,7 +602,9 @@ export interface CampaignDetail {
   principal_id: number;
   principal_name: string;
   enabled: boolean;
-  status: "running" | "ready" | "draft";
+  paused: boolean;
+  scheduled_count: number;
+  status: "running" | "paused" | "ready" | "draft";
   objective?: string | null;
   playbook_id?: number | null;
   playbook_name?: string | null;

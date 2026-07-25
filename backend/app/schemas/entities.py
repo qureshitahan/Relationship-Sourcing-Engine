@@ -389,7 +389,8 @@ class CampaignSummaryOut(BaseModel):
     playbook_name: Optional[str] = None
     objective_preview: Optional[str] = None
     enabled: bool = False
-    status: str  # running | ready | draft
+    paused: bool = False
+    status: str  # running | paused | ready | draft
     current_run_id: Optional[int] = None
     current_run_discovered: Optional[int] = None
     current_run_sent: Optional[int] = None
@@ -411,7 +412,10 @@ class CampaignDetailOut(BaseModel):
     principal_id: int
     principal_name: str
     enabled: bool = False
-    status: str  # running | ready | draft
+    paused: bool = False
+    # Emails queued to send that a pause/stop would pull back.
+    scheduled_count: int = 0
+    status: str  # running | paused | ready | draft
     objective: Optional[str] = None
     playbook_id: Optional[int] = None
     playbook_name: Optional[str] = None

@@ -38,6 +38,9 @@ class AgentConfig(Base, TimestampMixin):
 
     # Daily auto-run. When False, the agent only runs when "Run now" is clicked.
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Hard stop: while paused the campaign cannot run and none of its emails
+    # send, including anything already scheduled. Stays paused until resumed.
+    paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # UTC hour (0-23) at which the scheduled run fires.
     run_hour_utc: Mapped[int] = mapped_column(Integer, default=13, nullable=False)
 

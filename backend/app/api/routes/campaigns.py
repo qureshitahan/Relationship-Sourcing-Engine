@@ -19,6 +19,7 @@ from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
+from app.models.enums import AuditAction
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
 from app.schemas.entities import (
@@ -35,6 +36,11 @@ from app.services.agent.dashboard import (
     list_campaigns,
 )
 from app.services.agent.planner import criteria_from_dict
+from app.services.audit import log_action
+from app.services.campaign_control import (
+    request_run_cancel,
+    unschedule_campaign_emails,
+)
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -263,6 +269,11 @@ def run_campaign(
 ):
     """Kick off a run for this campaign now (executes in the background)."""
     config = _get_campaign(db, campaign_id)
+    if config.paused:
+        raise HTTPException(
+            status_code=409,
+            detail="This campaign is paused. Resume it before running.",
+        )
     if not config.playbook_id:
         raise HTTPException(
             status_code=400,
@@ -290,17 +301,70 @@ def run_campaign(
 
 @router.post("/{campaign_id}/cancel", response_model=CampaignDetailOut)
 def cancel_campaign_run(campaign_id: int, db: Session = Depends(get_db)):
-    """Request the in-flight agent run to stop after the current step."""
+    """Stop the in-flight run AND cancel anything it already queued.
+
+    Halting the run alone would still let scheduled emails go out, so queued
+    sends are pulled back to APPROVED here too.
+    """
     _get_campaign(db, campaign_id)
-    running = db.execute(
-        select(AgentRun).where(
-            AgentRun.campaign_id == campaign_id,
-            AgentRun.status == "running",
+    was_running = request_run_cancel(db, campaign_id)
+    result = unschedule_campaign_emails(db, campaign_id)
+    if not was_running and not result.cancelled and not result.failed_ids:
+        raise HTTPException(
+            status_code=404,
+            detail="Nothing to stop — no run in progress and no scheduled emails.",
         )
-    ).scalars().first()
-    if running is None:
-        raise HTTPException(status_code=404, detail="No run in progress for this campaign.")
-    running.summary = {**(running.summary or {}), "cancel_requested": True}
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary=f"Stopped campaign run. {result.message()}",
+    )
+    db.commit()
+    return campaign_detail(db, campaign_id)
+
+
+@router.post("/{campaign_id}/pause", response_model=CampaignDetailOut)
+def pause_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Pause a campaign until explicitly resumed.
+
+    Stops any in-flight run, turns off the daily schedule, and cancels every
+    email already queued for this campaign. While paused, nothing is sent even
+    if a draft is approved or re-scheduled.
+    """
+    config = _get_campaign(db, campaign_id)
+    config.paused = True
+    config.enabled = False
+    request_run_cancel(db, campaign_id)
+    result = unschedule_campaign_emails(db, campaign_id)
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary=f"Paused campaign. {result.message()}",
+    )
+    db.commit()
+    if not result.ok:
+        # The campaign is paused either way; surface the Outlook copies we
+        # could not delete so they can be handled in the mailbox.
+        raise HTTPException(status_code=207, detail=result.message())
+    return campaign_detail(db, campaign_id)
+
+
+@router.post("/{campaign_id}/resume", response_model=CampaignDetailOut)
+def resume_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Lift a pause. Daily automation stays off until turned back on."""
+    config = _get_campaign(db, campaign_id)
+    config.paused = False
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary="Resumed campaign",
+    )
     db.commit()
     return campaign_detail(db, campaign_id)
 
@@ -332,6 +396,10 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
         select(AgentRun).where(AgentRun.campaign_id == campaign_id)
     ).scalars().all():
         db.delete(run)
+
+    # Cancel queued sends before deleting the drafts. Outlook-deferred copies
+    # live at Exchange and would still be delivered after the local row is gone.
+    unschedule_campaign_emails(db, campaign_id)
     for draft in db.execute(
         select(EmailDraft).where(EmailDraft.campaign_id == campaign_id)
     ).scalars().all():

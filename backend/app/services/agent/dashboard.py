@@ -206,6 +206,8 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
 
         if run:
             status = "running"
+        elif config.paused:
+            status = "paused"
         elif playbook:
             status = "ready"
         else:
@@ -222,6 +224,7 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 "playbook_name": playbook.name if playbook else None,
                 "objective_preview": objective[:160] if objective else None,
                 "enabled": bool(config.enabled),
+                "paused": bool(config.paused),
                 "status": status,
                 "current_run_id": run.id if run else None,
                 "current_run_discovered": run.discovered if run else None,
@@ -398,10 +401,22 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
 
     if running_run:
         status = "running"
+    elif config.paused:
+        status = "paused"
     elif playbook:
         status = "ready"
     else:
         status = "draft"
+
+    # Queued sends that a pause/stop would pull back.
+    scheduled_count = int(
+        db.execute(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.campaign_id == campaign_id,
+                EmailDraft.status == EmailStatus.SCHEDULED,
+            )
+        ).scalar_one()
+    )
 
     return {
         "id": config.id,
@@ -409,6 +424,8 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "principal_id": config.principal_id,
         "principal_name": principal.name if principal else "",
         "enabled": bool(config.enabled),
+        "paused": bool(config.paused),
+        "scheduled_count": scheduled_count,
         "status": status,
         "objective": (playbook.objective_prompt if playbook else None),
         "playbook_id": playbook.id if playbook else None,

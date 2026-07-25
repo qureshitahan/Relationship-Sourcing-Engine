@@ -27,6 +27,7 @@ function relativeTime(iso?: string | null): string {
 
 function statusLabel(c: CampaignSummary): string {
   if (c.status === "running") return "Running now";
+  if (c.paused) return "Paused";
   if (c.status === "draft") return "Needs setup";
   return c.enabled ? "Runs daily" : "Ready";
 }

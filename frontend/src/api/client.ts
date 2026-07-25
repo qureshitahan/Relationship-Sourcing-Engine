@@ -667,6 +667,10 @@ export const runCampaign = (id: number, resume = false) =>
     .then((r) => r.data);
 export const cancelCampaignRun = (id: number) =>
   api.post<CampaignDetail>(`/api/campaigns/${id}/cancel`).then((r) => r.data);
+export const pauseCampaign = (id: number) =>
+  api.post<CampaignDetail>(`/api/campaigns/${id}/pause`).then((r) => r.data);
+export const resumeCampaign = (id: number) =>
+  api.post<CampaignDetail>(`/api/campaigns/${id}/resume`).then((r) => r.data);
 export const deleteCampaign = (id: number) =>
   api.delete(`/api/campaigns/${id}`).then(() => undefined);
 export const listAgentVariants = (principalId?: number) =>
