@@ -519,7 +519,9 @@ def generate_followup(
         query_parts.append(insight.why_relevant)
     query = " ".join(p for p in query_parts if p)
 
-    p_ctx = principal_context(principal, outreach_goal=outreach_goal)
+    p_ctx = principal_context(
+        principal, outreach_goal=getattr(principal, "objective", None)
+    )
     relevant = retrieve_relevant_proof_points(db, principal.id, query, k=4)
     if relevant:
         p_ctx["relevant_proof_points"] = relevant
@@ -537,5 +539,66 @@ def generate_followup(
     while prev_subject.lower().startswith("re:"):
         prev_subject = prev_subject[3:].strip()
     result.subject = f"Re: {prev_subject}" if prev_subject else "Following up"
+    result.body = apply_signature(result.body, principal)
+    return result
+
+
+def generate_reply(
+    db: Session,
+    principal: Principal,
+    contact: Optional[Contact],
+    company: Optional[Company],
+    insight: Optional[RelevanceInsight],
+    previous: dict,
+    inbound_reply: str,
+) -> OutreachResult:
+    """Draft a contextual reply to an inbound email (no persistence, no send).
+
+    ``previous`` is our outbound subject/body; ``inbound_reply`` is what they
+    wrote back. Subject is forced to ``Re:`` of the original thread.
+    """
+    provider = get_insight_provider()
+    insight_ctx = None
+    if insight is not None:
+        facts = [_fact_text(f) for f in (insight.key_facts or []) if _fact_text(f)]
+        insight_ctx = {
+            "snapshot": insight.snapshot,
+            "key_facts": facts,
+            "why_relevant": insight.why_relevant,
+            "talking_points": insight.talking_points,
+            "opportunity_type": insight.opportunity_type,
+        }
+
+    query_parts = [contact.title if contact else None]
+    if company is not None:
+        query_parts.append(company.industry)
+    if insight is not None:
+        query_parts.append(insight.why_relevant)
+    query = " ".join(p for p in query_parts if p)
+
+    p_ctx = principal_context(
+        principal, outreach_goal=getattr(principal, "objective", None)
+    )
+    relevant = retrieve_relevant_proof_points(db, principal.id, query, k=4)
+    if relevant:
+        p_ctx["relevant_proof_points"] = relevant
+
+    from app.services.inbound_text import clean_inbound_reply
+
+    cleaned_inbound = clean_inbound_reply(inbound_reply) or (inbound_reply or "").strip()
+
+    result = provider.generate_reply(
+        principal=p_ctx,
+        person=person_context(contact),
+        organization=organization_context(company),
+        insight=insight_ctx,
+        previous=previous,
+        inbound_reply=cleaned_inbound,
+    )
+
+    prev_subject = (previous.get("subject") or "").strip()
+    while prev_subject.lower().startswith("re:"):
+        prev_subject = prev_subject[3:].strip()
+    result.subject = f"Re: {prev_subject}" if prev_subject else "Re:"
     result.body = apply_signature(result.body, principal)
     return result

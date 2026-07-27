@@ -17,6 +17,7 @@ from app.models.enums import EmailStatus, ProspectStatus
 from app.models.company import Company
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
+from app.services.inbound_text import clean_inbound_reply
 
 
 def campaign_dashboard(
@@ -563,7 +564,11 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
                 "email_subject": d.subject if d else None,
                 "sent_at": d.sent_at if d else None,
                 "replied_at": d.replied_at if d else None,
-                "reply_snippet": d.reply_snippet if d else None,
+                "reply_snippet": (
+                    clean_inbound_reply(d.reply_snippet or d.reply_body or "")
+                    if d and (d.reply_snippet or d.reply_body)
+                    else None
+                ),
                 "last_email_id": d.id if d else None,
             }
         )

@@ -579,6 +579,12 @@ export const generateFollowups = (params: {
     .then((r) => r.data);
 export const createFollowup = (draftId: number) =>
   api.post<EmailDraft>(`/api/emails/${draftId}/followup`).then((r) => r.data);
+export const draftContextualReply = (draftId: number) =>
+  api
+    .post<EmailDraft>(`/api/emails/${draftId}/draft-reply`, undefined, {
+      timeout: 120000,
+    })
+    .then((r) => r.data);
 export const replyToEmail = (draftId: number, body: string) =>
   api
     .post<EmailDraft>(`/api/emails/${draftId}/reply`, { body }, { timeout: 120000 })

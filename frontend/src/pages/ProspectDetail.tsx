@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   createFollowup,
   deleteEmail,
+  draftContextualReply,
   generateCall,
   generateEmail,
   generateInsight,
@@ -107,28 +108,34 @@ function MessageCard({
   labelTone,
   contactName,
   showFollowup,
+  showDraftReply,
   onSend,
   onDelete,
   onSaveEdit,
   onFollowup,
+  onDraftReply,
   sending,
   deleting,
   saving,
   followingUp,
+  draftingReply,
 }: {
   draft: EmailDraft;
   label: string;
   labelTone: Tone;
   contactName: string;
   showFollowup: boolean;
+  showDraftReply: boolean;
   onSend: (d: EmailDraft) => void;
   onDelete: (id: number) => void;
   onSaveEdit: (id: number, subject: string, body: string) => void;
   onFollowup: (id: number) => void;
+  onDraftReply: (id: number) => void;
   sending: boolean;
   deleting: boolean;
   saving: boolean;
   followingUp: boolean;
+  draftingReply: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [subject, setSubject] = useState(draft.subject);
@@ -247,6 +254,14 @@ function MessageCard({
               {sending ? "Sending…" : "Approve & send"}
             </Button>
           </>
+        )}
+        {showDraftReply && (
+          <Button
+            onClick={() => onDraftReply(draft.id)}
+            disabled={draftingReply}
+          >
+            {draftingReply ? "Drafting reply…" : "Draft intelligent reply"}
+          </Button>
         )}
         {showFollowup && (
           <Button
@@ -454,6 +469,15 @@ export default function ProspectDetail() {
     onError: (err) => fail(err, "Follow-up drafting failed."),
   });
 
+  const draftReply = useMutation({
+    mutationFn: (draftId: number) => draftContextualReply(draftId),
+    onSuccess: () => {
+      invalidateEmails();
+      ok("Reply drafted — review it below, then Approve & send when ready.");
+    },
+    onError: (err) => fail(err, "Could not draft a reply."),
+  });
+
   const genCall = useMutation({
     mutationFn: () =>
       generateCall({
@@ -487,6 +511,7 @@ export default function ProspectDetail() {
   const hasPendingDraft = thread.some((d) => UNSENT.includes(d.status));
   const hasSent = thread.some((d) => d.status === "sent" || d.status === "replied");
   const lastMessage = thread[thread.length - 1];
+  const lastReplied = [...thread].reverse().find((d) => d.status === "replied");
 
   // Outreach step labels (initial vs follow-up #n) computed in send order.
   let outreachIdx = -1;
@@ -521,8 +546,13 @@ export default function ProspectDetail() {
             }
           : hasPendingDraft
             ? { text: "You have a draft ready — review and send it in the conversation below." }
-            : lastMessage?.status === "replied"
-              ? { text: "They replied. Reply below to keep the conversation going." }
+            : lastReplied
+              ? {
+                  text: "They replied. Draft a contextual reply to move toward a meeting — nothing sends until you approve.",
+                  btn: draftReply.isPending ? "Drafting…" : "Draft intelligent reply",
+                  onClick: () => draftReply.mutate(lastReplied.id),
+                  disabled: draftReply.isPending,
+                }
               : {
                   text: "Sent and awaiting a reply. Nudge them with a follow-up when ready.",
                   btn: followup.isPending ? "Drafting…" : "Draft follow-up",
@@ -630,17 +660,25 @@ export default function ProspectDetail() {
               <div className="space-y-3">
                 {thread.map((d) => {
                   const lab = labelFor(d);
+                  const isReplyDraft =
+                    UNSENT.includes(d.status) &&
+                    (d.subject || "").trim().toLowerCase().startsWith("re:");
                   return (
                     <MessageCard
                       key={d.id}
                       draft={d}
-                      label={lab.label}
-                      labelTone={lab.tone}
+                      label={isReplyDraft ? "Reply draft" : lab.label}
+                      labelTone={isReplyDraft ? "green" : lab.tone}
                       contactName={prospect.name}
                       showFollowup={
                         !hasPendingDraft &&
                         d.id === lastMessage?.id &&
                         d.status === "sent"
+                      }
+                      showDraftReply={
+                        !hasPendingDraft &&
+                        d.status === "replied" &&
+                        d.id === lastReplied?.id
                       }
                       onSend={(dr) => {
                         if (
@@ -655,10 +693,14 @@ export default function ProspectDetail() {
                         editDraft.mutate({ id, subject, body })
                       }
                       onFollowup={(id) => followup.mutate(id)}
+                      onDraftReply={(id) => draftReply.mutate(id)}
                       sending={sendNow.isPending && sendNow.variables?.id === d.id}
                       deleting={removeDraft.isPending && removeDraft.variables === d.id}
                       saving={editDraft.isPending && editDraft.variables?.id === d.id}
                       followingUp={followup.isPending && followup.variables === d.id}
+                      draftingReply={
+                        draftReply.isPending && draftReply.variables === d.id
+                      }
                     />
                   );
                 })}

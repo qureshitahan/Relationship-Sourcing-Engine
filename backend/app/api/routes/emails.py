@@ -46,6 +46,7 @@ from app.services.email_providers import (
 )
 from app.services.campaign_control import campaign_is_paused
 from app.services.email_html import plain_body_to_html
+from app.services.inbound_text import clean_inbound_reply, reply_snippet
 from app.services.insights.engine import (
     apply_signature,
     build_signature,
@@ -53,6 +54,7 @@ from app.services.insights.engine import (
     generate_insight,
     generate_outreach,
     generate_outreach_batch,
+    generate_reply,
     principal_signature_ready,
     resolve_linkedin_url,
 )
@@ -62,6 +64,14 @@ from app.services.provider_health import active_warnings
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/emails", tags=["emails"])
+
+
+def _clean_reply_field(text: Optional[str]) -> Optional[str]:
+    """Normalize stored reply text for API consumers (safe on already-clean text)."""
+    if text is None:
+        return None
+    cleaned = clean_inbound_reply(text)
+    return cleaned or text
 
 
 def _principal_mailbox_id(principal: Principal) -> Optional[str]:
@@ -122,8 +132,8 @@ def _draft_out(db: Session, draft: EmailDraft) -> EmailDraftOut:
         outlook_scheduled=bool(draft.outlook_scheduled),
         sent_at=draft.sent_at,
         replied_at=draft.replied_at,
-        reply_snippet=draft.reply_snippet,
-        reply_body=draft.reply_body,
+        reply_snippet=_clean_reply_field(draft.reply_snippet),
+        reply_body=_clean_reply_field(draft.reply_body),
         last_reply_check_at=draft.last_reply_check_at,
         open_count=draft.open_count or 0,
         first_opened_at=draft.first_opened_at,
@@ -769,6 +779,85 @@ def track_open(draft_id: int, t: str = "", db: Session = Depends(get_db)):
     return Response(content=_TRACKING_PIXEL, media_type="image/gif", headers=headers)
 
 
+@router.post("/{draft_id}/draft-reply", response_model=EmailDraftOut)
+def draft_contextual_reply(draft_id: int, db: Session = Depends(get_db)):
+    """Draft an intelligent reply to an inbound email — does NOT send.
+
+    Uses the original outreach + their reply text so the draft acknowledges
+    what they said (pain point, hesitation, interest) and aims at booking a
+    short call. Creates a normal DRAFT you can edit, then Approve & send.
+    """
+    previous = db.get(EmailDraft, draft_id)
+    if not previous:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if previous.status != EmailStatus.REPLIED:
+        raise HTTPException(
+            status_code=400,
+            detail="Draft reply is only available after the prospect has replied",
+        )
+    inbound = (previous.reply_body or previous.reply_snippet or "").strip()
+    if not inbound:
+        raise HTTPException(
+            status_code=400,
+            detail="No reply text on file for this conversation yet",
+        )
+    principal = db.get(Principal, previous.principal_id) if previous.principal_id else None
+    contact = db.get(Contact, previous.contact_id) if previous.contact_id else None
+    if not principal or not contact:
+        raise HTTPException(status_code=404, detail="Principal or prospect not found")
+
+    # Reuse an existing unsent reply draft for this thread instead of stacking.
+    if previous.sent_at is not None:
+        existing = db.execute(
+            select(EmailDraft)
+            .where(
+                EmailDraft.contact_id == previous.contact_id,
+                EmailDraft.status.in_(
+                    [EmailStatus.DRAFT, EmailStatus.APPROVED, EmailStatus.SCHEDULED]
+                ),
+                EmailDraft.created_at > previous.sent_at,
+                EmailDraft.subject.ilike("re:%"),
+            )
+            .order_by(EmailDraft.created_at.desc())
+        ).scalars().first()
+        if existing is not None:
+            return _draft_out(db, existing)
+
+    company = db.get(Company, contact.company_id) if contact.company_id else None
+    insight = _latest_insight(db, principal.id, contact.id)
+    content = generate_reply(
+        db,
+        principal,
+        contact,
+        company,
+        insight,
+        {"subject": previous.subject, "body": previous.body},
+        inbound,
+    )
+    draft = EmailDraft(
+        principal_id=principal.id,
+        company_id=contact.company_id,
+        contact_id=contact.id,
+        insight_id=insight.id if insight else None,
+        campaign_id=previous.campaign_id,
+        bulk_campaign_id=previous.bulk_campaign_id,
+        subject=content.subject,
+        body=content.body,
+        from_mailbox=previous.from_mailbox or _principal_mailbox_id(principal),
+        status=EmailStatus.DRAFT,
+    )
+    db.add(draft)
+    log_action(
+        db,
+        AuditAction.EMAIL_DRAFT,
+        entity_type="email_draft",
+        summary=f"Drafted contextual reply for prospect {contact.id}",
+    )
+    db.commit()
+    db.refresh(draft)
+    return _draft_out(db, draft)
+
+
 @router.post("/{draft_id}/reply", response_model=EmailDraftOut)
 def reply_to_thread(draft_id: int, payload: EmailReplyRequest, db: Session = Depends(get_db)):
     """Send a reply to the prospect from inside the app, in the same thread.
@@ -1263,8 +1352,10 @@ def scan_replies(db: Session) -> dict:
         if result.found:
             draft.status = EmailStatus.REPLIED
             draft.replied_at = result.received_at or datetime.utcnow()
-            draft.reply_snippet = result.snippet
-            draft.reply_body = result.body or result.snippet
+            raw = result.body or result.snippet or ""
+            cleaned = clean_inbound_reply(raw)
+            draft.reply_body = cleaned or raw
+            draft.reply_snippet = reply_snippet(cleaned or raw)
             if contact.status not in ("connected", "closed"):
                 contact.status = "connected"
             replied += 1

@@ -107,6 +107,37 @@ _FOLLOWUP_SYSTEM = (
     "Respond with ONLY JSON: {\"body\": \"...\"}."
 )
 
+_REPLY_SYSTEM = (
+    "You write the PRINCIPAL's reply to an inbound email from a prospect. The "
+    "prospect already replied to our outreach — your job is to move toward a "
+    "short meeting while sounding human, specific, and useful.\n\n"
+    "VOICE (CRITICAL): You ARE the PRINCIPAL writing in the FIRST PERSON ('I', "
+    "'my'). NEVER refer to the principal in the third person or by name. The "
+    "signature is added later — do NOT add a sign-off, name, or signature.\n\n"
+    "READ THEIR REPLY CAREFULLY:\n"
+    "- Acknowledge what they actually said (hesitation, interest, objection, "
+    "pivot, pain point, timing) in one short clause. Do not ignore it.\n"
+    "- If they named a pain point, priority, or focus area, pivot the value of "
+    "a call to THAT — not a generic restatement of the first email.\n"
+    "- If they are unsure a call is worth their time, reduce friction and show "
+    "why it would be useful for THEM, briefly.\n"
+    "- If they declined or asked not to be contacted, politely close — do not "
+    "push for a meeting.\n"
+    "- If they agreed to talk, propose a concrete next step (times / calendar).\n\n"
+    "STRUCTURE (3-5 short lines):\n"
+    "1) Greeting: 'Hi <FirstName>,'\n"
+    "2) Acknowledge their point + one specific, useful response grounded in "
+    "PRINCIPAL.objective / proof points / insight when relevant.\n"
+    "3) ONE clear, soft CTA aimed at booking a short call (unless they declined).\n\n"
+    "HARD RULES:\n"
+    "- Do NOT invent facts, clients, numbers, or capabilities.\n"
+    "- Do NOT paste or quote their whole email back at them.\n"
+    "- NEVER use em or en dashes. No markdown. Prefer no links unless a "
+    "calendly/URL is in PRINCIPAL context and clearly helpful.\n"
+    "- Keep it concise — this is a reply, not a pitch deck.\n"
+    "Respond with ONLY JSON: {\"body\": \"...\"}."
+)
+
 
 class AnthropicInsightProvider(InsightProvider):
     name = "anthropic"
@@ -459,6 +490,56 @@ class AnthropicInsightProvider(InsightProvider):
             subject="",
             body=_clean_outreach_body(data["body"]),
             generated_by=f"{self.name}:{self.model} followup",
+        )
+
+    def generate_reply(
+        self,
+        *,
+        principal: dict,
+        person: Optional[dict] = None,
+        organization: Optional[dict] = None,
+        insight: Optional[dict] = None,
+        previous: Optional[dict] = None,
+        inbound_reply: Optional[str] = None,
+    ) -> OutreachResult:
+        if not self.api_key:
+            return self._fallback.generate_reply(
+                principal=principal,
+                person=person,
+                organization=organization,
+                insight=insight,
+                previous=previous,
+                inbound_reply=inbound_reply,
+            )
+
+        user = (
+            "PRINCIPAL:\n"
+            + json.dumps(principal, indent=2, default=str)
+            + "\n\nPERSON (recipient):\n"
+            + json.dumps(person or {}, indent=2, default=str)
+            + "\n\nORGANIZATION:\n"
+            + json.dumps(organization or {}, indent=2, default=str)
+            + "\n\nOUR ORIGINAL EMAIL:\n"
+            + json.dumps(previous or {}, indent=2, default=str)
+            + "\n\nTHEIR REPLY (what you must respond to):\n"
+            + (inbound_reply or "").strip()
+            + "\n\nWrite the principal's reply. End on the ask, no signature."
+            + '\n\nReturn JSON with "body".'
+        )
+        data = self._complete_json(_REPLY_SYSTEM, user)
+        if not data or not data.get("body"):
+            return self._fallback.generate_reply(
+                principal=principal,
+                person=person,
+                organization=organization,
+                insight=insight,
+                previous=previous,
+                inbound_reply=inbound_reply,
+            )
+        return OutreachResult(
+            subject="",
+            body=_clean_outreach_body(data["body"]),
+            generated_by=f"{self.name}:{self.model} reply",
         )
 
 

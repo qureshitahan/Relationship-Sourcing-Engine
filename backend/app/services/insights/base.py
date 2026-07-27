@@ -140,3 +140,30 @@ class InsightProvider(ABC):
         return OutreachResult(
             subject="", body=body, generated_by=f"{self.name} (template followup)"
         )
+
+    def generate_reply(
+        self,
+        *,
+        principal: dict,
+        person: Optional[dict] = None,
+        organization: Optional[dict] = None,
+        insight: Optional[dict] = None,
+        previous: Optional[dict] = None,
+        inbound_reply: Optional[str] = None,
+    ) -> OutreachResult:
+        """Draft a contextual reply to an inbound email (never auto-sends).
+
+        Default template keeps the pipeline working without an API key.
+        """
+        name = ((person or {}).get("name") or "").strip()
+        first = name.split()[0] if name else "there"
+        body = (
+            f"Hi {first},\n"
+            "Thanks for getting back to me — really helpful context. "
+            "Happy to keep this short and focus on what would actually be useful "
+            "for you.\n"
+            "Would a 20-minute call this week or next work?"
+        )
+        return OutreachResult(
+            subject="", body=body, generated_by=f"{self.name} (template reply)"
+        )
