@@ -222,6 +222,29 @@ export interface Mailbox {
   provider: string;
 }
 
+// --- Pipeline optimization (current vs cost-optimized mode) ---
+export interface OptimizationCapability {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  /** True when turning this on can change how drafts read. */
+  affects_quality: boolean;
+}
+
+export interface OptimizationState {
+  enabled: boolean;
+  research_model: string;
+  draft_model: string;
+  capabilities: OptimizationCapability[];
+}
+
+export interface OptimizationUpdate {
+  enabled?: boolean;
+  capabilities?: Record<string, boolean>;
+  draft_model?: string;
+}
+
 // --- Bulk email campaigns (pasted recipient list + chat brief) ---
 export interface BulkCampaign {
   id: number;

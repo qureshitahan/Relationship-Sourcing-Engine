@@ -48,6 +48,7 @@ from app.services.email_providers import (
     provider_for_mailbox,
 )
 from app.services.enrichment.base import DiscoveryCriteria
+from app.services import optimization
 from app.services.insights.engine import generate_insight, generate_outreach
 from app.services.outreach_eligibility import outreach_draft_blockers
 
@@ -395,6 +396,7 @@ def execute_run(run_id: int) -> None:
 
         # 2) QUALIFY (per-person research for every new import) --------------
         qualified_ids: list[int] = []
+        gate_min = optimization.current_state().research_gate_min
         for cid in new_contact_ids:
             if _is_cancelled(db, run):
                 _abort_if_cancelled(db, run, errors)
@@ -412,6 +414,21 @@ def execute_run(run_id: int) -> None:
                 _update_person_status(run, cid, "skipped (no reachable email)")
                 db.commit()
                 continue
+            # Optimized pipeline only: don't buy research for a title the free
+            # rule-based fit score already rates too low to survive qualifying.
+            # Unscored contacts are always researched. The status text names the
+            # score so skipped people stay auditable in the run view.
+            fit = contact.usefulness_score
+            if (
+                fit is not None
+                and fit < gate_min
+                and optimization.is_on("research_gate")
+            ):
+                contact.status = ProspectStatus.REJECTED
+                run.rejected += 1
+                _update_person_status(run, cid, f"skipped (low fit {fit:.0f})")
+                db.commit()
+                continue
             company = db.get(Company, contact.company_id) if contact.company_id else None
             try:
                 insight = generate_insight(
@@ -420,6 +437,7 @@ def execute_run(run_id: int) -> None:
                     contact=contact,
                     company=company,
                     outreach_goal=playbook.objective_prompt,
+                    allow_reuse=True,
                 )
                 score = insight.relevance_score or 0.0
                 if score < config.auto_reject_below:

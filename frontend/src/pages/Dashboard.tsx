@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
 import { getStats, listPrincipals } from "../api/client";
+import PipelineModeCard from "../components/PipelineModeCard";
 import { Badge, Card, Loading, PageHeader } from "../components/ui";
 
 function pct(n: number): string {
@@ -76,6 +77,8 @@ export default function Dashboard() {
         title="Dashboard"
         subtitle="Your outreach at a glance: who you've found, approved, contacted, and heard back from."
       />
+
+      <PipelineModeCard />
 
       <Card className="mb-6 border-slate-200 bg-slate-50/60 p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">

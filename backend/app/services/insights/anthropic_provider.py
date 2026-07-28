@@ -23,6 +23,7 @@ from app.services.insights.base import (
 )
 from app.services.insights.outreach_prompts import OUTREACH_SINGLE_SYSTEM
 from app.services.insights.stub import StubInsightProvider
+from app.services import optimization
 from app.services.provider_health import (
     inspect_anthropic_exception,
     mark_using_stub,
@@ -155,13 +156,33 @@ class AnthropicInsightProvider(InsightProvider):
             self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
 
-    def _complete_json(self, system: str, user: str) -> Optional[dict]:
+    @staticmethod
+    def _system_param(system: str) -> Any:
+        """System prompt, marked cacheable when the optimized pipeline is on.
+
+        Anthropic ignores the marker when the prompt is under the minimum
+        cacheable length, and a cache hit returns the identical prompt, so this
+        never changes what the model sees.
+        """
+        if not optimization.is_on("prompt_caching"):
+            return system
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+    def _complete_json(
+        self, system: str, user: str, *, model: Optional[str] = None
+    ) -> Optional[dict]:
         try:
             client = self._get_client()
             resp = client.messages.create(
-                model=self.model,
+                model=model or self.model,
                 max_tokens=1024,
-                system=system,
+                system=self._system_param(system),
                 messages=[{"role": "user", "content": user}],
             )
             text = "".join(
@@ -199,7 +220,7 @@ class AnthropicInsightProvider(InsightProvider):
                 resp = client.messages.create(
                     model=self.model,
                     max_tokens=4096,
-                    system=system,
+                    system=self._system_param(system),
                     tools=[
                         {
                             "type": "web_search_20250305",
@@ -366,8 +387,9 @@ class AnthropicInsightProvider(InsightProvider):
         # prose/empty (no parseable JSON) even when the API call succeeds. A naive
         # single attempt then silently produces a misleading stub score.
         data = None
+        web_max = optimization.web_search_max_uses(has_linkedin_url=bool(linkedin))
         for attempt in range(3):
-            data = self._research_json(_INSIGHT_SYSTEM, user)
+            data = self._research_json(_INSIGHT_SYSTEM, user, max_uses=web_max)
             if data:
                 break
             logger.warning(
@@ -425,7 +447,8 @@ class AnthropicInsightProvider(InsightProvider):
             "End on the question. Do NOT add a signature."
             + '\n\nReturn JSON with "subject" and "body".'
         )
-        data = self._complete_json(_OUTREACH_SYSTEM, user)
+        model = optimization.draft_model()
+        data = self._complete_json(_OUTREACH_SYSTEM, user, model=model)
         if not data or not data.get("body"):
             result = self._fallback.generate_outreach(
                 principal=principal, person=person, organization=organization,
@@ -440,7 +463,7 @@ class AnthropicInsightProvider(InsightProvider):
                 data.get("subject"), person=person, organization=organization
             ),
             body=_clean_outreach_body(data["body"]),
-            generated_by=f"{self.name}:{self.model}",
+            generated_by=f"{self.name}:{model}",
         )
 
     def generate_followup(
@@ -476,7 +499,8 @@ class AnthropicInsightProvider(InsightProvider):
             "fresh angle. Do not repeat the first email. End on the question, no signature."
             + '\n\nReturn JSON with "body".'
         )
-        data = self._complete_json(_FOLLOWUP_SYSTEM, user)
+        model = optimization.draft_model()
+        data = self._complete_json(_FOLLOWUP_SYSTEM, user, model=model)
         if not data or not data.get("body"):
             return self._fallback.generate_followup(
                 principal=principal,
@@ -489,7 +513,7 @@ class AnthropicInsightProvider(InsightProvider):
         return OutreachResult(
             subject="",
             body=_clean_outreach_body(data["body"]),
-            generated_by=f"{self.name}:{self.model} followup",
+            generated_by=f"{self.name}:{model} followup",
         )
 
     def generate_reply(
@@ -526,7 +550,8 @@ class AnthropicInsightProvider(InsightProvider):
             + "\n\nWrite the principal's reply. End on the ask, no signature."
             + '\n\nReturn JSON with "body".'
         )
-        data = self._complete_json(_REPLY_SYSTEM, user)
+        model = optimization.draft_model()
+        data = self._complete_json(_REPLY_SYSTEM, user, model=model)
         if not data or not data.get("body"):
             return self._fallback.generate_reply(
                 principal=principal,
@@ -539,7 +564,7 @@ class AnthropicInsightProvider(InsightProvider):
         return OutreachResult(
             subject="",
             body=_clean_outreach_body(data["body"]),
-            generated_by=f"{self.name}:{self.model} reply",
+            generated_by=f"{self.name}:{model} reply",
         )
 
 

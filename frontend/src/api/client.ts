@@ -28,6 +28,8 @@ import type {
   LinkedInAccountsResponse,
   LinkedInMessage,
   Mailbox,
+  OptimizationState,
+  OptimizationUpdate,
   Organization,
   Page,
   ProviderHealth,
@@ -46,6 +48,12 @@ export const api = axios.create({ baseURL: apiBase, timeout: 30_000 });
 // --- Stats ---
 export const getStats = () =>
   api.get<DashboardStats>("/api/stats").then((r) => r.data);
+
+// --- Pipeline optimization ---
+export const getOptimization = () =>
+  api.get<OptimizationState>("/api/optimization").then((r) => r.data);
+export const updateOptimization = (payload: OptimizationUpdate) =>
+  api.put<OptimizationState>("/api/optimization", payload).then((r) => r.data);
 
 export const getProviderHealth = (probe = false) =>
   api

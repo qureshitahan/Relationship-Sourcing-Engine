@@ -166,6 +166,9 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
+    # Cheaper model used for writing emails when the optimized pipeline's
+    # cheap_draft_model flag is switched on. Research never uses this.
+    optimized_draft_model: str = "claude-haiku-4-5"
     # Max web searches per prospect insight research call. "Moderate" research =
     # one LLM call with up to this many quick web searches (cost control).
     insight_web_search_max_uses: int = 2
@@ -180,6 +183,9 @@ class Settings(BaseSettings):
     # least this. People are imported above board_fit_min_keep (45) but we research
     # only the more plausible fits to keep cost down while staying personalized.
     research_gate_min: float = 50.0
+    # Optimized pipeline: reuse an existing brief for a prospect researched
+    # within this many days instead of paying to research them again.
+    insight_reuse_days: int = 30
     # Kept for backwards compatibility; not used by the insight engine.
     openai_api_key: str = ""
 

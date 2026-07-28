@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from app.models.contact import Contact
 from app.models.enums import AuditAction
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
+from app.services import optimization
 from app.services.audit import log_action
 from app.services.insights import get_insight_provider
 from app.services.insights.base import OutreachResult
@@ -120,6 +122,29 @@ def person_context(contact: Optional[Contact]) -> Optional[dict]:
     return ctx
 
 
+def _reusable_insight(
+    db: Session, principal_id: int, contact_id: int
+) -> Optional[RelevanceInsight]:
+    """A recent, real (non-stub) brief for this pair, if reuse is switched on.
+
+    Research goes stale, so anything older than the reuse window is re-run.
+    """
+    if not optimization.is_on("reuse_insight"):
+        return None
+    insight = db.execute(
+        select(RelevanceInsight).where(
+            RelevanceInsight.principal_id == principal_id,
+            RelevanceInsight.contact_id == contact_id,
+        )
+    ).scalar_one_or_none()
+    if insight is None or not (insight.snapshot or "").strip():
+        return None
+    age = datetime.utcnow() - (insight.updated_at or insight.created_at)
+    if age > timedelta(days=settings.insight_reuse_days):
+        return None
+    return insight
+
+
 def generate_insight(
     db: Session,
     principal: Principal,
@@ -127,10 +152,21 @@ def generate_insight(
     contact: Optional[Contact] = None,
     company: Optional[Company] = None,
     outreach_goal: Optional[str] = None,
+    allow_reuse: bool = False,
 ) -> RelevanceInsight:
-    """Generate (or refresh) a RelevanceInsight for a principal + prospect/org."""
+    """Generate (or refresh) a RelevanceInsight for a principal + prospect/org.
+
+    ``allow_reuse`` lets automated callers return a recent existing brief instead
+    of paying to research the same person again. Manual "Research" actions leave
+    it off so the button always refreshes.
+    """
     if company is None and contact is not None and contact.company_id:
         company = db.get(Company, contact.company_id)
+
+    if allow_reuse and contact is not None:
+        fresh = _reusable_insight(db, principal.id, contact.id)
+        if fresh is not None:
+            return fresh
 
     provider = get_insight_provider()
     p_ctx = principal_context(principal, outreach_goal=outreach_goal)

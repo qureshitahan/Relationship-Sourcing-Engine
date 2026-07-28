@@ -10,6 +10,7 @@ from app.api.routes import (
     emails,
     insights,
     linkedin,
+    optimization,
     organizations,
     principals,
     prospects,
@@ -33,5 +34,6 @@ api_router.include_router(bulk_emails.router)
 api_router.include_router(linkedin.router)
 api_router.include_router(calls.router)
 api_router.include_router(webhooks.router)
+api_router.include_router(optimization.router)
 
 __all__ = ["api_router"]
