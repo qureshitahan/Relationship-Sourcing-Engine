@@ -38,6 +38,7 @@ from app.services.agent.dashboard import (
 from app.services.agent.planner import criteria_from_dict
 from app.services.audit import log_action
 from app.services.campaign_control import (
+    UnscheduleResult,
     request_run_cancel,
     reschedule_campaign_emails,
     unschedule_campaign_emails,
@@ -327,24 +328,39 @@ def cancel_campaign_run(campaign_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{campaign_id}/pause", response_model=CampaignDetailOut)
-def pause_campaign(campaign_id: int, db: Session = Depends(get_db)):
+def pause_campaign(
+    campaign_id: int,
+    keep_scheduled: bool = Query(
+        False,
+        description=(
+            "If true, stop finding people / daily runs but leave already-scheduled "
+            "emails to send. If false (default), cancel every queued email too."
+        ),
+    ),
+    db: Session = Depends(get_db),
+):
     """Pause a campaign until explicitly resumed.
 
-    Stops any in-flight run, turns off the daily schedule, and cancels every
-    email already queued for this campaign. While paused, nothing is sent even
-    if a draft is approved or re-scheduled.
+    Always stops any in-flight run and turns off daily automation. By default
+    also cancels queued emails; pass ``keep_scheduled=true`` to let the existing
+    send queue finish.
     """
     config = _get_campaign(db, campaign_id)
     config.paused = True
     config.enabled = False
     request_run_cancel(db, campaign_id)
-    result = unschedule_campaign_emails(db, campaign_id)
+    if keep_scheduled:
+        result = UnscheduleResult()
+        summary = "Paused campaign. Daily runs off; scheduled emails will still send."
+    else:
+        result = unschedule_campaign_emails(db, campaign_id)
+        summary = f"Paused campaign. {result.message()}"
     log_action(
         db,
         AuditAction.CAMPAIGN,
         entity_type="campaign",
         entity_id=campaign_id,
-        summary=f"Paused campaign. {result.message()}",
+        summary=summary,
     )
     db.commit()
     if not result.ok:
@@ -362,15 +378,14 @@ def resume_campaign(
     ),
     db: Session = Depends(get_db),
 ):
-    """Lift a pause and re-queue what it cancelled.
+    """Lift a pause, turn daily automation back on, and re-queue cancelled mail.
 
-    Emails pulled back by the pause are scheduled again with the same
-    per-recipient timing the agent uses, so resuming doesn't leave a pile of
-    approved drafts to send by hand. Daily automation stays off until turned
-    back on.
+    Emails pulled back by a full pause are scheduled again with the same
+    per-recipient timing the agent uses.
     """
     config = _get_campaign(db, campaign_id)
     config.paused = False
+    config.enabled = True
     db.flush()
     scheduled = reschedule_campaign_emails(db, campaign_id) if reschedule else 0
     log_action(

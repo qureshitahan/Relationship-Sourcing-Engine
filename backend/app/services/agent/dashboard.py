@@ -205,10 +205,10 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
         playbook = playbooks.get(config.playbook_id) if config.playbook_id else None
         run = running.get(config.id)
 
-        if run:
-            status = "running"
-        elif config.paused:
+        if config.paused:
             status = "paused"
+        elif run:
+            status = "running"
         elif playbook:
             status = "ready"
         else:
@@ -400,10 +400,10 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     ).scalars().first()
     current_run_out = _run_snapshot(running_run)
 
-    if running_run:
-        status = "running"
-    elif config.paused:
+    if config.paused:
         status = "paused"
+    elif running_run:
+        status = "running"
     elif playbook:
         status = "ready"
     else:

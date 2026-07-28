@@ -16,7 +16,6 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.models.email_draft import EmailDraft
 from app.models.enums import EmailStatus
-from app.services.campaign_control import campaign_is_paused
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +59,8 @@ def _send_due_once() -> None:
             )
         ).scalars().all()
         for draft in due:
-            # A paused campaign must not send, even if something left a draft
-            # scheduled (e.g. it was re-scheduled before the pause landed).
-            if campaign_is_paused(db, draft.campaign_id):
-                draft.status = EmailStatus.APPROVED
-                draft.scheduled_at = None
-                db.commit()
-                logger.info(
-                    "Skipped scheduled email %s — campaign %s is paused",
-                    draft.id,
-                    draft.campaign_id,
-                )
-                continue
+            # Pause-everything already reverted these to APPROVED. If a draft is
+            # still SCHEDULED, the operator chose "keep sending scheduled" — send it.
             # Outlook-deferred sends are delivered server-side; we only sync the
             # local status to SENT once the scheduled time has passed (no resend).
             if draft.outlook_scheduled:

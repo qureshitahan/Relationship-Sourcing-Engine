@@ -34,6 +34,27 @@ def create_app() -> FastAPI:
     def _startup() -> None:
         # MVP: create tables on startup. Replace with Alembic migrations later.
         init_db()
+        # Daemon threads die on restart; clear any "running" rows left behind so
+        # the UI does not show a forever-stuck run that blocks Continue.
+        try:
+            from app.db.session import SessionLocal
+            from app.services.campaign_control import reap_orphaned_runs
+
+            db = SessionLocal()
+            try:
+                n = reap_orphaned_runs(db)
+                if n:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "Cleared %s orphaned agent run(s) after startup", n
+                    )
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001 - never block boot on cleanup
+            import logging
+
+            logging.getLogger(__name__).exception("Failed to reap orphaned agent runs")
         # Sends scheduled outreach while the backend is running.
         start_scheduler()
         # Runs the autonomous daily outreach agent on schedule.

@@ -681,8 +681,12 @@ export const runCampaign = (id: number, resume = false) =>
     .then((r) => r.data);
 export const cancelCampaignRun = (id: number) =>
   api.post<CampaignDetail>(`/api/campaigns/${id}/cancel`).then((r) => r.data);
-export const pauseCampaign = (id: number) =>
-  api.post<CampaignDetail>(`/api/campaigns/${id}/pause`).then((r) => r.data);
+export const pauseCampaign = (id: number, keepScheduled = false) =>
+  api
+    .post<CampaignDetail>(`/api/campaigns/${id}/pause`, null, {
+      params: keepScheduled ? { keep_scheduled: true } : {},
+    })
+    .then((r) => r.data);
 export const resumeCampaign = (id: number) =>
   api.post<CampaignDetail>(`/api/campaigns/${id}/resume`).then((r) => r.data);
 export const scheduleApprovedEmails = (id: number) =>

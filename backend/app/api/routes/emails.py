@@ -1080,7 +1080,9 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
     """
     if draft.status not in (EmailStatus.APPROVED, EmailStatus.SCHEDULED):
         raise SendError("Email must be APPROVED before sending")
-    if campaign_is_paused(db, draft.campaign_id):
+    # Already-queued SCHEDULED mail can still go out when the operator paused
+    # with "keep scheduled". Block only fresh APPROVED sends while paused.
+    if draft.status == EmailStatus.APPROVED and campaign_is_paused(db, draft.campaign_id):
         raise SendError("This campaign is paused. Resume it before sending.")
     if draft.outlook_scheduled:
         raise SendError(

@@ -27,8 +27,8 @@ function relativeTime(iso?: string | null): string {
 }
 
 function statusLabel(c: CampaignSummary): string {
-  if (c.status === "running") return "Running now";
   if (c.paused) return "Paused";
+  if (c.status === "running") return "Running now";
   if (c.status === "draft") return "Needs setup";
   return c.enabled ? "Runs daily" : "Ready";
 }
@@ -50,7 +50,9 @@ function CampaignCard({
         <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-slate-900 group-hover:text-violet-700">
           {campaign.name}
         </h3>
-        <Badge tone={STATUS_TONE[campaign.status]}>{statusLabel(campaign)}</Badge>
+        <Badge tone={campaign.paused ? "red" : STATUS_TONE[campaign.status]}>
+          {statusLabel(campaign)}
+        </Badge>
       </div>
 
       {campaign.objective_preview ? (
@@ -64,7 +66,9 @@ function CampaignCard({
       )}
 
       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
-        {campaign.status === "running" ? (
+        {campaign.paused ? (
+          <span className="font-medium text-rose-700">Paused — daily finding off</span>
+        ) : campaign.status === "running" ? (
           <span className="flex items-center gap-1.5 font-medium text-sky-700">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500" />
             {campaign.current_run_discovered ?? 0} found · {campaign.current_run_sent ?? 0} sent

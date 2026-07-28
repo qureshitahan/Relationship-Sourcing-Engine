@@ -254,24 +254,84 @@ def reschedule_campaign_emails(db: Session, campaign_id: int) -> int:
     return scheduled
 
 
+INTERRUPTED_MESSAGE = (
+    "Interrupted — the server restarted while this run was working. "
+    "Click Continue to finish researching people it already found."
+)
+
+
+def _finish_run(run, *, status: str, message: Optional[str] = None) -> None:
+    """Mark a run finished even if its background thread is already dead."""
+    from datetime import datetime
+
+    run.status = status
+    run.finished_at = datetime.utcnow()
+    run.summary = {
+        **(run.summary or {}),
+        "cancel_requested": True,
+        "finished_reason": status,
+    }
+    if message:
+        run.error_message = message
+
+
 def request_run_cancel(db: Session, campaign_id: int) -> bool:
-    """Ask any in-flight run for this campaign to stop. True if one was running."""
+    """Stop any in-flight run for this campaign.
+
+    Always flips the DB row to ``cancelled`` (not just a soft flag). Azure
+    restarts kill the background thread, so a flag-only cancel left zombie
+    "Running now" rows that blocked new runs forever.
+    """
     from app.models.agent_run import AgentRun
 
-    running = db.execute(
-        select(AgentRun).where(
-            AgentRun.campaign_id == campaign_id,
-            AgentRun.status == "running",
-        )
-    ).scalars().first()
-    if running is None:
+    running = list(
+        db.execute(
+            select(AgentRun).where(
+                AgentRun.campaign_id == campaign_id,
+                AgentRun.status == "running",
+            )
+        ).scalars().all()
+    )
+    if not running:
         return False
-    running.summary = {**(running.summary or {}), "cancel_requested": True}
+    for run in running:
+        _finish_run(run, status="cancelled", message="Stopped by user")
     return True
 
 
+def reap_orphaned_runs(db: Session) -> int:
+    """Fail every run still marked ``running``.
+
+    Agent runs execute on in-process daemon threads. A deploy, Azure recycle,
+    or crash kills those threads but leaves the DB row as ``running``. Calling
+    this on startup clears the zombies so Continue / Run now work again.
+    """
+    from app.models.agent_run import AgentRun
+
+    orphans = list(
+        db.execute(
+            select(AgentRun).where(AgentRun.status == "running")
+        ).scalars().all()
+    )
+    for run in orphans:
+        _finish_run(run, status="failed", message=INTERRUPTED_MESSAGE)
+        logger.warning(
+            "Reaped orphaned agent run #%s (campaign=%s principal=%s)",
+            run.id,
+            run.campaign_id,
+            run.principal_id,
+        )
+    if orphans:
+        db.commit()
+    return len(orphans)
+
+
 def campaign_is_paused(db: Session, campaign_id: Optional[int]) -> bool:
-    """True when the campaign is paused and must not send anything."""
+    """True when the campaign is paused (no new runs / no new scheduling).
+
+    Already-queued SCHEDULED emails may still send when the operator chose
+    "keep scheduled" on pause — those stay SCHEDULED on purpose.
+    """
     if not campaign_id:
         return False
     from app.models.agent_config import AgentConfig
