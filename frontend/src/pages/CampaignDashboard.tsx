@@ -780,16 +780,18 @@ export default function CampaignDashboard() {
           <div className="flex flex-col items-end gap-1.5">
             <Badge
               tone={
-                paused ? "red" : running ? "blue" : campaign.enabled ? "green" : "amber"
+                paused || !campaign.enabled
+                  ? "red"
+                  : running
+                    ? "blue"
+                    : "green"
               }
             >
-              {paused
+              {paused || !campaign.enabled
                 ? "Paused"
                 : running
                   ? "Running now"
-                  : campaign.enabled
-                    ? "Runs daily"
-                    : "Ready"}
+                  : "Runs daily"}
             </Badge>
             <Badge tone={campaign.auto_send ? "green" : "purple"}>
               {campaign.auto_send ? "Autopilot" : "Review before send"}

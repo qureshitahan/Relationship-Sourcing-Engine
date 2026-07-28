@@ -198,6 +198,7 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
     }
 
     items: list[dict[str, Any]] = []
+    healed = False
     for config in configs:
         principal = principals.get(config.principal_id)
         if principal is None:
@@ -205,12 +206,18 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
         playbook = playbooks.get(config.playbook_id) if config.playbook_id else None
         run = running.get(config.id)
 
-        if config.paused:
+        # Daily-off without the paused flag is leftover from the old "Turn off
+        # daily" control — treat it as paused so the badge matches reality.
+        if playbook and not config.enabled and not config.paused:
+            config.paused = True
+            healed = True
+
+        if config.paused or not config.enabled:
             status = "paused"
         elif run:
             status = "running"
         elif playbook:
-            status = "ready"
+            status = "ready"  # UI label: "Runs daily"
         else:
             status = "draft"
 
@@ -225,7 +232,7 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 "playbook_name": playbook.name if playbook else None,
                 "objective_preview": objective[:160] if objective else None,
                 "enabled": bool(config.enabled),
-                "paused": bool(config.paused),
+                "paused": bool(config.paused) or not bool(config.enabled),
                 "status": status,
                 "current_run_id": run.id if run else None,
                 "current_run_discovered": run.discovered if run else None,
@@ -235,6 +242,9 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 "totals_replies_14d": replies_by_campaign.get(config.id, 0),
             }
         )
+
+    if healed:
+        db.commit()
 
     return {"items": items, "running_count": len(running)}
 
@@ -413,12 +423,18 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     ).scalars().first()
     current_run_out = _run_snapshot(running_run)
 
-    if config.paused:
+    # Daily-off without the paused flag is leftover from the old "Turn off
+    # daily" control — treat it as paused so the badge matches reality.
+    if playbook and not config.enabled and not config.paused:
+        config.paused = True
+        db.commit()
+
+    if config.paused or not config.enabled:
         status = "paused"
     elif running_run:
         status = "running"
     elif playbook:
-        status = "ready"
+        status = "ready"  # UI label: "Runs daily"
     else:
         status = "draft"
 
@@ -448,7 +464,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "principal_id": config.principal_id,
         "principal_name": principal.name if principal else "",
         "enabled": bool(config.enabled),
-        "paused": bool(config.paused),
+        "paused": bool(config.paused) or not bool(config.enabled),
         "scheduled_count": scheduled_count,
         "approved_unscheduled": approved_unscheduled,
         "status": status,
