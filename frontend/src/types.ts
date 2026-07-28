@@ -612,6 +612,9 @@ export interface CampaignSummary {
   last_run_at?: string | null;
   totals_sent_14d: number;
   totals_replies_14d: number;
+  /** Prior run was killed by a restart and still needs Continue. */
+  needs_continue?: boolean;
+  interrupted_discovered?: number;
 }
 
 export interface CampaignList {

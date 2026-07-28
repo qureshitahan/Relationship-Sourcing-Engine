@@ -20,6 +20,50 @@ from app.models.relevance_insight import RelevanceInsight
 from app.services.inbound_text import clean_inbound_reply
 
 
+def _unresolved_interrupted_run(
+    db: Session, campaign_id: int
+) -> AgentRun | None:
+    """Return an interrupted run that still needs Continue — or None.
+
+    Startup marks dead ``running`` rows as failed with an Interrupted message.
+    Once the operator (or daily schedule) has completed a newer run afterward,
+    the amber banner must go away so it does not look like the problem returned.
+    """
+    interrupted = db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.campaign_id == campaign_id,
+            AgentRun.status == "failed",
+            AgentRun.error_message.isnot(None),
+            AgentRun.error_message.contains("Interrupted"),
+        )
+        .order_by(AgentRun.created_at.desc())
+    ).scalars().first()
+    if interrupted is None:
+        return None
+    cutoff = (
+        interrupted.finished_at
+        or getattr(interrupted, "updated_at", None)
+        or interrupted.created_at
+        or interrupted.started_at
+    )
+    if cutoff is None:
+        return interrupted
+    later = db.execute(
+        select(AgentRun.id)
+        .where(
+            AgentRun.campaign_id == campaign_id,
+            AgentRun.status == "completed",
+            AgentRun.started_at.isnot(None),
+            AgentRun.started_at >= cutoff,
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if later is not None:
+        return None
+    return interrupted
+
+
 def campaign_dashboard(
     db: Session,
     principal_id: int,
@@ -169,6 +213,13 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
     ).scalars().all():
         running[r.campaign_id] = r
 
+    # Interrupted runs that still need Continue (no completed run after them).
+    needs_continue: dict[int, AgentRun] = {}
+    for cid in campaign_ids:
+        interrupted = _unresolved_interrupted_run(db, cid)
+        if interrupted is not None:
+            needs_continue[cid] = interrupted
+
     # Sent (and replied implies sent) drafts in the window, per campaign.
     sent_by_campaign = {
         cid: int(cnt or 0)
@@ -205,6 +256,7 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
             continue
         playbook = playbooks.get(config.playbook_id) if config.playbook_id else None
         run = running.get(config.id)
+        interrupted = needs_continue.get(config.id)
 
         # Daily-off without the paused flag is leftover from the old "Turn off
         # daily" control — treat it as paused so the badge matches reality.
@@ -240,6 +292,10 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 "last_run_at": config.last_run_at,
                 "totals_sent_14d": sent_by_campaign.get(config.id, 0),
                 "totals_replies_14d": replies_by_campaign.get(config.id, 0),
+                "needs_continue": interrupted is not None,
+                "interrupted_discovered": (
+                    int(interrupted.discovered or 0) if interrupted else 0
+                ),
             }
         )
 
@@ -402,18 +458,9 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     ).scalars().first()
     last_run_out = _run_snapshot(last_run)
 
-    # A failed run left by a server restart — surface even if a newer short run
-    # completed afterward, so the UI can prompt Continue.
-    interrupted_run = db.execute(
-        select(AgentRun)
-        .where(
-            AgentRun.campaign_id == campaign_id,
-            AgentRun.status == "failed",
-            AgentRun.error_message.isnot(None),
-            AgentRun.error_message.contains("Interrupted"),
-        )
-        .order_by(AgentRun.created_at.desc())
-    ).scalars().first()
+    # A failed run left by a server restart — only surface while unresolved.
+    # After Continue (or any completed run afterward), the banner goes away.
+    interrupted_run = _unresolved_interrupted_run(db, campaign_id)
 
     running_run = db.execute(
         select(AgentRun).where(

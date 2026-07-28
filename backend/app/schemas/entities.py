@@ -397,6 +397,9 @@ class CampaignSummaryOut(BaseModel):
     last_run_at: Optional[datetime] = None
     totals_sent_14d: int = 0
     totals_replies_14d: int = 0
+    # True when a prior run was killed by a restart and nothing completed after.
+    needs_continue: bool = False
+    interrupted_discovered: int = 0
 
 
 class CampaignListOut(BaseModel):

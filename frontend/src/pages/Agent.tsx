@@ -30,6 +30,7 @@ function statusLabel(c: CampaignSummary): string {
   if (c.status === "draft") return "Needs setup";
   if (c.paused || c.status === "paused" || !c.enabled) return "Paused";
   if (c.status === "running") return "Running now";
+  if (c.needs_continue) return "Needs Continue";
   return "Runs daily";
 }
 
@@ -40,6 +41,14 @@ function CampaignCard({
   campaign: CampaignSummary;
   onOpen: () => void;
 }) {
+  const badgeTone: Tone = campaign.paused
+    ? "red"
+    : campaign.status === "running"
+      ? "blue"
+      : campaign.needs_continue
+        ? "amber"
+        : STATUS_TONE[campaign.status];
+
   return (
     <button
       type="button"
@@ -50,9 +59,7 @@ function CampaignCard({
         <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-slate-900 group-hover:text-violet-700">
           {campaign.name}
         </h3>
-        <Badge tone={campaign.paused ? "red" : STATUS_TONE[campaign.status]}>
-          {statusLabel(campaign)}
-        </Badge>
+        <Badge tone={badgeTone}>{statusLabel(campaign)}</Badge>
       </div>
 
       {campaign.objective_preview ? (
@@ -72,6 +79,14 @@ function CampaignCard({
           <span className="flex items-center gap-1.5 font-medium text-sky-700">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500" />
             {campaign.current_run_discovered ?? 0} found · {campaign.current_run_sent ?? 0} sent
+          </span>
+        ) : campaign.needs_continue ? (
+          <span className="font-medium text-amber-700">
+            Interrupted
+            {campaign.interrupted_discovered
+              ? ` · ${campaign.interrupted_discovered} people waiting`
+              : ""}{" "}
+            — open and press Continue
           </span>
         ) : (
           <span>
