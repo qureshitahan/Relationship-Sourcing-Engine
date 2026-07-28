@@ -639,9 +639,8 @@ export interface CampaignDetail {
   auto_schedule: boolean;
   pending_drafts: number;
   last_run_at?: string | null;
-    current_run_id?: number | null;
-    current_run?: CampaignRunSnapshot | null;
-    totals: {
+  current_run_id?: number | null;
+  totals: {
     discovered: number;
     qualified: number;
     rejected: number;
@@ -654,6 +653,9 @@ export interface CampaignDetail {
   reply_rate: number;
   days: CampaignDayStats[];
   last_run?: CampaignRunSnapshot | null;
+  current_run?: CampaignRunSnapshot | null;
+  /** Prior run killed by a server restart — prompt the operator to Continue. */
+  interrupted_run?: CampaignRunSnapshot | null;
 }
 
 export interface CampaignRunSnapshot {

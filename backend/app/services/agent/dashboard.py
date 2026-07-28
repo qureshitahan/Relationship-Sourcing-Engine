@@ -392,6 +392,19 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     ).scalars().first()
     last_run_out = _run_snapshot(last_run)
 
+    # A failed run left by a server restart — surface even if a newer short run
+    # completed afterward, so the UI can prompt Continue.
+    interrupted_run = db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.campaign_id == campaign_id,
+            AgentRun.status == "failed",
+            AgentRun.error_message.isnot(None),
+            AgentRun.error_message.contains("Interrupted"),
+        )
+        .order_by(AgentRun.created_at.desc())
+    ).scalars().first()
+
     running_run = db.execute(
         select(AgentRun).where(
             AgentRun.campaign_id == campaign_id,
@@ -457,6 +470,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "days": days_out,
         "last_run": last_run_out,
         "current_run": current_run_out,
+        "interrupted_run": _run_snapshot(interrupted_run),
     }
 
 

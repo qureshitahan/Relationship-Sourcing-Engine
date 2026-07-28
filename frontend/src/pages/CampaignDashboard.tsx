@@ -738,15 +738,13 @@ export default function CampaignDashboard() {
   const queued = campaign.scheduled_count ?? 0;
   const readyToQueue = campaign.approved_unscheduled ?? 0;
   const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
-  const interrupted =
-    !!campaign.last_run?.error_message?.includes("Interrupted") &&
-    campaign.last_run.status === "failed";
+  const interrupted = !!campaign.interrupted_run;
   const canContinue =
     !running &&
     !paused &&
-    ((!!campaign.last_run &&
-      (campaign.last_run.qualified ?? 0) > (campaign.last_run.drafted ?? 0)) ||
-      interrupted);
+    (interrupted ||
+      (!!campaign.last_run &&
+        (campaign.last_run.qualified ?? 0) > (campaign.last_run.drafted ?? 0)));
 
   return (
     <div className="pb-12">
@@ -817,11 +815,11 @@ export default function CampaignDashboard() {
             <p className="font-semibold">Previous run was interrupted</p>
             <p className="mt-1 text-amber-800">
               The server restarted while research was in progress
-              {campaign.last_run?.discovered
-                ? ` (${campaign.last_run.discovered} people found)`
+              {campaign.interrupted_run?.discovered
+                ? ` (${campaign.interrupted_run.discovered} people found)`
                 : ""}
-              . Nothing is stuck in “Running now” anymore — press{" "}
-              <strong>Continue</strong> to finish researching and drafting those people.
+              . Press <strong>Continue</strong> to finish researching and drafting
+              those people.
             </p>
           </div>
         )}

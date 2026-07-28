@@ -434,6 +434,8 @@ class CampaignDetailOut(BaseModel):
     days: List[dict] = []
     last_run: Optional[dict] = None
     current_run: Optional[dict] = None
+    # Set when a prior run was killed by a server restart and needs Continue.
+    interrupted_run: Optional[dict] = None
 
 
 class CampaignProspectOut(BaseModel):
