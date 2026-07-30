@@ -33,6 +33,7 @@ from app.schemas.requests import (
     LinkedInGenerateRunRequest,
     LinkedInReplyRequest,
     LinkedInSelectAccountRequest,
+    LinkedInSendOpenRequest,
     LinkedInStatusRequest,
     LinkedInUpdateRequest,
 )
@@ -136,6 +137,9 @@ def list_accounts():
     return {
         "provider": provider.name,
         "active_account_id": _active_account_id(),
+        # The env default account. Messages sent before per-account stamping have
+        # no from_account, so the UI attributes those to this account.
+        "default_account_id": (settings.unipile_account_id or None),
         "accounts": accounts,
     }
 
@@ -501,6 +505,59 @@ def send_message(message_id: int, db: Session = Depends(get_db)):
     return _msg_out(db, msg)
 
 
+@router.post("/send-open")
+def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
+    """Approve + send ALL open (draft/approved) LinkedIn messages, in the background.
+
+    One click instead of approving each message by hand. Optional
+    ``discovery_run_id`` scopes to a single run; omitted = every run. Sends from
+    the currently-active account, paced (``bulk_linkedin_send_delay_seconds``) to
+    protect the account, and never exceeds today's ``linkedin_daily_send_cap`` —
+    the overflow is reported as ``held`` and can be sent tomorrow. Returns the
+    counts immediately; poll the message list to watch them move.
+    """
+    from datetime import datetime
+
+    from app.models.suppression import OutreachHistory
+    from app.services.discovery_jobs import launch_linkedin_message_send
+
+    query = select(LinkedInMessage).where(
+        LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED])
+    )
+    if payload.discovery_run_id is not None:
+        query = query.join(Contact, LinkedInMessage.contact_id == Contact.id).where(
+            Contact.discovery_run_id == payload.discovery_run_id
+        )
+    messages = list(db.execute(query.order_by(LinkedInMessage.id)).scalars().all())
+    matched = len(messages)
+
+    # Daily-cap guard (invites + DMs), counted from OutreachHistory so ALL send
+    # paths share one budget. Only the ids that fit today are queued.
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    sent_today = db.execute(
+        select(func.count())
+        .select_from(OutreachHistory)
+        .where(
+            OutreachHistory.channel == "linkedin",
+            OutreachHistory.created_at >= today_start,
+        )
+    ).scalar_one()
+    cap = max(0, int(settings.linkedin_daily_send_cap))
+    remaining = max(0, cap - sent_today)
+    will_send = [m.id for m in messages][:remaining]
+    held = matched - len(will_send)
+
+    launch_linkedin_message_send(will_send)
+    return {
+        "matched": matched,
+        "queued": len(will_send),
+        "held": held,
+        "cap": cap,
+        "sent_today": sent_today,
+    }
+
+
 @router.post("/{message_id}/reply", response_model=LinkedInMessageOut)
 def reply_in_thread(
     message_id: int, payload: LinkedInReplyRequest, db: Session = Depends(get_db)
@@ -514,7 +571,10 @@ def reply_in_thread(
     body = (payload.body or "").strip()
     if not body:
         raise HTTPException(status_code=400, detail="Reply body is required")
-    provider = get_linkedin_provider()
+    # Reply from the SAME account that sent the thread (Dalbir/Farah), not just
+    # whichever is globally active. Legacy rows (no from_account) use the active
+    # default, so single-account behaviour is unchanged.
+    provider = get_linkedin_provider(msg.from_account or None)
     sender = getattr(provider, "send_message_in_chat", None)
     if sender is None:
         raise HTTPException(status_code=400, detail="Provider does not support replies")

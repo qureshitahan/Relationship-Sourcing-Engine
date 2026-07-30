@@ -385,6 +385,7 @@ export interface LinkedInConnectedAccount {
 export interface LinkedInAccountsResponse {
   provider: string;
   active_account_id?: string | null;
+  default_account_id?: string | null;
   accounts: LinkedInConnectedAccount[];
 }
 

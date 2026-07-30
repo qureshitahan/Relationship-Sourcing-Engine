@@ -242,6 +242,15 @@ class LinkedInSelectAccountRequest(BaseModel):
     account_id: str
 
 
+class LinkedInSendOpenRequest(BaseModel):
+    """Bulk approve + send all open (draft/approved) LinkedIn messages.
+
+    Optional ``discovery_run_id`` scopes the send to one run; omitted = all runs.
+    """
+
+    discovery_run_id: Optional[int] = None
+
+
 class AgentRunRequest(BaseModel):
     """Trigger an autonomous agent run now for a principal."""
 

@@ -549,6 +549,23 @@ export const replyLinkedIn = (id: number, body: string) =>
     .then((r) => r.data);
 export const deleteLinkedIn = (id: number) =>
   api.delete(`/api/linkedin/${id}`).then(() => undefined);
+export interface LinkedInSendOpenResult {
+  matched: number;
+  queued: number;
+  held: number;
+  cap: number;
+  sent_today: number;
+}
+/** Approve + send all open (draft/approved) LinkedIn messages, paced + capped, in
+ *  the background. Optional runId scopes to one discovery run. */
+export const sendOpenLinkedIn = (discoveryRunId?: number) =>
+  api
+    .post<LinkedInSendOpenResult>(
+      "/api/linkedin/send-open",
+      { discovery_run_id: discoveryRunId },
+      { timeout: 60000 }
+    )
+    .then((r) => r.data);
 export const checkLinkedInUpdates = () =>
   api
     .post<{ supported: boolean; accepted: number; replied: number }>(

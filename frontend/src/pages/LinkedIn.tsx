@@ -12,6 +12,7 @@ import {
   replyLinkedIn,
   selectLinkedInAccount,
   sendLinkedIn,
+  sendOpenLinkedIn,
   setLinkedInStatus,
   updateLinkedIn,
 } from "../api/client";
@@ -257,6 +258,9 @@ export default function LinkedIn() {
   const runId = searchParams.get("run") ? Number(searchParams.get("run")) : undefined;
   const [statusFilter, setStatusFilter] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  // While a bulk approve+send is in flight, auto-refresh the list until this
+  // timestamp so the user watches messages move draft -> invited/sent.
+  const [sendingUntil, setSendingUntil] = useState(0);
 
   const { data: accountsData } = useQuery({
     queryKey: ["linkedin-accounts"],
@@ -274,6 +278,7 @@ export default function LinkedIn() {
         ...(statusFilter ? { status: statusFilter } : {}),
         ...(runId ? { discovery_run_id: runId } : {}),
       }),
+    refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
   const draftRun = useMutation({
@@ -303,6 +308,11 @@ export default function LinkedIn() {
   });
 
   const items = data?.items ?? [];
+  // Draft/approved messages that "Approve & send all" would act on. Accurate on
+  // the default "All" view; the backend re-derives the true set on send anyway.
+  const openCount = items.filter(
+    (m) => m.status === "draft" || m.status === "approved"
+  ).length;
   const setRunFilter = (value: string) => {
     const next = new URLSearchParams(searchParams);
     if (value) next.set("run", value);
@@ -347,6 +357,40 @@ export default function LinkedIn() {
     },
     onError: () =>
       setNote("Could not create a connect link — check the Unipile configuration."),
+  });
+
+  // Approve + send every open draft in one go (paced + daily-capped, background).
+  const bulkSend = useMutation({
+    mutationFn: () => sendOpenLinkedIn(runId),
+    onSuccess: (res) => {
+      if (res.queued > 0) {
+        // Auto-refresh the list until the paced run should be finished.
+        setSendingUntil(Date.now() + (res.queued * 22 + 15) * 1000);
+        setNote(
+          `Approving & sending ${res.queued} message${res.queued === 1 ? "" : "s"} as ` +
+            `${activeName ?? "the selected account"} in the background, paced ~20s apart.` +
+            (res.held > 0
+              ? ` ${res.held} held for tomorrow (daily cap ${res.cap}; ${res.sent_today} already sent today).`
+              : "")
+        );
+      } else if (res.matched === 0) {
+        setNote(
+          runId
+            ? `No draft/approved messages in run #${runId} to send — click "Draft all approved" first.`
+            : "No draft/approved LinkedIn messages to send. Draft some first."
+        );
+      } else {
+        setNote(
+          `Daily LinkedIn cap of ${res.cap} reached (${res.sent_today} already sent today). ` +
+            `${res.held} held — try again tomorrow.`
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["linkedin"] });
+    },
+    onError: () =>
+      setNote(
+        "Bulk send failed — check the LinkedIn account is connected and see backend logs."
+      ),
   });
 
   return (
@@ -447,6 +491,26 @@ export default function LinkedIn() {
               {draftRun.isPending ? "Drafting…" : "Draft all approved"}
             </Button>
           )}
+          <Button
+            onClick={() => {
+              const label = openCount > 0 ? `${openCount} ` : "all draft/approved ";
+              if (
+                window.confirm(
+                  `Approve and send ${label}LinkedIn message${openCount === 1 ? "" : "s"}` +
+                    `${runId ? ` in run #${runId}` : ""} as ${activeName ?? "the selected account"}?\n\n` +
+                    "They send in the background, paced ~20s apart, and stop at the daily " +
+                    "cap so the account isn't flagged."
+                )
+              )
+                bulkSend.mutate();
+            }}
+            disabled={bulkSend.isPending}
+            title="Approve every draft and send them in one go — paced and daily-capped to protect the account"
+          >
+            {bulkSend.isPending
+              ? "Starting…"
+              : `Approve & send all${openCount ? ` (${openCount})` : ""}`}
+          </Button>
           <Button variant="secondary" onClick={() => poll.mutate()} disabled={poll.isPending}>
             {poll.isPending ? "Checking…" : "Check acceptances & replies"}
           </Button>

@@ -14,6 +14,7 @@ import Organizations from "./pages/Organizations";
 import OrganizationDetail from "./pages/OrganizationDetail";
 import Emails from "./pages/Emails";
 import LinkedIn from "./pages/LinkedIn";
+import LinkedInResponses from "./pages/LinkedInResponses";
 import Conversations from "./pages/Conversations";
 import Agent from "./pages/Agent";
 import BulkEmails from "./pages/BulkEmails";
@@ -49,6 +50,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="outreach" element={<Conversations />} />
             <Route path="emails" element={<Emails />} />
             <Route path="linkedin" element={<LinkedIn />} />
+            <Route path="linkedin-responses" element={<LinkedInResponses />} />
             <Route path="calls" element={<Calls />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
