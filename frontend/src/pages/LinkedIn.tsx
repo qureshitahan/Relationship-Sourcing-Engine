@@ -26,6 +26,7 @@ import {
   PageHeader,
   StatusBadge,
 } from "../components/ui";
+import { LinkedInScanProgress } from "../components/LinkedInScanProgress";
 
 const STATUS_TABS = [
   { key: "", label: "All" },
@@ -261,6 +262,7 @@ export default function LinkedIn() {
   // While a bulk approve+send is in flight, auto-refresh the list until this
   // timestamp so the user watches messages move draft -> invited/sent.
   const [sendingUntil, setSendingUntil] = useState(0);
+  const [scanning, setScanning] = useState(false);
 
   const { data: accountsData } = useQuery({
     queryKey: ["linkedin-accounts"],
@@ -296,10 +298,14 @@ export default function LinkedIn() {
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
-      setNote(res.message);
-      // The scan runs in the background now; refresh the list for a few minutes
-      // as accepted invites and replies land.
-      if (res.started) setSendingUntil(Date.now() + 180_000);
+      if (res.started) {
+        // Show the live progress bar and refresh the list as results land.
+        setNote(null);
+        setScanning(true);
+        setSendingUntil(Date.now() + 180_000);
+      } else {
+        setNote(res.message);
+      }
       qc.invalidateQueries({ queryKey: ["linkedin"] });
     },
   });
@@ -407,6 +413,18 @@ export default function LinkedIn() {
           {note}
         </div>
       )}
+
+      <LinkedInScanProgress
+        active={scanning}
+        onDone={(r) => {
+          setScanning(false);
+          setNote(
+            `Reply check complete — ${r.replied} new repl${r.replied === 1 ? "y" : "ies"}, ` +
+              `${r.accepted} invite${r.accepted === 1 ? "" : "s"} accepted.`
+          );
+          qc.invalidateQueries({ queryKey: ["linkedin"] });
+        }}
+      />
 
       {accountsData?.provider === "unipile" && (
         <Card className="mb-4 p-4">

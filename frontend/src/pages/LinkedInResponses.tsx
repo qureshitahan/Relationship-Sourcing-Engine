@@ -9,6 +9,7 @@ import {
 } from "../api/client";
 import type { LinkedInMessage } from "../types";
 import { Badge, Button, Card, Loading, PageHeader } from "../components/ui";
+import { LinkedInScanProgress } from "../components/LinkedInScanProgress";
 
 function relativeTime(iso?: string | null): string {
   if (!iso) return "—";
@@ -26,6 +27,7 @@ export default function LinkedInResponses() {
   const [search, setSearch] = useState("");
   // While a background reply-scan runs, auto-refresh the list until this time.
   const [refreshUntil, setRefreshUntil] = useState(0);
+  const [scanning, setScanning] = useState(false);
   // Which account's responses to show. Defaults to the active account below.
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({});
@@ -58,9 +60,14 @@ export default function LinkedInResponses() {
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
-      setNote(res.message);
-      // Scan runs in the background now; refresh for a few minutes as replies land.
-      if (res.started) setRefreshUntil(Date.now() + 180_000);
+      if (res.started) {
+        setNote(null);
+        setScanning(true);
+        // Also refresh the list for a few minutes as replies land.
+        setRefreshUntil(Date.now() + 180_000);
+      } else {
+        setNote(res.message);
+      }
       qc.invalidateQueries({ queryKey: ["linkedin", "responses"] });
     },
     onError: () => setNote("Reply check failed — see backend logs."),
@@ -130,6 +137,18 @@ export default function LinkedInResponses() {
           {note}
         </div>
       )}
+
+      <LinkedInScanProgress
+        active={scanning}
+        onDone={(r) => {
+          setScanning(false);
+          setNote(
+            `Reply check complete — ${r.replied} new repl${r.replied === 1 ? "y" : "ies"}, ` +
+              `${r.accepted} invite${r.accepted === 1 ? "" : "s"} accepted.`
+          );
+          qc.invalidateQueries({ queryKey: ["linkedin", "responses"] });
+        }}
+      />
 
       {/* Account filter + metrics */}
       <Card className="mb-4 p-4">
