@@ -296,13 +296,10 @@ export default function LinkedIn() {
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
-      setNote(
-        res.supported
-          ? `Checked LinkedIn: ${res.accepted} accepted→sent, ${res.replied} new repl${
-              res.replied === 1 ? "y" : "ies"
-            }.`
-          : "LinkedIn tracking is not configured (stub provider)."
-      );
+      setNote(res.message);
+      // The scan runs in the background now; refresh the list for a few minutes
+      // as accepted invites and replies land.
+      if (res.started) setSendingUntil(Date.now() + 180_000);
       qc.invalidateQueries({ queryKey: ["linkedin"] });
     },
   });

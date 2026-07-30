@@ -568,10 +568,10 @@ export const sendOpenLinkedIn = (discoveryRunId?: number) =>
     .then((r) => r.data);
 export const checkLinkedInUpdates = () =>
   api
-    .post<{ supported: boolean; accepted: number; replied: number }>(
+    .post<{ started: boolean; supported: boolean; message: string }>(
       "/api/linkedin/check-updates",
       {},
-      { timeout: 120000 }
+      { timeout: 60000 }
     )
     .then((r) => r.data);
 export const setEmailStatus = (id: number, status: string) =>
