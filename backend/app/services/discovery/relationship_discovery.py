@@ -101,22 +101,32 @@ def run_discovery(
     auto_expand_to_target: bool = True,
     search_goal: Optional[str] = None,
     campaign_id: Optional[int] = None,
+    run: Optional[DiscoveryRun] = None,
 ) -> DiscoveryRun:
     provider = get_discovery_provider()
     original_criteria = copy_criteria(criteria)
     working_criteria = copy_criteria(criteria)
     expansion_adjustments: list[str] = []
 
-    run = DiscoveryRun(
-        principal_id=principal.id,
-        search_definition_id=search_definition_id,
-        provider=getattr(provider, "name", "stub"),
-        criteria=_criteria_to_dict(original_criteria),
-        status=DiscoveryStatus.RUNNING,
-        requested_by=requested_by,
-    )
-    db.add(run)
-    db.flush()
+    if run is None:
+        # Synchronous path (e.g. the autonomous agent): create the run row here.
+        run = DiscoveryRun(
+            principal_id=principal.id,
+            search_definition_id=search_definition_id,
+            provider=getattr(provider, "name", "stub"),
+            criteria=_criteria_to_dict(original_criteria),
+            status=DiscoveryStatus.RUNNING,
+            requested_by=requested_by,
+        )
+        db.add(run)
+        db.flush()
+    else:
+        # Async path: the route pre-created a PENDING run so the UI has an id to
+        # poll; adopt it and mark it running instead of creating a second row.
+        run.provider = getattr(provider, "name", "stub")
+        run.criteria = _criteria_to_dict(original_criteria)
+        run.status = DiscoveryStatus.RUNNING
+        db.flush()
 
     orgs_found = orgs_imported = people_found = people_imported = duplicates = 0
     insights_generated = 0

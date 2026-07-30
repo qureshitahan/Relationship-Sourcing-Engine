@@ -131,6 +131,14 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "variant_id": "INTEGER",
         "campaign_id": "INTEGER",
     },
+    "discovery_runs": {
+        "job_kind": "VARCHAR(30)",
+        "job_status": "VARCHAR(20)",
+        "job_total": "INTEGER",
+        "job_done": "INTEGER",
+        "job_error": "TEXT",
+        "job_cancel_requested": "BOOLEAN DEFAULT 0",
+    },
 }
 
 

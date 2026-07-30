@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import {
   getAgentConfig,
+  cancelRunJob,
   deleteDiscoveryRun,
+  getDiscoveryRun,
   listDiscoveryRuns,
   listPrincipals,
   planAgentSearch,
   resetPipeline,
+  revealRunEmails,
   runDiscovery,
+  sendRunEmails,
+  sendRunLinkedin,
   type DiscoveryRunPayload,
 } from "../api/client";
 import { MultiSelectDropdown } from "../components/MultiSelectDropdown";
@@ -80,7 +85,6 @@ function applyPlanCriteria(
 
 export default function Discover() {
   const qc = useQueryClient();
-  const navigate = useNavigate();
   const { data: principals } = useQuery({
     queryKey: ["principals"],
     queryFn: () => listPrincipals(),
@@ -88,6 +92,17 @@ export default function Discover() {
   const { data: runs, isLoading } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listDiscoveryRuns({ limit: 10 }),
+    // Keep the list live while any run is discovering or running a bulk job.
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? [];
+      const busy = items.some(
+        (r) =>
+          r.status === "pending" ||
+          r.status === "running" ||
+          r.job_status === "running"
+      );
+      return busy ? 2500 : false;
+    },
   });
 
   const [principalId, setPrincipalId] = useState<number | "">("");
@@ -95,6 +110,17 @@ export default function Discover() {
   const [plan, setPlan] = useState<AgentPlan | null>(null);
   const [planAnswers, setPlanAnswers] = useState<Record<string, string>>({});
   const [planNote, setPlanNote] = useState<string | null>(null);
+  // Id of the run kicked off by the "Run discovery" button, polled until done.
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
+  const activeRun = useQuery({
+    queryKey: ["discovery-run", activeRunId],
+    queryFn: () => getDiscoveryRun(activeRunId as number),
+    enabled: activeRunId != null,
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === "completed" || s === "failed" ? false : 2000;
+    },
+  });
 
   const [industries, setIndustries] = useState<string[]>(["Healthcare", "Healthcare Services"]);
   const [companyTypes, setCompanyTypes] = useState<string[]>([
@@ -198,7 +224,9 @@ export default function Discover() {
         people_limit: peopleLimit.trim() ? Number(peopleLimit) : 100,
         people_first: true,
         auto_expand_to_target: true,
-        auto_process: true,
+        // Import only — no slow auto-research. Reveal emails from the Bulk
+        // Outreach column (quantity), or research on the Prospects page (quality).
+        auto_process: false,
         search_goal:
           objective.trim() ||
           (plan?.rationale && !plan.questions.length ? plan.rationale : undefined),
@@ -206,20 +234,45 @@ export default function Discover() {
       return runDiscovery(payload);
     },
     onSuccess: (result) => {
+      // Discovery now runs in the background. We get back a pending run; poll it.
+      qc.invalidateQueries({ queryKey: ["discovery-runs"] });
+      setActiveRunId(result.id);
+      setPlanNote(
+        `Run #${result.id} started — discovering prospects in the background. ` +
+          "You can keep working; progress shows below."
+      );
+    },
+  });
+
+  // When the polled run finishes, refresh the dependent views.
+  useEffect(() => {
+    const s = activeRun.data?.status;
+    if (s === "completed" || s === "failed") {
       qc.invalidateQueries({ queryKey: ["discovery-runs"] });
       qc.invalidateQueries({ queryKey: ["prospects"] });
       qc.invalidateQueries({ queryKey: ["organizations"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
-      qc.invalidateQueries({ queryKey: ["emails"] });
-      setPlanNote(
-        `Run #${result.id} complete — ${result.people_imported ?? 0} prospects imported` +
-          (result.insights_generated != null
-            ? `, ${result.insights_generated} researched`
-            : "") +
-          ". Opening Prospects…"
-      );
-      navigate(`/prospects?run=${result.id}`);
-    },
+    }
+  }, [activeRun.data?.status, qc]);
+
+  // Run-level bulk jobs (draft/send emails, send LinkedIn) — all background.
+  const invalidateRuns = () =>
+    qc.invalidateQueries({ queryKey: ["discovery-runs"] });
+  const runReveal = useMutation({
+    mutationFn: (runId: number) => revealRunEmails(runId),
+    onSuccess: invalidateRuns,
+  });
+  const runSendEmail = useMutation({
+    mutationFn: (runId: number) => sendRunEmails(runId),
+    onSuccess: invalidateRuns,
+  });
+  const runSendLinkedin = useMutation({
+    mutationFn: (runId: number) => sendRunLinkedin(runId),
+    onSuccess: invalidateRuns,
+  });
+  const runCancel = useMutation({
+    mutationFn: (runId: number) => cancelRunJob(runId),
+    onSuccess: invalidateRuns,
   });
 
   const clearHistory = useMutation({
@@ -528,9 +581,18 @@ export default function Discover() {
             <div className="mt-4 flex items-center gap-3">
               <Button
                 onClick={() => run.mutate()}
-                disabled={!principalId || run.isPending}
+                disabled={
+                  !principalId ||
+                  run.isPending ||
+                  activeRun.data?.status === "pending" ||
+                  activeRun.data?.status === "running"
+                }
               >
-                {run.isPending ? "Discovering…" : "Run discovery"}
+                {run.isPending ||
+                activeRun.data?.status === "pending" ||
+                activeRun.data?.status === "running"
+                  ? "Discovering…"
+                  : "Run discovery"}
               </Button>
               <span className="text-xs text-slate-400">
                 {titles.length} title(s) · {industries.length} industry filter(s)
@@ -548,21 +610,33 @@ export default function Discover() {
                   "Unknown error — check backend logs."}
               </div>
             )}
-            {run.isSuccess && run.data && run.data.status === "failed" && (
+            {(activeRun.data?.status === "pending" ||
+              activeRun.data?.status === "running") && (
+              <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                <div className="font-medium">
+                  Discovering prospects in the background…
+                </div>
+                <p className="mt-1 text-blue-800">
+                  This can take several minutes for a large target count. You can leave
+                  this page — the run keeps going and appears in Recent discovery runs.
+                </p>
+              </div>
+            )}
+            {activeRun.data?.status === "failed" && (
               <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
                 <div className="font-medium">Discovery failed</div>
                 <p className="mt-1">
-                  {run.data.error_message ||
+                  {activeRun.data.error_message ||
                     "Apollo returned an error. Check APOLLO_API_KEY in backend .env."}
                 </p>
               </div>
             )}
-            {run.isSuccess && run.data && run.data.status !== "failed" && (
+            {activeRun.data?.status === "completed" && (
               <div className="mt-4 rounded-lg bg-slate-50 p-4 text-sm text-slate-700">
                 <div className="font-medium">
-                  Run complete ({run.data.status}) via {run.data.provider}
+                  Run #{activeRun.data.id} complete via {activeRun.data.provider}
                 </div>
-                {run.data.provider === "stub" && (
+                {activeRun.data.provider === "stub" && (
                   <p className="mt-2 text-amber-800">
                     This run used the offline stub provider (mock data), not Apollo.
                     Set <code className="text-xs">DISCOVERY_PROVIDER=apollo</code> in backend{" "}
@@ -572,30 +646,24 @@ export default function Discover() {
                   </p>
                 )}
                 <div className="mt-1 flex flex-wrap gap-2">
-                  <Badge tone="blue">{run.data.people_imported ?? 0} prospects</Badge>
-                  <Badge>{run.data.duplicates ?? 0} duplicates skipped</Badge>
-                  {(run.data.people_imported ?? 0) <
+                  <Badge tone="blue">{activeRun.data.people_imported ?? 0} prospects</Badge>
+                  <Badge>{activeRun.data.duplicates ?? 0} duplicates skipped</Badge>
+                  {(activeRun.data.people_imported ?? 0) <
                     Number(
-                      (run.data.criteria as { people_limit?: number } | undefined)
+                      (activeRun.data.criteria as { people_limit?: number } | undefined)
                         ?.people_limit ?? peopleLimit
-                    ) && (
-                    <Badge tone="amber">Below target count</Badge>
-                  )}
+                    ) && <Badge tone="amber">Below target count</Badge>}
                 </div>
-                {(run.data.criteria as { expansion_summary?: string } | undefined)
+                {(activeRun.data.criteria as { expansion_summary?: string } | undefined)
                   ?.expansion_summary && (
                   <p className="mt-2 text-xs text-slate-600">
-                    {(run.data.criteria as { expansion_summary: string }).expansion_summary}
+                    {
+                      (activeRun.data.criteria as { expansion_summary: string })
+                        .expansion_summary
+                    }
                   </p>
                 )}
-                {(run.data.criteria as { shortfall_note?: string } | undefined)
-                  ?.shortfall_note &&
-                  !(run.data.criteria as { expansion_summary?: string }).expansion_summary && (
-                    <p className="mt-2 text-xs text-amber-700">
-                      {(run.data.criteria as { shortfall_note: string }).shortfall_note}
-                    </p>
-                  )}
-                {(run.data.people_imported ?? 0) === 0 && (
+                {(activeRun.data.people_imported ?? 0) === 0 && (
                   <p className="mt-2 text-amber-700">
                     Apollo returned no matches. Try fewer industry filters (one broad bucket),
                     widen the employee range, or verify your API key is valid.
@@ -603,10 +671,10 @@ export default function Discover() {
                 )}
                 <div className="mt-2 flex flex-wrap gap-4">
                   <Link
-                    to={`/prospects?run=${run.data.id}`}
+                    to={`/prospects?run=${activeRun.data.id}`}
                     className="font-medium text-slate-900 underline"
                   >
-                    Review {run.data.people_imported ?? 0} prospects →
+                    Review {activeRun.data.people_imported ?? 0} prospects →
                   </Link>
                 </div>
               </div>
@@ -649,6 +717,7 @@ export default function Discover() {
                 <Th>Prospects</Th>
                 <Th>Researched</Th>
                 <Th>Status</Th>
+                <Th>Bulk outreach</Th>
                 <Th>When</Th>
                 <Th />
               </tr>
@@ -669,6 +738,92 @@ export default function Discover() {
                   <Td>{r.insights_generated ?? 0}</Td>
                   <Td>
                     <StatusBadge status={r.status} />
+                  </Td>
+                  <Td>
+                    {r.job_status === "running" ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-600">
+                          {r.job_kind === "reveal"
+                            ? "Revealing"
+                            : r.job_kind === "draft_email"
+                            ? "Drafting"
+                            : r.job_kind === "send_email"
+                            ? "Sending email"
+                            : r.job_kind === "send_linkedin"
+                            ? "Sending LinkedIn"
+                            : "Working"}{" "}
+                          {r.job_done ?? 0}/{r.job_total ?? 0}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-rose-600 hover:underline"
+                          onClick={() => runCancel.mutate(r.id)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2 text-xs font-medium">
+                        <button
+                          type="button"
+                          className="text-emerald-700 hover:underline disabled:opacity-40"
+                          disabled={r.status !== "completed"}
+                          title="Reveal email/phone for every prospect in this run (Apollo, background). Uses credits."
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Reveal email for all unrevealed prospects in run #${r.id}? ` +
+                                  "Runs in the background and uses Apollo credits."
+                              )
+                            )
+                              runReveal.mutate(r.id);
+                          }}
+                        >
+                          Reveal emails
+                        </button>
+                        <button
+                          type="button"
+                          className="text-blue-700 hover:underline disabled:opacity-40"
+                          disabled={r.status !== "completed"}
+                          title="QUANTITY: email everyone in this run with a revealed address (drafts on the fly, no research/approval needed), paced"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Send emails to EVERYONE in run #${r.id} who has a revealed ` +
+                                  "email address? This is the quantity path — it drafts on the " +
+                                  "fly and sends in the background (no research or approval " +
+                                  "step). For the personalized/quality path, use the Prospects page."
+                              )
+                            )
+                              runSendEmail.mutate(r.id);
+                          }}
+                        >
+                          Send email
+                        </button>
+                        <button
+                          type="button"
+                          className="text-purple-700 hover:underline disabled:opacity-40"
+                          disabled={r.status !== "completed"}
+                          title="Approve + send all LinkedIn messages for this run (background, paced)"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Send all LinkedIn messages for run #${r.id}? ` +
+                                  "Paced to protect the account. Generate them on the LinkedIn page first."
+                              )
+                            )
+                              runSendLinkedin.mutate(r.id);
+                          }}
+                        >
+                          Send LinkedIn
+                        </button>
+                      </div>
+                    )}
+                    {r.job_status === "failed" && r.job_error && (
+                      <div className="mt-1 max-w-[16rem] text-xs text-rose-600">
+                        {r.job_error}
+                      </div>
+                    )}
                   </Td>
                   <Td>{new Date(r.created_at).toLocaleString()}</Td>
                   <Td className="space-x-2">

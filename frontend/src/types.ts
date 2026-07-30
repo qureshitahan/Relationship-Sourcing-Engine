@@ -434,6 +434,12 @@ export interface DiscoveryRun {
   requested_by?: string | null;
   created_at: string;
   provider_warnings?: string[];
+  // Background bulk-job progress (draft/send emails, send LinkedIn) for this run.
+  job_kind?: string | null;
+  job_status?: string | null;
+  job_total?: number | null;
+  job_done?: number | null;
+  job_error?: string | null;
 }
 
 export interface AgentRun {

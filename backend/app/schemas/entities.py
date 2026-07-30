@@ -295,6 +295,12 @@ class DiscoveryRunOut(ORMModel):
     requested_by: Optional[str] = None
     created_at: datetime
     provider_warnings: List[str] = []
+    # Background bulk-job progress (draft/send emails, send LinkedIn) for this run.
+    job_kind: Optional[str] = None
+    job_status: Optional[str] = None
+    job_total: Optional[int] = None
+    job_done: Optional[int] = None
+    job_error: Optional[str] = None
 
 
 class AgentRunOut(ORMModel):

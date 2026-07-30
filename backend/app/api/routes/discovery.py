@@ -10,13 +10,24 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.discovery_run import DiscoveryRun
+from app.models.enums import DiscoveryStatus
 from app.models.principal import Principal
 from app.models.search_definition import SearchDefinition
 from app.schemas.entities import DiscoveryRunOut, Page
 from app.schemas.requests import DiscoveryRunRequest
 from app.services.discovery import delete_discovery_run, run_discovery
+from app.services.discovery.relationship_discovery import _criteria_to_dict
 from app.services.discovery.process_run import process_discovery_run
 from app.schemas.entities import DiscoveryProcessSummary
+from app.services.discovery_jobs import (
+    JOB_RUNNING,
+    launch_discovery,
+    launch_run_draft,
+    launch_run_email_send,
+    launch_run_linkedin_send,
+    launch_run_reveal,
+)
+from app.services.enrichment import get_discovery_provider
 from app.services.enrichment.base import DiscoveryCriteria
 from app.services.provider_health import active_warnings
 
@@ -88,8 +99,16 @@ def _discovery_run_out(run: DiscoveryRun) -> DiscoveryRunOut:
     return data
 
 
-@router.post("/run", response_model=DiscoveryRunOut, status_code=201)
+@router.post("/run", response_model=DiscoveryRunOut, status_code=202)
 def run(payload: DiscoveryRunRequest, db: Session = Depends(get_db)):
+    """Kick off an ICP discovery run in the background and return immediately.
+
+    Discovery (Apollo search + import + optional research/reveal) can take many
+    minutes for a large ``people_limit``, so it runs in a daemon thread instead of
+    holding the HTTP request open until the browser times out. The response is the
+    freshly-created run in ``pending``/``running`` state; poll ``GET
+    /discovery/runs/{id}`` until ``status`` is ``completed`` or ``failed``.
+    """
     principal = db.get(Principal, payload.principal_id)
     if not principal:
         raise HTTPException(status_code=404, detail="Principal not found")
@@ -101,11 +120,25 @@ def run(payload: DiscoveryRunRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Search definition not found")
 
     people_first = payload.people_first if payload.people_first is not None else True
-
     criteria = _criteria_from_request(payload, definition)
-    discovery_run = run_discovery(
-        db,
-        principal,
+
+    # Pre-create the run row so the client has an id to poll while it runs.
+    provider = get_discovery_provider()
+    discovery_run = DiscoveryRun(
+        principal_id=principal.id,
+        search_definition_id=payload.search_definition_id,
+        provider=getattr(provider, "name", "stub"),
+        criteria=_criteria_to_dict(criteria),
+        status=DiscoveryStatus.PENDING,
+        requested_by=payload.requested_by or "user",
+    )
+    db.add(discovery_run)
+    db.commit()
+    db.refresh(discovery_run)
+
+    launch_discovery(
+        discovery_run.id,
+        principal.id,
         criteria,
         search_definition_id=payload.search_definition_id,
         requested_by=payload.requested_by or "user",
@@ -114,24 +147,8 @@ def run(payload: DiscoveryRunRequest, db: Session = Depends(get_db)):
         people_first=people_first,
         auto_expand_to_target=payload.auto_expand_to_target,
         search_goal=payload.search_goal.strip() if payload.search_goal else None,
+        auto_process=payload.auto_process,
     )
-
-    if payload.auto_process and discovery_run.status == "completed":
-        try:
-            process_discovery_run(
-                db,
-                discovery_run.id,
-                principal=principal,
-                skip_existing_research=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            discovery_run.error_message = (
-                (discovery_run.error_message or "")
-                + f" Auto-process failed: {exc}"
-            ).strip()
-            db.commit()
-            db.refresh(discovery_run)
-
     return _discovery_run_out(discovery_run)
 
 
@@ -191,3 +208,68 @@ def process_run(run_id: int, db: Session = Depends(get_db)):
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# --- Run-level bulk jobs (all run in the background; poll GET /runs/{id}) ----
+
+def _run_for_job(db: Session, run_id: int) -> DiscoveryRun:
+    run = db.get(DiscoveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    if run.job_status == JOB_RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A '{run.job_kind}' job is already running for this run.",
+        )
+    return run
+
+
+@router.post("/runs/{run_id}/reveal", response_model=DiscoveryRunOut, status_code=202)
+def reveal_run_emails(run_id: int, db: Session = Depends(get_db)):
+    """Reveal email/phone for every unrevealed prospect in the run (background)."""
+    run = _run_for_job(db, run_id)
+    launch_run_reveal(run_id)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/draft-emails", response_model=DiscoveryRunOut, status_code=202)
+def draft_run_emails(run_id: int, db: Session = Depends(get_db)):
+    """Draft outreach emails for every approved prospect in the run (background)."""
+    run = _run_for_job(db, run_id)
+    if run.principal_id is None:
+        raise HTTPException(status_code=400, detail="Run has no principal")
+    launch_run_draft(run_id)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/send-emails", response_model=DiscoveryRunOut, status_code=202)
+def send_run_emails(run_id: int, db: Session = Depends(get_db)):
+    """Approve + send every draft/approved email in the run, paced (background)."""
+    run = _run_for_job(db, run_id)
+    launch_run_email_send(run_id)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/send-linkedin", response_model=DiscoveryRunOut, status_code=202)
+def send_run_linkedin(run_id: int, db: Session = Depends(get_db)):
+    """Approve + send every draft/approved LinkedIn message in the run (background)."""
+    run = _run_for_job(db, run_id)
+    launch_run_linkedin_send(run_id)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/cancel-job", response_model=DiscoveryRunOut)
+def cancel_run_job(run_id: int, db: Session = Depends(get_db)):
+    """Ask the running bulk job to stop after the item it is working on."""
+    run = db.get(DiscoveryRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    if run.job_status == JOB_RUNNING:
+        run.job_cancel_requested = True
+        db.commit()
+        db.refresh(run)
+    return _discovery_run_out(run)
