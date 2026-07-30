@@ -574,6 +574,15 @@ export const checkLinkedInUpdates = () =>
       { timeout: 60000 }
     )
     .then((r) => r.data);
+export interface LinkedInScanProgress {
+  status: string; // starting | running | done | idle
+  total: number;
+  done: number;
+  accepted: number;
+  replied: number;
+}
+export const getLinkedInScanProgress = () =>
+  api.get<LinkedInScanProgress>("/api/linkedin/scan-progress").then((r) => r.data);
 export const setEmailStatus = (id: number, status: string) =>
   api.post<EmailDraft>(`/api/emails/${id}/status`, { status }).then((r) => r.data);
 export const sendEmail = (id: number) =>

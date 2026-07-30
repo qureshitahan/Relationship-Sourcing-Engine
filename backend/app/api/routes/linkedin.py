@@ -8,6 +8,7 @@ driven by the background poller).
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import datetime
@@ -594,14 +595,48 @@ def reply_in_thread(
     return _msg_out(db, msg)
 
 
-def scan_linkedin_updates(db: Session) -> dict:
+SCAN_PROGRESS_KEY = "linkedin_scan_progress"
+
+
+def _set_scan_progress(
+    db: Session, *, status: str, total: int, done: int, accepted: int, replied: int
+) -> None:
+    """Persist scan progress (and flush pending message changes) so the UI can
+    poll a live progress bar. Committing here doubles as the per-message commit,
+    so a long scan saves its work incrementally instead of all-or-nothing."""
+    from app.models.app_setting import AppSetting
+
+    payload = json.dumps(
+        {
+            "status": status,
+            "total": total,
+            "done": done,
+            "accepted": accepted,
+            "replied": replied,
+        }
+    )
+    row = db.get(AppSetting, SCAN_PROGRESS_KEY)
+    if row is None:
+        db.add(AppSetting(key=SCAN_PROGRESS_KEY, value=payload))
+    else:
+        row.value = payload
+    db.commit()
+
+
+def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
     """Poll: auto-DM accepted invites, and detect replies to sent messages.
 
     Shared by the /check-updates route and the background poller. Degrades
     gracefully when the provider does not support tracking (e.g. stub).
+
+    ``track_progress`` (manual check-replies button): writes a live progress
+    record after each message and commits incrementally. Left False (the 15-min
+    poller), the behaviour is unchanged — a single commit at the end, no progress.
     """
     default_provider = get_linkedin_provider()
     if not default_provider.supports_tracking():
+        if track_progress:
+            _set_scan_progress(db, status="done", total=0, done=0, accepted=0, replied=0)
         return {"supported": False, "accepted": 0, "replied": 0}
 
     # Poll each message with the account that SENT it (msg.from_account). Legacy
@@ -624,50 +659,60 @@ def scan_linkedin_updates(db: Session) -> dict:
     accepted = 0
     replied = 0
 
-    # 1) Invitations awaiting acceptance -> auto-send the queued message.
     pending = db.execute(
         select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.INVITE_SENT)
     ).scalars().all()
+    sent_all = db.execute(
+        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.SENT)
+    ).scalars().all()
+    sent = [m for m in sent_all if m.provider_chat_id]  # only these are pollable
+    total = len(pending) + len(sent)
+    done = 0
+    if track_progress:
+        _set_scan_progress(
+            db, status="running", total=total, done=0, accepted=0, replied=0
+        )
+
+    # 1) Invitations awaiting acceptance -> auto-send the queued message.
     for msg in pending:
         provider = provider_for(msg)
         msg.last_status_check_at = now
         identifier = msg.public_identifier or msg.linkedin_provider_id
-        if not identifier:
-            continue
-        profile = provider.resolve_profile(identifier)
-        if not profile.found:
-            continue
-        msg.network_distance = profile.network_distance
-        if not profile.is_connected:
-            continue
-        msg.connected = True
-        result = provider.send_message(
-            provider_id=profile.provider_id or msg.linkedin_provider_id, text=msg.body
-        )
-        if result.sent:
-            msg.provider_chat_id = result.chat_id
-            msg.provider_message_id = result.message_id
-            msg.status = LinkedInStatus.SENT
-            msg.sent_at = now
-            msg.error = None
-            accepted += 1
-            log_action(
-                db,
-                AuditAction.LINKEDIN_SEND,
-                entity_type="linkedin_message",
-                entity_id=msg.id,
-                summary=f"Auto-sent LinkedIn DM after invite accepted (prospect {msg.contact_id})",
+        if identifier:
+            profile = provider.resolve_profile(identifier)
+            if profile.found:
+                msg.network_distance = profile.network_distance
+                if profile.is_connected:
+                    msg.connected = True
+                    result = provider.send_message(
+                        provider_id=profile.provider_id or msg.linkedin_provider_id,
+                        text=msg.body,
+                    )
+                    if result.sent:
+                        msg.provider_chat_id = result.chat_id
+                        msg.provider_message_id = result.message_id
+                        msg.status = LinkedInStatus.SENT
+                        msg.sent_at = now
+                        msg.error = None
+                        accepted += 1
+                        log_action(
+                            db,
+                            AuditAction.LINKEDIN_SEND,
+                            entity_type="linkedin_message",
+                            entity_id=msg.id,
+                            summary=f"Auto-sent LinkedIn DM after invite accepted (prospect {msg.contact_id})",
+                        )
+                    else:
+                        msg.error = result.error
+        done += 1
+        if track_progress:
+            _set_scan_progress(
+                db, status="running", total=total, done=done,
+                accepted=accepted, replied=replied,
             )
-        else:
-            msg.error = result.error
 
     # 2) Sent messages -> detect a reply.
-    sent = db.execute(
-        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.SENT)
-    ).scalars().all()
     for msg in sent:
-        if not msg.provider_chat_id:
-            continue
         provider = provider_for(msg)
         msg.last_reply_check_at = now
         result = provider.check_reply(
@@ -691,8 +736,20 @@ def scan_linkedin_updates(db: Session) -> dict:
                 entity_id=msg.id,
                 summary=f"Detected LinkedIn reply from prospect {msg.contact_id}",
             )
+        done += 1
+        if track_progress:
+            _set_scan_progress(
+                db, status="running", total=total, done=done,
+                accepted=accepted, replied=replied,
+            )
 
-    db.commit()
+    if track_progress:
+        _set_scan_progress(
+            db, status="done", total=total, done=done,
+            accepted=accepted, replied=replied,
+        )
+    else:
+        db.commit()
     return {"supported": True, "accepted": accepted, "replied": replied}
 
 
@@ -708,7 +765,7 @@ def _scan_worker() -> None:
     try:
         db = SessionLocal()
         try:
-            scan_linkedin_updates(db)
+            scan_linkedin_updates(db, track_progress=True)
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - never let the background scan crash silently
@@ -738,6 +795,12 @@ def check_updates():
             "supported": False,
             "message": "LinkedIn tracking is not configured (stub provider).",
         }
+    # Reset progress synchronously so the UI shows a fresh bar (not a stale 'done'
+    # from a previous run) the instant it starts polling scan-progress.
+    set_setting(
+        SCAN_PROGRESS_KEY,
+        json.dumps({"status": "starting", "total": 0, "done": 0, "accepted": 0, "replied": 0}),
+    )
     launch_linkedin_scan()
     return {
         "started": True,
@@ -747,3 +810,15 @@ def check_updates():
             "will appear here shortly (this can take a minute or two with many messages)."
         ),
     }
+
+
+@router.get("/scan-progress")
+def scan_progress():
+    """Live progress of the most recent manual reply-check, for a progress bar."""
+    raw = get_setting(SCAN_PROGRESS_KEY)
+    if raw:
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    return {"status": "idle", "total": 0, "done": 0, "accepted": 0, "replied": 0}
