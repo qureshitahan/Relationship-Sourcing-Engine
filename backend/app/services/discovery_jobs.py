@@ -650,6 +650,75 @@ def _linkedin_send_worker(run_id: int) -> None:
         db.close()
 
 
+# --- LinkedIn "approve & send all" (not run-anchored) -----------------------
+
+def launch_linkedin_message_send(message_ids: list[int]) -> None:
+    """Approve (if draft) + send specific LinkedIn messages, paced, in background.
+
+    Used by the LinkedIn page's "Approve & send all" button. The caller has
+    already applied the daily cap (it passes only the ids that fit today's
+    budget), so this simply sends the given ids in order, spaced by
+    ``bulk_linkedin_send_delay_seconds`` to protect the account. Reuses the exact
+    tested single-send path (``perform_linkedin_send``) — DM if connected, else a
+    connection invite — so behaviour matches sending one at a time.
+    """
+    if not message_ids:
+        return
+    threading.Thread(
+        target=_linkedin_message_send_worker,
+        args=(list(message_ids),),
+        name=f"linkedin-bulk-send-{len(message_ids)}",
+        daemon=True,
+    ).start()
+
+
+def _linkedin_message_send_worker(message_ids: list[int]) -> None:
+    from datetime import datetime
+
+    from app.api.routes.linkedin import SendError, perform_linkedin_send
+
+    db = SessionLocal()
+    try:
+        delay = max(0.0, float(settings.bulk_linkedin_send_delay_seconds))
+        sent = 0
+        failed = 0
+        for index, mid in enumerate(message_ids):
+            msg = db.get(LinkedInMessage, mid)
+            if msg is None or msg.status not in (
+                LinkedInStatus.DRAFT,
+                LinkedInStatus.APPROVED,
+            ):
+                continue
+            if msg.status == LinkedInStatus.DRAFT:
+                msg.status = LinkedInStatus.APPROVED
+                msg.approved_by = "bulk-approve-send"
+                msg.approved_at = datetime.utcnow()
+                db.commit()
+            try:
+                perform_linkedin_send(db, msg)
+                sent += 1
+            except SendError as exc:
+                db.rollback()
+                failed += 1
+                logger.warning(
+                    "Bulk approve+send failed for message %s: %s", mid, exc.message
+                )
+            except Exception:  # noqa: BLE001 - keep sending the rest
+                db.rollback()
+                failed += 1
+                logger.exception("Bulk approve+send crashed for message %s", mid)
+            if delay and index < len(message_ids) - 1:
+                time.sleep(delay)
+        logger.info(
+            "LinkedIn bulk approve+send: %s sent, %s failed of %s",
+            sent, failed, len(message_ids),
+        )
+    except Exception:  # noqa: BLE001 - never let the worker die silently
+        logger.exception("LinkedIn bulk message-send worker failed")
+    finally:
+        db.close()
+
+
 def _fail(db: Session, run_id: int, message: str) -> None:
     db.rollback()
     run = db.get(DiscoveryRun, run_id)

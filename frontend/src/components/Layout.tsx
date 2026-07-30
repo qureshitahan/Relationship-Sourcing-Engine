@@ -26,6 +26,11 @@ const NAV_SECTIONS = [
       { to: "/prospects", label: "2. Prospects", hint: "Research, reveal & approve" },
       { to: "/emails", label: "3. Drafts", hint: "Edit, approve & send" },
       { to: "/linkedin", label: "4. LinkedIn", hint: "Connect & message on LinkedIn" },
+      {
+        to: "/linkedin-responses",
+        label: "LinkedIn Responses",
+        hint: "Replies from your DMs",
+      },
       { to: "/outreach", label: "5. Conversations", hint: "Replies & follow-ups" },
     ],
   },
