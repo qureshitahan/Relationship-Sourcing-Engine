@@ -9,6 +9,7 @@ driven by the background poller).
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -17,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.discovery_run import DiscoveryRun
@@ -695,7 +696,54 @@ def scan_linkedin_updates(db: Session) -> dict:
     return {"supported": True, "accepted": accepted, "replied": replied}
 
 
+# Only one scan at a time: repeated clicks (or an overlap with the 15-min poller)
+# must not stack concurrent Unipile polling / DB writes.
+_scan_lock = threading.Lock()
+
+
+def _scan_worker() -> None:
+    if not _scan_lock.acquire(blocking=False):
+        logger.info("LinkedIn scan already running; skipping duplicate trigger")
+        return
+    try:
+        db = SessionLocal()
+        try:
+            scan_linkedin_updates(db)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - never let the background scan crash silently
+        logger.exception("Background LinkedIn scan failed")
+    finally:
+        _scan_lock.release()
+
+
+def launch_linkedin_scan() -> None:
+    threading.Thread(target=_scan_worker, name="linkedin-scan", daemon=True).start()
+
+
 @router.post("/check-updates")
-def check_updates(db: Session = Depends(get_db)):
-    """Manually poll for accepted invitations and new replies."""
-    return scan_linkedin_updates(db)
+def check_updates():
+    """Kick off a poll for accepted invitations and new replies, in the background.
+
+    Polling hits Unipile once per pending message; with many messages that runs
+    for minutes, so it must NOT block the HTTP request (the browser and Azure's
+    gateway both time out well before it finishes). We start it on a daemon
+    thread and return immediately; results land as messages update, and the
+    15-minute background poller runs the same scan on its own schedule.
+    """
+    provider = get_linkedin_provider()
+    if not provider.supports_tracking():
+        return {
+            "started": False,
+            "supported": False,
+            "message": "LinkedIn tracking is not configured (stub provider).",
+        }
+    launch_linkedin_scan()
+    return {
+        "started": True,
+        "supported": True,
+        "message": (
+            "Checking LinkedIn in the background — accepted invites and new replies "
+            "will appear here shortly (this can take a minute or two with many messages)."
+        ),
+    }

@@ -24,6 +24,8 @@ export default function LinkedInResponses() {
   const qc = useQueryClient();
   const [note, setNote] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // While a background reply-scan runs, auto-refresh the list until this time.
+  const [refreshUntil, setRefreshUntil] = useState(0);
   // Which account's responses to show. Defaults to the active account below.
   const [accountFilter, setAccountFilter] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({});
@@ -36,6 +38,7 @@ export default function LinkedInResponses() {
   const { data, isLoading } = useQuery({
     queryKey: ["linkedin", "responses"],
     queryFn: () => listLinkedInMessages({ limit: 1000 }),
+    refetchInterval: () => (Date.now() < refreshUntil ? 5000 : false),
   });
 
   const accounts = accountsData?.accounts ?? [];
@@ -55,13 +58,9 @@ export default function LinkedInResponses() {
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
-      setNote(
-        res.supported
-          ? `Checked LinkedIn: ${res.accepted} accepted→sent, ${res.replied} new repl${
-              res.replied === 1 ? "y" : "ies"
-            }.`
-          : "LinkedIn tracking is not configured (stub provider)."
-      );
+      setNote(res.message);
+      // Scan runs in the background now; refresh for a few minutes as replies land.
+      if (res.started) setRefreshUntil(Date.now() + 180_000);
       qc.invalidateQueries({ queryKey: ["linkedin", "responses"] });
     },
     onError: () => setNote("Reply check failed — see backend logs."),
