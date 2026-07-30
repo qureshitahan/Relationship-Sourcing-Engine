@@ -139,6 +139,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "job_error": "TEXT",
         "job_cancel_requested": "BOOLEAN DEFAULT 0",
     },
+    "linkedin_messages": {
+        # Which connected LinkedIn account (Unipile account_id) sent this, so
+        # reply/invite tracking polls with the right account when several are used.
+        "from_account": "VARCHAR(64)",
+    },
 }
 
 

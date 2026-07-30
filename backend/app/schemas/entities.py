@@ -221,6 +221,8 @@ class LinkedInMessageOut(ORMModel):
     invitation_note: Optional[str] = None
     status: str
     provider: Optional[str] = None
+    # Which connected LinkedIn account (Unipile account_id) sent this, if sent.
+    from_account: Optional[str] = None
     network_distance: Optional[str] = None
     connected: bool = False
     public_identifier: Optional[str] = None

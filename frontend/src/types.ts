@@ -346,6 +346,7 @@ export interface LinkedInMessage {
   invitation_note?: string | null;
   status: string;
   provider?: string | null;
+  from_account?: string | null;
   network_distance?: string | null;
   connected?: boolean;
   public_identifier?: string | null;

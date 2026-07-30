@@ -3,12 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
   checkLinkedInUpdates,
+  createLinkedInConnectLink,
   deleteLinkedIn,
   generateRunLinkedIn,
   listDiscoveryRuns,
   listLinkedInAccounts,
   listLinkedInMessages,
   replyLinkedIn,
+  selectLinkedInAccount,
   sendLinkedIn,
   setLinkedInStatus,
   updateLinkedIn,
@@ -320,6 +322,33 @@ export default function LinkedIn() {
     return null;
   }, [accountsData]);
 
+  // Switch the active sending account (Dalbir / Farah / …). Applies to every
+  // send from here on — manual, run bulk, and the scheduler — until changed.
+  const selectAccount = useMutation({
+    mutationFn: (accountId: string) => selectLinkedInAccount(accountId),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["linkedin-accounts"] });
+      const name = (accountsData?.accounts ?? []).find(
+        (a) => a.id === res.active_account_id
+      )?.name;
+      setNote(`Now sending LinkedIn DMs as ${name ?? res.active_account_id}.`);
+    },
+    onError: () => setNote("Could not switch LinkedIn account — please try again."),
+  });
+  // One-time: open Unipile's hosted login to connect another account (e.g. Farah).
+  const connectAccount = useMutation({
+    mutationFn: () => createLinkedInConnectLink("New LinkedIn account"),
+    onSuccess: (res) => {
+      if (res.url) window.open(res.url, "_blank", "noopener");
+      setNote(
+        "Opened Unipile to connect a LinkedIn account. Complete the login, then " +
+          "click Refresh accounts — it will appear in the dropdown."
+      );
+    },
+    onError: () =>
+      setNote("Could not create a connect link — check the Unipile configuration."),
+  });
+
   return (
     <div>
       <PageHeader
@@ -340,13 +369,61 @@ export default function LinkedIn() {
 
       {accountsData?.provider === "unipile" && (
         <Card className="mb-4 p-4">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="font-semibold text-slate-700">LinkedIn account:</span>
-            <span className="text-slate-900">{activeName ?? "Dalbir Bains"}</span>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="font-semibold text-slate-700">Send LinkedIn DMs as:</span>
+            {accounts.length > 0 ? (
+              <select
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+                value={activeId ?? ""}
+                disabled={selectAccount.isPending}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (id && id !== activeId) selectAccount.mutate(id);
+                }}
+              >
+                {!activeId && <option value="">— Select an account —</option>}
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name ?? a.id}
+                    {a.status && a.status !== "OK" ? ` (${a.status})` : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-slate-900">{activeName ?? "Dalbir Bains"}</span>
+            )}
             <Badge tone={activeStatus === "OK" ? "green" : "amber"}>
               {activeStatus === "OK" ? "Connected" : activeStatus || "Checking…"}
             </Badge>
+            {selectAccount.isPending && (
+              <span className="text-xs text-slate-400">Switching…</span>
+            )}
+            <div className="ml-auto flex items-center gap-3">
+              <button
+                type="button"
+                className="text-xs font-medium text-slate-500 hover:underline"
+                onClick={() =>
+                  qc.invalidateQueries({ queryKey: ["linkedin-accounts"] })
+                }
+              >
+                Refresh accounts
+              </button>
+              <button
+                type="button"
+                className="text-xs font-medium text-blue-700 hover:underline disabled:opacity-40"
+                disabled={connectAccount.isPending}
+                onClick={() => connectAccount.mutate()}
+                title="Open Unipile's secure login to connect another LinkedIn account (e.g. Farah). Her password is entered on Unipile, never stored here."
+              >
+                + Connect account
+              </button>
+            </div>
           </div>
+          <p className="mt-2 text-xs text-slate-500">
+            Every LinkedIn send (manual, bulk run, and auto follow-ups) uses the
+            account selected here. Switching does not affect messages already sent —
+            their replies keep tracking under the account that sent them.
+          </p>
         </Card>
       )}
 

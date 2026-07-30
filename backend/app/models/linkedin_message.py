@@ -47,6 +47,13 @@ class LinkedInMessage(Base, TimestampMixin):
     # True once we know they are a 1st-degree connection (directly messageable).
     connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Which of OUR connected LinkedIn accounts sent this (Unipile account_id),
+    # stamped at send time. Reply/invite-acceptance tracking must poll with the
+    # SAME account that sent, so switching the active account never blinds an
+    # earlier account's threads. Null on legacy rows = use the active account
+    # (exactly today's single-account behaviour).
+    from_account: Mapped[Optional[str]] = mapped_column(String(64))
+
     # Unipile ids captured on send, used to match replies.
     provider_chat_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255))
