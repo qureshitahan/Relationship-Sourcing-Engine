@@ -189,6 +189,22 @@ class Settings(BaseSettings):
     # Kept for backwards compatibility; not used by the insight engine.
     openai_api_key: str = ""
 
+    # --- Bulk send-from-run pacing (background jobs) ---
+    # Seconds between individual sends in a run-level bulk send. Spacing protects
+    # deliverability (a burst of identical-origin sends looks like spam). Sending
+    # runs in the background, so pacing does not block the UI.
+    bulk_email_send_delay_seconds: float = 2.0
+    # LinkedIn is far more rate-limited than email; keep sends well spaced so the
+    # account is not flagged/restricted.
+    bulk_linkedin_send_delay_seconds: float = 20.0
+    # Hard daily ceiling on LinkedIn sends (invites + DMs) so the account is not
+    # flagged. A run-level bulk LinkedIn send stops once today's total reaches this.
+    # LinkedIn realistically tolerates well under this; 50 is an aggressive max.
+    linkedin_daily_send_cap: int = 50
+    # How many drafts to generate per LLM batch in a run-level bulk draft job
+    # (progress is reported per batch).
+    bulk_draft_batch_size: int = 10
+
     # --- Sending cadence (drip) ---
     # When the agent auto-sends, it sends in small batches with a pause between
     # them so the mailbox is never blasted (reduces spam/blocking risk).

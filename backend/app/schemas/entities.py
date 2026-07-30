@@ -221,6 +221,8 @@ class LinkedInMessageOut(ORMModel):
     invitation_note: Optional[str] = None
     status: str
     provider: Optional[str] = None
+    # Which connected LinkedIn account (Unipile account_id) sent this, if sent.
+    from_account: Optional[str] = None
     network_distance: Optional[str] = None
     connected: bool = False
     public_identifier: Optional[str] = None
@@ -295,6 +297,12 @@ class DiscoveryRunOut(ORMModel):
     requested_by: Optional[str] = None
     created_at: datetime
     provider_warnings: List[str] = []
+    # Background bulk-job progress (draft/send emails, send LinkedIn) for this run.
+    job_kind: Optional[str] = None
+    job_status: Optional[str] = None
+    job_total: Optional[int] = None
+    job_done: Optional[int] = None
+    job_error: Optional[str] = None
 
 
 class AgentRunOut(ORMModel):

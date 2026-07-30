@@ -85,6 +85,7 @@ def _msg_out(db: Session, msg: LinkedInMessage) -> LinkedInMessageOut:
         invitation_note=msg.invitation_note,
         status=msg.status,
         provider=msg.provider,
+        from_account=msg.from_account,
         network_distance=msg.network_distance,
         connected=bool(msg.connected),
         public_identifier=msg.public_identifier,
@@ -420,6 +421,9 @@ def perform_linkedin_send(db: Session, msg: LinkedInMessage) -> LinkedInMessage:
         raise SendError(profile.error or "Could not resolve LinkedIn profile", status_code=502)
 
     msg.provider = provider.name
+    # Record which of our accounts is sending, so reply/acceptance tracking later
+    # polls with the SAME account even if the active account is switched.
+    msg.from_account = getattr(provider, "account_id", None) or None
     msg.linkedin_provider_id = profile.provider_id
     msg.public_identifier = profile.public_identifier
     msg.network_distance = profile.network_distance
@@ -535,9 +539,25 @@ def scan_linkedin_updates(db: Session) -> dict:
     Shared by the /check-updates route and the background poller. Degrades
     gracefully when the provider does not support tracking (e.g. stub).
     """
-    provider = get_linkedin_provider()
-    if not provider.supports_tracking():
+    default_provider = get_linkedin_provider()
+    if not default_provider.supports_tracking():
         return {"supported": False, "accepted": 0, "replied": 0}
+
+    # Poll each message with the account that SENT it (msg.from_account). Legacy
+    # rows with no stamped account fall back to the active/default provider, so
+    # single-account behaviour is byte-for-byte unchanged. Providers are cached
+    # per account to avoid rebuilding one per message.
+    _provider_cache: dict = {}
+
+    def provider_for(msg) -> object:
+        acct = (getattr(msg, "from_account", None) or "").strip()
+        if not acct:
+            return default_provider
+        cached = _provider_cache.get(acct)
+        if cached is None:
+            cached = get_linkedin_provider(account_id=acct)
+            _provider_cache[acct] = cached
+        return cached
 
     now = datetime.utcnow()
     accepted = 0
@@ -548,6 +568,7 @@ def scan_linkedin_updates(db: Session) -> dict:
         select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.INVITE_SENT)
     ).scalars().all()
     for msg in pending:
+        provider = provider_for(msg)
         msg.last_status_check_at = now
         identifier = msg.public_identifier or msg.linkedin_provider_id
         if not identifier:
@@ -586,6 +607,7 @@ def scan_linkedin_updates(db: Session) -> dict:
     for msg in sent:
         if not msg.provider_chat_id:
             continue
+        provider = provider_for(msg)
         msg.last_reply_check_at = now
         result = provider.check_reply(
             chat_id=msg.provider_chat_id,

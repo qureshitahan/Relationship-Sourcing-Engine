@@ -4,7 +4,6 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import {
   batchGenerateInsights,
-  batchRevealProspects,
   getDiscoveryRun,
   listDiscoveryRuns,
   listPrincipals,
@@ -167,7 +166,10 @@ export default function Prospects() {
 
   const { data, isLoading } = useQuery({
     queryKey: ["prospects", effectiveFilters],
-    queryFn: () => listProspects({ ...effectiveFilters, limit: 250 }),
+    // Load the whole run (backend caps at 1000) so a run of 375 isn't silently
+    // truncated to 250 — otherwise the hidden prospects can never be
+    // researched/revealed/approved/emailed from this page.
+    queryFn: () => listProspects({ ...effectiveFilters, limit: 1000 }),
   });
 
   const { data: run } = useQuery({
@@ -342,34 +344,25 @@ export default function Prospects() {
 
   async function runRevealAll() {
     if (!runId) return;
+    // Reveal per-contact (like Research all / Reveal selected) so the progress
+    // bar updates live — how many revealed vs. still pending — instead of sitting
+    // at 0/total while one big backend call runs to completion.
+    const targets = items.filter((p) => !p.email);
+    if (targets.length === 0) {
+      setBatchMessage("All prospects in this run already have an email revealed.");
+      return;
+    }
     if (
       !window.confirm(
-        `Reveal email for all ${unrevealedCount} unrevealed prospect(s) in this run? Uses Apollo credits.`
+        `Reveal email for all ${targets.length} unrevealed prospect(s) in this run? Uses Apollo credits.`
       )
     )
       return;
-    setBatchMessage(null);
-    setProgress({
-      label: "Revealing contacts",
-      running: true,
-      total: unrevealedCount,
-      done: 0,
-      ok: 0,
-      skipped: 0,
-      failed: 0,
-      current: ["Running batch reveal…"],
+    runBulk("Revealing contacts", targets, async (p) => {
+      if (p.email) return "skipped";
+      await revealProspect(p.id);
+      return "ok";
     });
-    try {
-      const result = await batchRevealProspects({ discovery_run_id: runId });
-      await qc.invalidateQueries({ queryKey: ["prospects"] });
-      setBatchMessage(
-        `Reveal done: ${result.revealed} revealed, ${result.skipped} skipped, ${result.failed} failed.`
-      );
-    } catch {
-      setBatchMessage("Batch reveal failed — check Apollo credits and retry.");
-    } finally {
-      setProgress(null);
-    }
   }
 
   async function runResearch() {

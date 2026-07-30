@@ -40,4 +40,18 @@ class DiscoveryRun(Base, TimestampMixin):
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     requested_by: Mapped[Optional[str]] = mapped_column(String(255))
 
+    # --- Background bulk job progress (additive) ---
+    # A discovery run can also drive follow-on bulk jobs: drafting emails, sending
+    # emails, or sending LinkedIn messages to its prospects. These track the most
+    # recent such job so the UI can show a live progress bar and cancel it. Null =
+    # no bulk job has run, so existing runs/behaviour are unaffected.
+    # job_kind: draft_email | send_email | send_linkedin | discovery
+    job_kind: Mapped[Optional[str]] = mapped_column(String(30))
+    # job_status: running | done | failed
+    job_status: Mapped[Optional[str]] = mapped_column(String(20))
+    job_total: Mapped[Optional[int]] = mapped_column(Integer)
+    job_done: Mapped[Optional[int]] = mapped_column(Integer)
+    job_error: Mapped[Optional[str]] = mapped_column(Text)
+    job_cancel_requested: Mapped[Optional[bool]] = mapped_column(default=False)
+
     search_definition = relationship("SearchDefinition", back_populates="discovery_runs")

@@ -198,16 +198,28 @@ export interface DiscoveryRunPayload {
   /** Plain-language goal from AI-assisted setup — drives relevance research. */
   search_goal?: string;
 }
+// Discovery now runs in the background and returns immediately (202) with a
+// pending run; poll getDiscoveryRun(id) until status is completed/failed.
 export const runDiscovery = (payload: DiscoveryRunPayload) =>
   api
-    .post<DiscoveryRun>("/api/discovery/run", payload, {
-      timeout: payload.auto_process ? 600000 : 360000,
-    })
+    .post<DiscoveryRun>("/api/discovery/run", payload, { timeout: 60000 })
     .then((r) => r.data);
 export const listDiscoveryRuns = (params: Record<string, unknown> = {}) =>
   api.get<Page<DiscoveryRun>>("/api/discovery/runs", { params }).then((r) => r.data);
 export const getDiscoveryRun = (id: number) =>
   api.get<DiscoveryRun>(`/api/discovery/runs/${id}`).then((r) => r.data);
+
+// Run-level bulk jobs (all return immediately; poll the run for job_* progress).
+export const revealRunEmails = (id: number) =>
+  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/reveal`).then((r) => r.data);
+export const draftRunEmails = (id: number) =>
+  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-emails`).then((r) => r.data);
+export const sendRunEmails = (id: number) =>
+  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/send-emails`).then((r) => r.data);
+export const sendRunLinkedin = (id: number) =>
+  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/send-linkedin`).then((r) => r.data);
+export const cancelRunJob = (id: number) =>
+  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/cancel-job`).then((r) => r.data);
 export const deleteDiscoveryRun = (id: number) =>
   api
     .delete<{ run_id: number; deleted: Record<string, number>; message: string }>(
