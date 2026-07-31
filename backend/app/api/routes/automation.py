@@ -125,17 +125,19 @@ def automation_status(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.post("/run-now")
+@router.api_route("/run-now", methods=["GET", "POST"])
 def automation_run_now() -> dict:
     """Fire ONE full outreach cycle now (email drip + LinkedIn), on demand.
 
-    Backend trigger only — there is no UI for this. Unlike ``AUTOMATION_RUN_ON_
-    STARTUP`` (which is guarded to fire at most once per UTC day so restarts don't
-    stack runs), this always launches a run when hit, so you can kick off the
-    batch right after a deploy without waiting for the 08:00 UTC schedule. It runs
-    exactly what the daily job runs — same per-account caps, dedupe, and pacing —
-    so re-hitting it is safe: already-contacted people are skipped and each account
-    still stops at its daily cap.
+    Backend trigger only — there is no UI for this. GET and POST both work so it
+    can be triggered by simply opening the URL in a browser. Unlike
+    ``AUTOMATION_RUN_ON_STARTUP`` (guarded to fire at most once per UTC day so
+    restarts don't stack runs), this always launches a run when hit, so you can
+    kick off the batch right after a deploy without waiting for the 08:00 UTC
+    schedule. It runs exactly what the daily job runs — same per-account caps,
+    dedupe, and pacing — so re-hitting it is safe: already-contacted people are
+    skipped, a run already in progress is not duplicated, and each account still
+    stops at its daily cap.
     """
     global _run_thread
     if not settings.automation_enabled:
