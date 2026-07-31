@@ -703,12 +703,9 @@ def run_all_now() -> None:
         logger.info("run_all_now skipped: automation disabled")
         return
 
-    # Email — run each enabled automation campaign SEQUENTIALLY (one at a time),
-    # NOT concurrently. Concurrent agent runs (plus reveals + web workers) overwhelm
-    # SQLite on Azure's network share and corrupt it; one DB writer at a time is far
-    # safer. Each run still drips its sends across the day via the email_scheduler.
+    # Email — one agent run per enabled automation campaign (drips across the day).
     try:
-        from app.services.agent.orchestrator import create_run, execute_run
+        from app.services.agent.orchestrator import launch_run
 
         db = SessionLocal()
         try:
@@ -728,20 +725,11 @@ def run_all_now() -> None:
         finally:
             db.close()
         for principal_id, campaign_id, playbook_id in targets:
-            try:
-                db2 = SessionLocal()
-                try:
-                    run = create_run(
-                        db2, principal_id, "automation-now",
-                        campaign_id=campaign_id, playbook_id=playbook_id,
-                    )
-                    run_id = run.id
-                finally:
-                    db2.close()
-                logger.info("run_all_now: running email campaign %s (sequential)", campaign_id)
-                execute_run(run_id)  # blocks until this campaign completes
-            except Exception:  # noqa: BLE001
-                logger.exception("run_all_now: email campaign %s failed", campaign_id)
+            launch_run(
+                principal_id, trigger="automation-now",
+                campaign_id=campaign_id, playbook_id=playbook_id,
+            )
+            logger.info("run_all_now: launched email run for campaign %s", campaign_id)
     except Exception:  # noqa: BLE001
         logger.exception("run_all_now: email launch failed")
 

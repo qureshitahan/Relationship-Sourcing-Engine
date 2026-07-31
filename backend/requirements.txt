@@ -7,10 +7,6 @@ gunicorn==22.0.0
 SQLAlchemy==2.0.30
 pydantic==2.7.4
 pydantic-settings==2.3.4
-# PostgreSQL driver — REQUIRED in production. SQLite corrupts under the
-# automation's concurrent load on Azure ("database disk image is malformed") and
-# is ephemeral there; set DATABASE_URL=postgresql://... to use Postgres.
-psycopg2-binary==2.9.9
 
 # File parsing / imports
 python-multipart==0.0.9

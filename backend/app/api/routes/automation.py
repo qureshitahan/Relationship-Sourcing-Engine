@@ -6,7 +6,6 @@ Read-only; safe to poll. Returns quickly (a few cheap counts).
 """
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -23,12 +22,6 @@ from app.services import automation
 from app.services.app_settings import get_setting
 
 router = APIRouter(prefix="/automation", tags=["automation"])
-
-# In-process guard so a manual trigger can't stack two full runs on top of each
-# other (each run already stamps last_run_at to block the scheduler; this stops
-# a double-click from launching two at once within a worker).
-_run_lock = threading.Lock()
-_run_thread: threading.Thread | None = None
 
 
 def _emails_sent_today(db: Session, principal_id: int) -> int:
@@ -122,38 +115,4 @@ def automation_status(db: Session = Depends(get_db)) -> dict:
             "total_sent_today": sum(a["sent_today"] for a in linkedin_accounts),
             "accounts": linkedin_accounts,
         },
-    }
-
-
-@router.post("/run-now")
-def automation_run_now() -> dict:
-    """Fire ONE full outreach cycle now (email drip + LinkedIn), on demand.
-
-    Backend trigger only — there is no UI for this. Unlike ``AUTOMATION_RUN_ON_
-    STARTUP`` (which is guarded to fire at most once per UTC day so restarts don't
-    stack runs), this always launches a run when hit, so you can kick off the
-    batch right after a deploy without waiting for the 08:00 UTC schedule. It runs
-    exactly what the daily job runs — same per-account caps, dedupe, and pacing —
-    so re-hitting it is safe: already-contacted people are skipped and each account
-    still stops at its daily cap.
-    """
-    global _run_thread
-    if not settings.automation_enabled:
-        return {
-            "started": False,
-            "reason": "automation is disabled — set AUTOMATION_ENABLED=true first",
-        }
-    with _run_lock:
-        if _run_thread is not None and _run_thread.is_alive():
-            return {"started": False, "reason": "a run is already in progress"}
-        from app.services.automation import run_all_now
-
-        _run_thread = threading.Thread(
-            target=run_all_now, name="automation-run-now-api", daemon=True
-        )
-        _run_thread.start()
-    return {
-        "started": True,
-        "message": "Outreach run started. Watch GET /api/automation/status; "
-        "email.total_sent_today will climb as the drip delivers.",
     }
