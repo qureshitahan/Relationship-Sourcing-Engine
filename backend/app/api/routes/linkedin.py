@@ -453,7 +453,7 @@ def perform_linkedin_send(
         msg.error = None
         action, detail = AuditAction.LINKEDIN_SEND, "Sent LinkedIn DM"
     else:
-        note = (msg.invitation_note or msg.body or "")[:300]
+        note = (msg.invitation_note or msg.body or "")[: settings.linkedin_invite_note_max_chars]
         invite = provider.send_invitation(provider_id=profile.provider_id, note=note)
         if invite.already_connected:
             # Race: they're actually connected — DM instead.

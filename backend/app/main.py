@@ -89,13 +89,23 @@ def create_app() -> FastAPI:
         # of the daily schedule. Set AUTOMATION_RUN_ON_STARTUP=true to kick a run
         # off immediately; unset it afterwards so a restart doesn't re-fire.
         if settings.automation_enabled and settings.automation_run_on_startup:
-            import threading as _threading
+            # Guard: fire at most ONCE per UTC day even if the flag is left on and
+            # Azure restarts the app — otherwise every restart stacks another full
+            # run (duplicate invites, DB-pool pressure).
+            from datetime import datetime as _dt
 
-            from app.services.automation import run_all_now
+            from app.services.app_settings import get_setting, set_setting
 
-            _threading.Thread(
-                target=run_all_now, name="automation-run-now", daemon=True
-            ).start()
+            _today = _dt.utcnow().date().isoformat()
+            if get_setting("automation_startup_run_date") != _today:
+                set_setting("automation_startup_run_date", _today)
+                import threading as _threading
+
+                from app.services.automation import run_all_now
+
+                _threading.Thread(
+                    target=run_all_now, name="automation-run-now", daemon=True
+                ).start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
