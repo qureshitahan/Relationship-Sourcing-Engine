@@ -1,6 +1,7 @@
 """Database engine, session factory, and FastAPI dependency."""
 from __future__ import annotations
 
+import logging
 import os
 from typing import Generator
 
@@ -60,12 +61,23 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Create all tables. For MVP we use create_all; swap to Alembic later."""
+    """Create all tables + apply lightweight migrations — resiliently.
+
+    A corrupted SQLite file (e.g. "database disk image is malformed") must NEVER
+    make the whole app fail to boot and take every page down. So create_all and
+    each migration/backfill step are individually guarded: the server still
+    starts and serves whatever parts of the database are readable, and errors are
+    logged rather than raised. For MVP we use create_all; swap to Alembic later.
+    """
     # Import models so they register on the metadata before create_all.
     from app import models  # noqa: F401
 
-    Base = models.Base
-    Base.metadata.create_all(bind=engine)
+    try:
+        models.Base.metadata.create_all(bind=engine)
+    except Exception:  # noqa: BLE001 - never let a schema op crash boot
+        logging.getLogger(__name__).exception(
+            "create_all failed during init_db; continuing so the app can boot"
+        )
     _apply_lightweight_migrations()
 
 
@@ -212,9 +224,8 @@ def _drop_agent_configs_principal_unique() -> None:
         conn.exec_driver_sql("DROP TABLE agent_configs_old")
 
 
-def _apply_lightweight_migrations() -> None:
-    """Add any missing columns to existing tables (idempotent, SQLite-safe)."""
-    _drop_agent_configs_principal_unique()
+def _add_missing_columns() -> None:
+    """Add any missing additive columns to existing tables (idempotent)."""
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
     with engine.begin() as conn:
@@ -225,8 +236,73 @@ def _apply_lightweight_migrations() -> None:
             for column, ddl_type in columns.items():
                 if column not in present:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}'))
-    _backfill_campaigns()
-    _backfill_contact_campaign_ids()
+
+
+def _is_corruption_error(exc: Exception) -> bool:
+    """True if the exception looks like SQLite file corruption (any of the
+    several ways a damaged page surfaces), so we know to try a REINDEX repair."""
+    msg = str(exc).lower()
+    signatures = (
+        "malformed",            # "database disk image is malformed"
+        "disk image",
+        "is corrupt",
+        "database corruption",
+        "string or blob too big",  # a bogus cell length read from a bad page
+    )
+    return any(s in msg for s in signatures)
+
+
+def _attempt_reindex_repair() -> None:
+    """Best-effort, non-destructive repair: REINDEX rebuilds all indexes from
+    the table rows, which fixes index-level corruption (a common result of the
+    WAL-on-network-share problem). Transactional, so a failure rolls back and
+    leaves the file no worse. Only ever attempted when corruption is detected."""
+    with engine.begin() as conn:
+        conn.exec_driver_sql("REINDEX")
+
+
+def _apply_lightweight_migrations() -> None:
+    """Add missing columns + backfill campaign scoping, each step isolated.
+
+    Every step is wrapped so a failure — most importantly a corrupted-page error
+    hit by a one-time backfill — is logged and skipped instead of crashing app
+    startup (which would 500 every page). On the FIRST corruption error we make a
+    single best-effort REINDEX repair attempt and retry that step; whether or not
+    it succeeds, boot always continues so the readable data stays available.
+    """
+    log = logging.getLogger(__name__)
+    steps = (
+        _drop_agent_configs_principal_unique,
+        _add_missing_columns,
+        _backfill_campaigns,
+        _backfill_contact_campaign_ids,
+    )
+    repair_tried = False
+    for step in steps:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - a migration must never crash boot
+            if _is_corruption_error(exc) and not repair_tried:
+                repair_tried = True
+                log.warning(
+                    "Corruption during '%s' (%s); attempting one-time REINDEX repair",
+                    step.__name__, exc,
+                )
+                try:
+                    _attempt_reindex_repair()
+                    step()  # retry once now that indexes are rebuilt
+                    log.warning("REINDEX repair succeeded; '%s' completed", step.__name__)
+                    continue
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "REINDEX repair/retry of '%s' failed; skipping so the app can boot",
+                        step.__name__,
+                    )
+                    continue
+            log.exception(
+                "DB migration step '%s' failed; continuing so the app can boot",
+                step.__name__,
+            )
 
 
 def _backfill_contact_campaign_ids() -> None:
