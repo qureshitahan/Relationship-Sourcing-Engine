@@ -38,14 +38,42 @@ if not settings.database_url.startswith("sqlite"):
 engine = create_engine(settings.database_url, **_engine_kwargs)
 
 
+def _sqlite_journal_mode() -> str:
+    """Journal mode for the SQLite connection.
+
+    WAL gives better read/write concurrency locally, but it CANNOT be used on a
+    network filesystem: WAL relies on a shared-memory index (the ``-shm`` file)
+    that cannot be maintained over SMB, which is exactly how Azure App Service
+    mounts ``/home``. Using WAL there corrupts the database file under write load
+    ("database disk image is malformed") — the outage we just recovered from. So
+    on such paths we fall back to the classic rollback journal (DELETE), which
+    works correctly over a network share. ``SQLITE_JOURNAL_MODE`` forces a mode.
+    """
+    override = (settings.sqlite_journal_mode or "").strip().upper()
+    if override:
+        return override
+    # Azure App Service serves the app from /home, mounted over SMB. Treat any
+    # absolute /home path as a network share and avoid WAL there.
+    if "/home/" in settings.database_url.lower():
+        return "DELETE"
+    return "WAL"
+
+
 @event.listens_for(engine, "connect")
 def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
-    """WAL mode + busy_timeout reduce 'database is locked' under concurrent load."""
-    if settings.database_url.startswith("sqlite"):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
-        cursor.close()
+    """Tune SQLite per deployment: a network-safe journal mode + a busy_timeout
+    so concurrent access waits for the lock instead of failing, and durable
+    commits on the (weaker-fsync) network share."""
+    if not settings.database_url.startswith("sqlite"):
+        return
+    mode = _sqlite_journal_mode()
+    cursor = dbapi_connection.cursor()
+    cursor.execute(f"PRAGMA journal_mode={mode}")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    # WAL pairs with NORMAL (its recommended setting); the rollback journal on a
+    # network share uses FULL so an interrupted write can always be rolled back.
+    cursor.execute(f"PRAGMA synchronous={'NORMAL' if mode == 'WAL' else 'FULL'}")
+    cursor.close()
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
