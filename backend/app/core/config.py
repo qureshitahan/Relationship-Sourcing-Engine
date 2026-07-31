@@ -219,6 +219,10 @@ class Settings(BaseSettings):
     # Master switch. False (default) => nothing is seeded and no automation
     # scheduler runs, so existing behaviour is completely unchanged.
     automation_enabled: bool = False
+    # Independent LinkedIn on/off. When false, EMAIL still runs but the LinkedIn
+    # daily job is skipped entirely (no discovery, no reveals, no Unipile calls) —
+    # use it to pause LinkedIn while accounts recover from a rate limit.
+    automation_linkedin_enabled: bool = True
     # Per-account confirmation/digest emails are delivered here.
     automation_notify_email: str = "m.usama@tekhqs.com"
     # Daily fire times (UTC). 1PM Pakistan (PKT=UTC+5) = 08:00 UTC for email;
@@ -238,9 +242,18 @@ class Settings(BaseSettings):
     # spread across business hours by the agent's drip scheduler (auto_schedule).
     automation_linkedin_send_delay_seconds: float = 45.0
     # When true, run ONE full paced outreach cycle immediately on startup (in
-    # addition to the daily schedule). Used to kick a run off on demand; unset
-    # after the run so a restart doesn't fire another.
+    # addition to the daily schedule). Guarded to fire at most once per UTC day
+    # even if left on, so restarts don't stack duplicate runs.
     automation_run_on_startup: bool = False
+
+    # DB connection pool (Postgres only; ignored for SQLite). Headroom so the
+    # background jobs (agent runs, LinkedIn worker, bulk reveals) don't starve
+    # web requests -> "QueuePool limit reached" timeouts.
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+    # LinkedIn rejects connection-invitation notes above a length that is well
+    # under the documented 300 for many accounts; keep it conservative.
+    linkedin_invite_note_max_chars: int = 200
     # Optional JSON override of which connected LinkedIn accounts send DMs, e.g.
     # [{"label":"Dalbir","account_id":"…","mailbox_id":"dalbir_tekhqs"}, …].
     # Blank => Dalbir (UNIPILE_ACCOUNT_ID) + Farah (built-in id) mapped to their

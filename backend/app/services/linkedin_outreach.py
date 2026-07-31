@@ -11,6 +11,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.principal import Principal
@@ -24,7 +25,9 @@ _CLOSERS = {
     "talk soon", "looking forward",
 }
 
-INVITE_NOTE_LIMIT = 280  # LinkedIn allows 300; keep headroom.
+# LinkedIn rejects invitation notes above a length well under the documented
+# 300 for many accounts; use the conservative configured cap (default 200).
+INVITE_NOTE_LIMIT = max(80, int(settings.linkedin_invite_note_max_chars))
 
 
 @dataclass

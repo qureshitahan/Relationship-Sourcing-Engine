@@ -440,6 +440,32 @@ def _linkedin_sent_today(db: Session, account_id: str) -> int:
     ).scalar_one()
 
 
+def _already_contacted_on_linkedin(
+    db: Session, account_id: str, linkedin_url: Optional[str]
+) -> bool:
+    """True if THIS account already invited/messaged this LinkedIn profile in any
+    prior run. Dedup by LinkedIn IDENTITY (public identifier), not the contact
+    row — discovery re-surfaces the same people as new rows, and re-inviting them
+    triggers Unipile ``cannot_resend_yet``."""
+    from app.services.linkedin_providers import public_identifier_from_url
+
+    pid = public_identifier_from_url(linkedin_url or "")
+    if not pid:
+        return False
+    n = db.execute(
+        select(func.count())
+        .select_from(LinkedInMessage)
+        .where(
+            LinkedInMessage.from_account == account_id,
+            LinkedInMessage.public_identifier == pid,
+            LinkedInMessage.status.in_(
+                [LinkedInStatus.INVITE_SENT, LinkedInStatus.SENT, LinkedInStatus.REPLIED]
+            ),
+        )
+    ).scalar_one()
+    return n > 0
+
+
 def _run_linkedin_account(db: Session, spec: LinkedInSpec) -> dict:
     """Discover, draft and send up to the daily cap for one LinkedIn account."""
     from app.api.routes.linkedin import SendError, _existing_open_message, perform_linkedin_send
@@ -512,16 +538,34 @@ def _run_linkedin_account(db: Session, spec: LinkedInSpec) -> dict:
     )
 
     # 2) Draft + send up to the remaining budget, paced (jittered anti-burst).
+    # Stop early if the account starts refusing (rate limit) instead of hammering
+    # it with 100 failing calls, and cap total attempts so failures can't run away.
     delay = max(0.0, float(settings.automation_linkedin_send_delay_seconds or 0))
+    attempts = 0
+    consecutive_failures = 0
+    max_attempts = budget + max(10, budget // 5)   # small margin over the cap
+    max_consecutive_failures = 5                   # circuit breaker
     for contact in contacts:
-        if (result["invites"] + result["dms"]) >= budget:
+        if (result["invites"] + result["dms"]) >= budget or attempts >= max_attempts:
+            break
+        if consecutive_failures >= max_consecutive_failures:
+            result["errors"].append(
+                f"stopped early after {consecutive_failures} consecutive send failures "
+                "(account likely at a LinkedIn rate limit)"
+            )
             break
         if not public_identifier_from_url(contact.linkedin_url or "") or contact.do_not_contact:
             result["skipped"] += 1
             continue
+        # Skip if this contact row already has an open message, OR if this account
+        # already invited/messaged this LinkedIn identity in a prior run.
         if _existing_open_message(db, principal.id, contact.id) is not None:
             result["skipped"] += 1
             continue
+        if _already_contacted_on_linkedin(db, spec.account_id, contact.linkedin_url):
+            result["skipped"] += 1
+            continue
+        attempts += 1
         try:
             company = db.get(Company, contact.company_id) if contact.company_id else None
             insight = db.execute(
@@ -554,15 +598,21 @@ def _run_linkedin_account(db: Session, spec: LinkedInSpec) -> dict:
             perform_linkedin_send(db, msg, account_id=spec.account_id)
             if msg.status == LinkedInStatus.SENT:
                 result["dms"] += 1
+                consecutive_failures = 0
             elif msg.status == LinkedInStatus.INVITE_SENT:
                 result["invites"] += 1
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
             if delay:
                 time.sleep(delay + random.uniform(0, delay * 0.5))
         except SendError as exc:
             db.rollback()
+            consecutive_failures += 1
             result["errors"].append(f"{contact.name or contact.id}: {exc.message}")
         except Exception as exc:  # noqa: BLE001
             db.rollback()
+            consecutive_failures += 1
             result["errors"].append(f"{contact.name or contact.id}: {exc}")
     return result
 
@@ -615,6 +665,12 @@ def run_linkedin_daily() -> None:
     """Run the LinkedIn DM job for every configured account (own DB session)."""
     if not settings.automation_enabled:
         return
+    if not settings.automation_linkedin_enabled:
+        logger.info(
+            "LinkedIn automation disabled (AUTOMATION_LINKEDIN_ENABLED=false); "
+            "skipping — email is unaffected"
+        )
+        return
     db = SessionLocal()
     try:
         for spec in linkedin_specs():
@@ -660,6 +716,12 @@ def run_all_now() -> None:
                 )
             ).scalars().all()
             targets = [(c.principal_id, c.id, c.playbook_id) for c in configs]
+            # Stamp last_run_at NOW so today's agent_scheduler tick (same run_hour)
+            # sees these as already-run and won't launch a duplicate concurrent run.
+            _now = datetime.utcnow()
+            for c in configs:
+                c.last_run_at = _now
+            db.commit()
         finally:
             db.close()
         for principal_id, campaign_id, playbook_id in targets:

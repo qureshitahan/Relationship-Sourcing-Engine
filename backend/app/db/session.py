@@ -20,7 +20,21 @@ if settings.database_url.startswith("sqlite"):
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+_engine_kwargs: dict = {"connect_args": connect_args, "future": True}
+if not settings.database_url.startswith("sqlite"):
+    # Postgres (Azure): give the pool headroom + recycle so concurrent background
+    # jobs (agent runs, LinkedIn worker, bulk reveals) don't starve web requests
+    # with "QueuePool limit ... connection timed out", and stale/broken
+    # connections are re-established instead of erroring.
+    _engine_kwargs.update(
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_timeout=30,
+    )
+
+engine = create_engine(settings.database_url, **_engine_kwargs)
 
 
 @event.listens_for(engine, "connect")
