@@ -215,6 +215,43 @@ class Settings(BaseSettings):
     max_outreach_per_company: int = 3
     outreach_cooldown_days: int = 14
 
+    # --- Automated daily outreach (backend-only; opt-in via AUTOMATION_ENABLED) ---
+    # Master switch. False (default) => nothing is seeded and no automation
+    # scheduler runs, so existing behaviour is completely unchanged.
+    automation_enabled: bool = False
+    # Per-account confirmation/digest emails are delivered here.
+    automation_notify_email: str = "m.usama@tekhqs.com"
+    # Daily fire times (UTC). 1PM Pakistan (PKT=UTC+5) = 08:00 UTC for email;
+    # 12PM PKT = 07:00 UTC for LinkedIn. Both run Mon-Fri only.
+    automation_email_hour_utc: int = 8
+    automation_linkedin_hour_utc: int = 7
+    # Per-account daily send targets.
+    automation_email_daily_cap: int = 500
+    automation_linkedin_daily_cap: int = 50
+    # Discover well above the caps so qualify/dedupe/reachability attrition still
+    # leaves enough sendable. Email: ~67% of discovered have a reachable email, so
+    # ~800 discovered -> ~500 sendable. LinkedIn: reveal yields ~90% messageable.
+    automation_email_discover_target: int = 800
+    automation_linkedin_discover_target: int = 120
+    # Pacing (anti-burst): seconds between LinkedIn sends (jittered). 50 invites
+    # at ~45s spreads each account's daily batch over ~40+ minutes. Email is
+    # spread across business hours by the agent's drip scheduler (auto_schedule).
+    automation_linkedin_send_delay_seconds: float = 45.0
+    # When true, run ONE full paced outreach cycle immediately on startup (in
+    # addition to the daily schedule). Used to kick a run off on demand; unset
+    # after the run so a restart doesn't fire another.
+    automation_run_on_startup: bool = False
+    # Optional JSON override of which connected LinkedIn accounts send DMs, e.g.
+    # [{"label":"Dalbir","account_id":"…","mailbox_id":"dalbir_tekhqs"}, …].
+    # Blank => Dalbir (UNIPILE_ACCOUNT_ID) + Farah (built-in id) mapped to their
+    # tekhqs mailboxes.
+    automation_linkedin_accounts_env: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "automation_linkedin_accounts", "AUTOMATION_LINKEDIN_ACCOUNTS"
+        ),
+    )
+
     @property
     def cors_origins(self) -> List[str]:
         return _parse_cors_origins(self.cors_origins_env)

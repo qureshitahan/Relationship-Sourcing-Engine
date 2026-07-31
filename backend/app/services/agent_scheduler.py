@@ -39,6 +39,10 @@ def _tick_once() -> None:
         for config in configs:
             if now.hour != config.run_hour_utc:
                 continue
+            # Automation campaigns opt into weekday-only runs. Other campaigns keep
+            # every-day behaviour (weekdays_only defaults False).
+            if getattr(config, "weekdays_only", False) and now.weekday() >= 5:
+                continue
             if config.last_run_at and config.last_run_at.date() == now.date():
                 continue
             if not config.playbook_id:
