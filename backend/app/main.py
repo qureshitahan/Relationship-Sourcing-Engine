@@ -8,6 +8,10 @@ from app.api.routes import api_router
 from app.core.config import settings
 from app.db.session import init_db
 from app.services.agent_scheduler import start_agent_scheduler, stop_agent_scheduler
+from app.services.automation_scheduler import (
+    start_automation_scheduler,
+    stop_automation_scheduler,
+)
 from app.services.email_scheduler import start_scheduler, stop_scheduler
 from app.services.linkedin_scheduler import (
     start_linkedin_scheduler,
@@ -61,12 +65,44 @@ def create_app() -> FastAPI:
         start_agent_scheduler()
         # Auto-sends LinkedIn messages after invites are accepted + tracks replies.
         start_linkedin_scheduler()
+        # Backend-only automated daily outreach (opt-in via AUTOMATION_ENABLED).
+        # reconcile_automation runs unconditionally so the flag is a true master
+        # switch: enabled => seed/enable the campaigns, disabled => turn any it
+        # created back off. It only ever touches its own "[auto] " campaigns, so
+        # existing campaigns are never affected.
+        try:
+            from app.db.session import SessionLocal
+            from app.services.automation import reconcile_automation
+
+            db = SessionLocal()
+            try:
+                reconcile_automation(db)
+            finally:
+                db.close()
+        except Exception:  # noqa: BLE001 - never block boot on automation setup
+            import logging
+
+            logging.getLogger(__name__).exception("Automation reconcile failed")
+        # Daily LinkedIn DM job (no-op unless automation is enabled).
+        start_automation_scheduler()
+        # On-demand: fire ONE full paced run now (email drip + LinkedIn), on top
+        # of the daily schedule. Set AUTOMATION_RUN_ON_STARTUP=true to kick a run
+        # off immediately; unset it afterwards so a restart doesn't re-fire.
+        if settings.automation_enabled and settings.automation_run_on_startup:
+            import threading as _threading
+
+            from app.services.automation import run_all_now
+
+            _threading.Thread(
+                target=run_all_now, name="automation-run-now", daemon=True
+            ).start()
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
         stop_scheduler()
         stop_agent_scheduler()
         stop_linkedin_scheduler()
+        stop_automation_scheduler()
 
     @app.get("/health", tags=["meta"])
     def health() -> dict:

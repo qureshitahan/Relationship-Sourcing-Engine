@@ -403,10 +403,15 @@ def delete_message(message_id: int, db: Session = Depends(get_db)):
     db.commit()
 
 
-def perform_linkedin_send(db: Session, msg: LinkedInMessage) -> LinkedInMessage:
+def perform_linkedin_send(
+    db: Session, msg: LinkedInMessage, *, account_id: Optional[str] = None
+) -> LinkedInMessage:
     """Send a message: DM if connected, else a connection invitation.
 
-    Shared by the manual /send endpoint. Commits on success; raises SendError.
+    Shared by the manual /send endpoint. ``account_id`` pins which connected
+    LinkedIn account sends (used by the daily automation to alternate Dalbir /
+    Farah); omitted => the active account, i.e. exactly today's behaviour.
+    Commits on success; raises SendError.
     """
     if msg.status not in (LinkedInStatus.APPROVED, LinkedInStatus.INVITE_SENT):
         raise SendError("Message must be APPROVED before sending")
@@ -421,7 +426,7 @@ def perform_linkedin_send(db: Session, msg: LinkedInMessage) -> LinkedInMessage:
     if contact.do_not_contact:
         raise SendError("Prospect is on do-not-contact list")
 
-    provider = get_linkedin_provider()
+    provider = get_linkedin_provider(account_id or None)
     profile = provider.resolve_profile(contact.linkedin_url)
     if not profile.found or not profile.provider_id:
         raise SendError(profile.error or "Could not resolve LinkedIn profile", status_code=502)

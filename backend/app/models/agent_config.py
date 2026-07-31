@@ -43,6 +43,10 @@ class AgentConfig(Base, TimestampMixin):
     paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # UTC hour (0-23) at which the scheduled run fires.
     run_hour_utc: Mapped[int] = mapped_column(Integer, default=13, nullable=False)
+    # When True, the scheduled run only fires Mon-Fri (used by the automated
+    # daily-outreach campaigns). Default False keeps every-day behaviour for all
+    # existing campaigns.
+    weekdays_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Which saved playbook to use (replaces legacy search_definition_id).
     playbook_id: Mapped[Optional[int]] = mapped_column(

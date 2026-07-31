@@ -112,6 +112,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "agent_configs": {
         "name": "VARCHAR(255)",
+        "weekdays_only": "BOOLEAN DEFAULT 0",
         "paused": "BOOLEAN DEFAULT 0",
         "playbook_id": "INTEGER",
         "mode": "VARCHAR(20) DEFAULT 'research'",
