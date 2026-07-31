@@ -251,6 +251,13 @@ class Settings(BaseSettings):
     # web requests -> "QueuePool limit reached" timeouts.
     db_pool_size: int = 10
     db_max_overflow: int = 20
+    # SQLite journal mode. Blank = AUTO: WAL locally (better read concurrency),
+    # but the rollback journal (DELETE) on network-share paths like Azure's
+    # /home. WAL CANNOT work over a network filesystem (its -shm shared-memory
+    # index isn't maintainable over SMB), which is what corrupts the file on
+    # Azure ("database disk image is malformed"). Override to DELETE/WAL/TRUNCATE
+    # only if you need to force one.
+    sqlite_journal_mode: str = ""
     # LinkedIn rejects connection-invitation notes above a length that is well
     # under the documented 300 for many accounts; keep it conservative.
     linkedin_invite_note_max_chars: int = 200
