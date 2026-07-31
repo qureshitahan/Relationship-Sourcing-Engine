@@ -219,6 +219,10 @@ class Settings(BaseSettings):
     # Master switch. False (default) => nothing is seeded and no automation
     # scheduler runs, so existing behaviour is completely unchanged.
     automation_enabled: bool = False
+    # Independent LinkedIn on/off. When false, EMAIL still runs but the LinkedIn
+    # daily job is skipped entirely (no discovery, no reveals, no Unipile calls) —
+    # use it to pause LinkedIn while accounts recover from a rate limit.
+    automation_linkedin_enabled: bool = True
     # Per-account confirmation/digest emails are delivered here.
     automation_notify_email: str = "m.usama@tekhqs.com"
     # Daily fire times (UTC). 1PM Pakistan (PKT=UTC+5) = 08:00 UTC for email;

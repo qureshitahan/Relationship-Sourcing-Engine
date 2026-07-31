@@ -108,6 +108,7 @@ def automation_status(db: Session = Depends(get_db)) -> dict:
             "campaigns": email_campaigns,
         },
         "linkedin": {
+            "enabled": settings.automation_linkedin_enabled,
             "daily_cap_per_account": settings.automation_linkedin_daily_cap,
             "send_delay_seconds": settings.automation_linkedin_send_delay_seconds,
             "last_run_date": get_setting("automation_linkedin_last_run"),

@@ -66,6 +66,9 @@ def start_automation_scheduler() -> None:
     global _thread
     if not settings.automation_enabled:
         return
+    if not settings.automation_linkedin_enabled:
+        logger.info("Automation LinkedIn scheduler not started (LinkedIn disabled)")
+        return
     if settings.linkedin_provider == "stub":
         return
     if _thread is not None and _thread.is_alive():

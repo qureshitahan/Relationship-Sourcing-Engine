@@ -665,6 +665,12 @@ def run_linkedin_daily() -> None:
     """Run the LinkedIn DM job for every configured account (own DB session)."""
     if not settings.automation_enabled:
         return
+    if not settings.automation_linkedin_enabled:
+        logger.info(
+            "LinkedIn automation disabled (AUTOMATION_LINKEDIN_ENABLED=false); "
+            "skipping — email is unaffected"
+        )
+        return
     db = SessionLocal()
     try:
         for spec in linkedin_specs():
