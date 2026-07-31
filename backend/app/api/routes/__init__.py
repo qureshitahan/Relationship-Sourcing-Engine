@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     agent,
+    automation,
     bulk_emails,
     calls,
     campaigns,
@@ -35,5 +36,6 @@ api_router.include_router(linkedin.router)
 api_router.include_router(calls.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(optimization.router)
+api_router.include_router(automation.router)
 
 __all__ = ["api_router"]
