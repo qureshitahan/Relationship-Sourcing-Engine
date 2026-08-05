@@ -448,6 +448,66 @@ def _repair_unreadable_agent_runs() -> None:
     log.warning("agent_runs reset: table recreated empty; run history lost, app functional")
 
 
+def _repair_corrupt_indexes() -> None:
+    """Rebuild indexes that raise "malformed" when the query planner uses them.
+
+    Index-level damage is the common residue of the WAL-on-network-share
+    incident, and it is the *recoverable* kind: the table's rows are intact — an
+    unfiltered scan succeeds — while any filtered query that walks the damaged
+    index errors. Symptom seen in production: ``/api/prospects`` worked but
+    ``?campaign_id=`` 500'd, because only the latter uses the damaged index.
+
+    ``REINDEX`` rebuilds an index from the table it belongs to, so nothing is
+    discarded. ``PRAGMA integrity_check`` names the offending indexes, and a
+    healthy database returns "ok" immediately, keeping this cheap on every boot.
+    """
+    log = logging.getLogger(__name__)
+    if not settings.database_url.startswith("sqlite"):
+        return
+
+    # Fast path: a healthy database answers "ok" and we stop here, so this costs
+    # one cheap check per boot. Note the check ITSELF raises on some damage —
+    # that is a positive corruption signal, not a reason to give up (measured:
+    # integrity_check errors on damage that REINDEX then repairs completely).
+    try:
+        with engine.connect() as conn:
+            rows = conn.exec_driver_sql("PRAGMA integrity_check(100)").fetchall()
+        reports = [str(r[0]) for r in rows]
+        if [r.lower() for r in reports] == ["ok"]:
+            return
+        log.warning(
+            "integrity_check reported %s problem(s), first: %s",
+            len(reports),
+            reports[0][:120],
+        )
+    except Exception as exc:  # noqa: BLE001 - the failure is itself the signal
+        log.warning("integrity_check failed (%s); treating as corruption", exc)
+
+    # REINDEX rebuilds each index from the table's own rows, so no data is
+    # discarded. Per table rather than globally: one unrecoverable table must
+    # not stop every other table from being repaired.
+    try:
+        tables = sorted(inspect(engine).get_table_names())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not list tables for index repair: %s", exc)
+        return
+
+    repaired: list[str] = []
+    failed: list[str] = []
+    for table in tables:
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f'REINDEX "{table}"')
+            repaired.append(table)
+        except Exception:  # noqa: BLE001 - keep going; report at the end
+            failed.append(table)
+    log.warning(
+        "index repair: reindexed %s table(s); failed on %s",
+        len(repaired),
+        failed or "none",
+    )
+
+
 def _apply_lightweight_migrations() -> None:
     """Add missing columns + backfill campaign scoping, each step isolated.
 
@@ -462,8 +522,11 @@ def _apply_lightweight_migrations() -> None:
         _drop_agent_configs_principal_unique,
         _add_missing_columns,
         # After columns exist (the ORM probe names them all), quarantine any
-        # rows a prior corruption event left unreadable.
+        # rows a prior corruption event left unreadable...
         _repair_unreadable_agent_runs,
+        # ...then rebuild any index it also damaged, so filtered queries
+        # (campaign pages, prospect lists) stop erroring.
+        _repair_corrupt_indexes,
         _backfill_campaigns,
         _backfill_contact_campaign_ids,
     )
