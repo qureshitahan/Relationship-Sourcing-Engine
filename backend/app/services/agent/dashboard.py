@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,32 @@ def _run_history(db: Session, query: Callable[[], T], default: T) -> T:
     except Exception:  # noqa: BLE001 - degrading history must never fail a page
         db.rollback()
         logger.warning("agent_runs query failed; showing run history as empty", exc_info=True)
+        return default
+
+
+def _campaign_filter(db: Session, query_ix, query_scan, default):
+    """Run a contacts-by-campaign query; on failure retry bypassing the index.
+
+    ``ix_contacts_campaign_id`` was damaged by the same corruption incident as
+    agent_runs. The contacts ROWS are intact (unfiltered scans succeed), so on
+    an index error we retry with SQLite's ``NOT INDEXED`` clause, which forbids
+    the planner from touching ANY index on the table (a bare ``+column`` is not
+    enough: for counts the planner may still scan the damaged index as the
+    cheapest b-tree) and scans the healthy table instead — correct results,
+    slightly slower, no data hidden. If even the scan fails, fall back to
+    ``default`` so the page still renders. The boot-time repair rebuilds the
+    index; this keeps pages truthful meanwhile.
+    """
+    try:
+        return query_ix()
+    except Exception:  # noqa: BLE001 - damaged index
+        db.rollback()
+        logger.warning("contacts campaign_id index query failed; retrying via table scan")
+    try:
+        return query_scan()
+    except Exception:  # noqa: BLE001 - damage beyond the index
+        db.rollback()
+        logger.warning("contacts table-scan fallback failed too", exc_info=True)
         return default
 
 
@@ -591,33 +617,63 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
 
 def _campaign_contact_count(db: Session, campaign_id: int) -> int:
     return int(
-        db.execute(
-            select(func.count(Contact.id)).where(Contact.campaign_id == campaign_id)
-        ).scalar_one()
+        _campaign_filter(
+            db,
+            lambda: db.execute(
+                select(func.count(Contact.id)).where(Contact.campaign_id == campaign_id)
+            ).scalar_one(),
+            lambda: db.execute(
+                text("SELECT count(*) FROM contacts NOT INDEXED WHERE campaign_id = :cid"),
+                {"cid": campaign_id},
+            ).scalar_one(),
+            0,
+        )
     )
 
 
 def _campaign_qualified_count(db: Session, campaign_id: int, config: AgentConfig) -> int:
     floor = float(config.qualify_min or 40)
     return int(
-        db.execute(
-            select(func.count(Contact.id)).where(
-                Contact.campaign_id == campaign_id,
-                Contact.relevance_score.isnot(None),
-                Contact.relevance_score >= floor,
-            )
-        ).scalar_one()
+        _campaign_filter(
+            db,
+            lambda: db.execute(
+                select(func.count(Contact.id)).where(
+                    Contact.campaign_id == campaign_id,
+                    Contact.relevance_score.isnot(None),
+                    Contact.relevance_score >= floor,
+                )
+            ).scalar_one(),
+            lambda: db.execute(
+                text(
+                    "SELECT count(*) FROM contacts NOT INDEXED WHERE campaign_id = :cid "
+                    "AND relevance_score IS NOT NULL AND relevance_score >= :floor"
+                ),
+                {"cid": campaign_id, "floor": floor},
+            ).scalar_one(),
+            0,
+        )
     )
 
 
 def _campaign_rejected_count(db: Session, campaign_id: int, config: AgentConfig) -> int:
     return int(
-        db.execute(
-            select(func.count(Contact.id)).where(
-                Contact.campaign_id == campaign_id,
-                Contact.status == ProspectStatus.REJECTED,
-            )
-        ).scalar_one()
+        _campaign_filter(
+            db,
+            lambda: db.execute(
+                select(func.count(Contact.id)).where(
+                    Contact.campaign_id == campaign_id,
+                    Contact.status == ProspectStatus.REJECTED,
+                )
+            ).scalar_one(),
+            lambda: db.execute(
+                text(
+                    "SELECT count(*) FROM contacts NOT INDEXED "
+                    "WHERE campaign_id = :cid AND status = :st"
+                ),
+                {"cid": campaign_id, "st": ProspectStatus.REJECTED},
+            ).scalar_one(),
+            0,
+        )
     )
 
 
@@ -627,10 +683,23 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
     if config is None:
         raise ValueError("Campaign not found")
 
-    contacts = list(
-        db.execute(
-            select(Contact).where(Contact.campaign_id == campaign_id)
-        ).scalars().all()
+    contacts = _campaign_filter(
+        db,
+        lambda: list(
+            db.execute(
+                select(Contact).where(Contact.campaign_id == campaign_id)
+            ).scalars().all()
+        ),
+        lambda: list(
+            db.execute(
+                select(Contact).from_statement(
+                    text(
+                        "SELECT * FROM contacts NOT INDEXED WHERE campaign_id = :cid"
+                    ).bindparams(cid=campaign_id)
+                )
+            ).scalars().all()
+        ),
+        [],
     )
     contact_ids = {c.id for c in contacts}
 

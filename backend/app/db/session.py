@@ -465,6 +465,15 @@ def _repair_corrupt_indexes() -> None:
     if not settings.database_url.startswith("sqlite"):
         return
 
+    # A quarantined remains-table from a previous rebuild still carries the
+    # corrupt pages, poisoning integrity_check and REINDEX below. Best effort:
+    # DROP frees pages without parsing row content.
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE IF EXISTS agent_runs_damaged")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not drop quarantined agent_runs_damaged: %s", exc)
+
     # Fast path: a healthy database answers "ok" and we stop here, so this costs
     # one cheap check per boot. Note the check ITSELF raises on some damage —
     # that is a positive corruption signal, not a reason to give up (measured:
@@ -506,6 +515,40 @@ def _repair_corrupt_indexes() -> None:
         len(repaired),
         failed or "none",
     )
+
+    # Escalation for tables REINDEX could not fix: replace each named index
+    # outright. DROP discards the damaged b-tree without fully parsing it, and
+    # CREATE rebuilds from the (healthy) table rows — measured to succeed on
+    # damage classes where an in-place REINDEX still errors. sqlite_master keeps
+    # each index's original DDL; autoindexes (sql IS NULL) can't be dropped and
+    # are skipped.
+    for table in failed:
+        try:
+            with engine.connect() as conn:
+                index_ddl = conn.exec_driver_sql(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                    (table,),
+                ).fetchall()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not list indexes of %s: %s", table, exc)
+            continue
+        rebuilt: list[str] = []
+        unrecovered: list[str] = []
+        for index_name, ddl in index_ddl:
+            try:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{index_name}"')
+                    conn.exec_driver_sql(ddl)
+                rebuilt.append(index_name)
+            except Exception:  # noqa: BLE001 - keep going; report at the end
+                unrecovered.append(index_name)
+        log.warning(
+            "index replace on %s: rebuilt %s; unrecovered %s",
+            table,
+            rebuilt or "none",
+            unrecovered or "none",
+        )
 
 
 def _apply_lightweight_migrations() -> None:
