@@ -37,7 +37,11 @@ class Contact(Base, TimestampMixin):
     phone: Mapped[Optional[str]] = mapped_column(String(50))
     # pending | revealed | unavailable | failed — set when Apollo phone webhook is requested.
     phone_reveal_status: Mapped[Optional[str]] = mapped_column(String(20))
-    linkedin_url: Mapped[Optional[str]] = mapped_column(String(512))
+    # Indexed: discovery dedup (_find_contact) looks up by linkedin_url on every
+    # candidate. Without an index this is a full table scan per candidate, which
+    # only gets worse as the contacts table grows and as broader search filters
+    # (no title/company-type filter) surface more candidates per run.
+    linkedin_url: Mapped[Optional[str]] = mapped_column(String(512), index=True)
     # City/region from discovery or enrichment (helps disambiguate people).
     location: Mapped[Optional[str]] = mapped_column(String(255))
 
