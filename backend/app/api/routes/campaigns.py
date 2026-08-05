@@ -6,6 +6,7 @@ principal's mailbox daily cap for deliverability.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -153,11 +154,23 @@ def create_campaign(payload: CampaignCreateRequest, db: Session = Depends(get_db
             campaign_id=config.id,
         )
 
-    summary = list_campaigns(db, days=14)
-    for item in summary["items"]:
-        if item["id"] == config.id:
-            return item
-    # Fallback minimal summary (should not happen).
+    # The campaign is committed (and its first run launched) at this point, so
+    # the response must not be able to fail the request: a dashboard-aggregation
+    # error here made the UI report "could not create" for campaigns that WERE
+    # created, and every retry stacked a duplicate. Fall back to the minimal
+    # summary instead.
+    try:
+        summary = list_campaigns(db, days=14)
+        for item in summary["items"]:
+            if item["id"] == config.id:
+                return item
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "list_campaigns failed while building the create response; "
+            "returning minimal summary for campaign %s",
+            config.id,
+        )
+    # Fallback minimal summary.
     return {
         "id": config.id,
         "name": config.name or "Campaign",
