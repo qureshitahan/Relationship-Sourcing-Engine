@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 
 import { createCampaign, listPrincipals, planAgentSearch } from "../api/client";
 import { ChipSelect } from "../components/ChipSelect";
@@ -17,6 +18,27 @@ const inputCls =
   "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100";
 
 const STEPS = ["Principal", "Goal", "Questions", "Audience", "Settings", "Launch"] as const;
+
+/** Human-readable reason from an API error, so failures name the actual problem
+ *  (missing prerequisite, validation issue, server fault) instead of a generic line. */
+function apiErrorMessage(e: unknown, fallback: string): string {
+  if (isAxiosError(e)) {
+    if (!e.response) return "Cannot reach the server — check your connection and try again.";
+    const detail: unknown = e.response.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail) && detail.length) {
+      // FastAPI validation errors: [{loc: ["body", "field"], msg: "..."}]
+      const first = detail[0] as { loc?: unknown[]; msg?: string };
+      const field = Array.isArray(first.loc)
+        ? first.loc.filter((p) => p !== "body").join(".")
+        : "";
+      if (first.msg) return field ? `${field}: ${first.msg}` : first.msg;
+    }
+    if (e.response.status >= 500)
+      return `${fallback} The server hit an internal error (${e.response.status}) — the campaign may still have been created; check All campaigns before retrying.`;
+  }
+  return fallback;
+}
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -105,7 +127,7 @@ export default function CampaignWizard() {
         setStep(3);
       }
     },
-    onError: () => setError("Could not plan the search. Try again."),
+    onError: (e) => setError(apiErrorMessage(e, "Could not plan the search. Try again.")),
   });
 
   const create = useMutation({
@@ -140,7 +162,7 @@ export default function CampaignWizard() {
         run_now: runNow,
       }),
     onSuccess: (c) => navigate(`/campaigns/${c.id}`),
-    onError: () => setError("Could not create the campaign."),
+    onError: (e) => setError(apiErrorMessage(e, "Could not create the campaign.")),
   });
 
   const goalReady = objective.trim().length >= 10;

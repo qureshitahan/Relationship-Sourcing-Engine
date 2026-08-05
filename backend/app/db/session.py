@@ -289,6 +289,76 @@ def _attempt_reindex_repair() -> None:
         conn.exec_driver_sql("REINDEX")
 
 
+def _repair_unreadable_agent_runs() -> None:
+    """Quarantine agent_runs rows the ORM can no longer load.
+
+    Legacy of the SQLite-on-Azure corruption incident: a single damaged row
+    (typically a truncated JSON ``summary``) makes EVERY full-table query fail —
+    the campaigns list, the run history, and the response step of campaign
+    creation all 500 — while targeted per-id lookups still work, so the damage
+    stays invisible until those pages break.
+
+    Probe with the same query shape the dashboards use; a healthy table returns
+    early. On failure, hunt row-by-row and heal with the least destructive step
+    that works: clear the row's ``summary`` in place via raw SQL (no JSON parse),
+    and only if the row STILL cannot be loaded, delete that row. Never raises —
+    the caller's step guard logs and continues so boot is never blocked.
+    """
+    log = logging.getLogger(__name__)
+    inspector = inspect(engine)
+    if "agent_runs" not in inspector.get_table_names():
+        return
+
+    from app.models.agent_run import AgentRun  # local import to avoid cycles
+    from sqlalchemy import select
+
+    probe = SessionLocal()
+    try:
+        probe.execute(select(AgentRun)).scalars().all()
+        return  # every row loads — nothing to repair
+    except Exception as exc:  # noqa: BLE001 - fall through to the row hunt
+        probe.rollback()
+        log.warning("agent_runs full scan failed (%s); hunting unreadable rows", exc)
+    finally:
+        probe.close()
+
+    with engine.connect() as conn:
+        ids = [r[0] for r in conn.exec_driver_sql("SELECT id FROM agent_runs ORDER BY id")]
+
+    def _loads(run_id: int) -> bool:
+        s = SessionLocal()
+        try:
+            s.get(AgentRun, run_id)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+        finally:
+            s.close()
+
+    healed: list[int] = []
+    deleted: list[int] = []
+    for run_id in ids:
+        if _loads(run_id):
+            continue
+        # Least destructive first: drop only the corrupt JSON payload.
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE agent_runs SET summary = NULL WHERE id = :id"),
+                {"id": run_id},
+            )
+        if _loads(run_id):
+            healed.append(run_id)
+            continue
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM agent_runs WHERE id = :id"), {"id": run_id})
+        deleted.append(run_id)
+    log.warning(
+        "agent_runs repair: cleared summary on %s, deleted unreadable %s",
+        healed or "none",
+        deleted or "none",
+    )
+
+
 def _apply_lightweight_migrations() -> None:
     """Add missing columns + backfill campaign scoping, each step isolated.
 
@@ -302,6 +372,9 @@ def _apply_lightweight_migrations() -> None:
     steps = (
         _drop_agent_configs_principal_unique,
         _add_missing_columns,
+        # After columns exist (the ORM probe names them all), quarantine any
+        # rows a prior corruption event left unreadable.
+        _repair_unreadable_agent_runs,
         _backfill_campaigns,
         _backfill_contact_campaign_ids,
     )
