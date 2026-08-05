@@ -290,19 +290,25 @@ def _attempt_reindex_repair() -> None:
 
 
 def _repair_unreadable_agent_runs() -> None:
-    """Quarantine agent_runs rows the ORM can no longer load.
+    """Heal agent_runs rows the ORM can no longer load.
 
     Legacy of the SQLite-on-Azure corruption incident: a single damaged row
-    (typically a truncated JSON ``summary``) makes EVERY full-table query fail —
-    the campaigns list, the run history, and the response step of campaign
-    creation all 500 — while targeted per-id lookups still work, so the damage
-    stays invisible until those pages break.
+    makes EVERY full-table query fail — the campaigns list, the run history,
+    and the response step of campaign creation all 500 — while targeted per-id
+    lookups still work, so the damage stays invisible until those pages break.
 
     Probe with the same query shape the dashboards use; a healthy table returns
-    early. On failure, hunt row-by-row and heal with the least destructive step
-    that works: clear the row's ``summary`` in place via raw SQL (no JSON parse),
-    and only if the row STILL cannot be loaded, delete that row. Never raises —
-    the caller's step guard logs and continues so boot is never blocked.
+    early. On failure, triage row by row:
+
+      * soft damage (row reads, but e.g. a truncated JSON ``summary`` breaks the
+        ORM load) → clear the summary in place, counters preserved;
+      * hard damage (the page itself errors on read OR on write — in-place
+        UPDATE/DELETE raise "database disk image is malformed") → rebuild the
+        table: rename it aside, recreate fresh from the model, copy the
+        readable rows back one by one, and drop the damaged remains. Same
+        rebuild pattern as :func:`_drop_agent_configs_principal_unique`.
+
+    The caller's step guard logs and continues on error, so boot never blocks.
     """
     log = logging.getLogger(__name__)
     inspector = inspect(engine)
@@ -322,10 +328,13 @@ def _repair_unreadable_agent_runs() -> None:
     finally:
         probe.close()
 
+    if not settings.database_url.startswith("sqlite"):
+        return  # rebuild below is SQLite-specific; other backends: investigate manually
+
     with engine.connect() as conn:
         ids = [r[0] for r in conn.exec_driver_sql("SELECT id FROM agent_runs ORDER BY id")]
 
-    def _loads(run_id: int) -> bool:
+    def _orm_loads(run_id: int) -> bool:
         s = SessionLocal()
         try:
             s.get(AgentRun, run_id)
@@ -335,27 +344,90 @@ def _repair_unreadable_agent_runs() -> None:
         finally:
             s.close()
 
+    good: list[int] = []
     healed: list[int] = []
-    deleted: list[int] = []
+    bad: list[int] = []
     for run_id in ids:
-        if _loads(run_id):
+        try:
+            with engine.connect() as conn:
+                conn.execute(
+                    text("SELECT * FROM agent_runs WHERE id = :id"), {"id": run_id}
+                ).fetchall()
+            raw_ok = True
+        except Exception:  # noqa: BLE001 - page-level damage
+            raw_ok = False
+        if raw_ok and _orm_loads(run_id):
+            good.append(run_id)
             continue
-        # Least destructive first: drop only the corrupt JSON payload.
+        if raw_ok:
+            # Soft damage: try clearing only the corrupt JSON payload in place.
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("UPDATE agent_runs SET summary = NULL WHERE id = :id"),
+                        {"id": run_id},
+                    )
+                if _orm_loads(run_id):
+                    healed.append(run_id)
+                    good.append(run_id)
+                    continue
+            except Exception:  # noqa: BLE001 - write to the row also fails
+                pass
+        bad.append(run_id)
+
+    if not bad:
+        # Rows all read individually yet the scan fails: btree structure damage.
         with engine.begin() as conn:
-            conn.execute(
-                text("UPDATE agent_runs SET summary = NULL WHERE id = :id"),
-                {"id": run_id},
-            )
-        if _loads(run_id):
-            healed.append(run_id)
-            continue
+            conn.exec_driver_sql("REINDEX")
+        log.warning("agent_runs repair: no bad rows; REINDEX attempted")
+        return
+
+    # Hard-damaged rows cannot be UPDATEd or DELETEd in place — rebuild the
+    # table around them from the rows that are still readable.
+    from app import models
+
+    old_cols = [c["name"] for c in inspector.get_columns("agent_runs")]
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE IF EXISTS agent_runs_damaged")
+        conn.exec_driver_sql("ALTER TABLE agent_runs RENAME TO agent_runs_damaged")
+        # Named indexes follow the rename and keep their names; drop them so the
+        # fresh table can recreate identically-named indexes without collision.
+        leftover_idx = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='agent_runs_damaged' AND name NOT LIKE 'sqlite_autoindex%'"
+        ).fetchall()
+        for (idx_name,) in leftover_idx:
+            conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{idx_name}"')
+
+    models.Base.metadata.tables["agent_runs"].create(bind=engine)
+
+    new_cols = [c["name"] for c in inspect(engine).get_columns("agent_runs")]
+    shared = ", ".join(c for c in old_cols if c in new_cols)
+    copied = 0
+    skipped: list[int] = list(bad)
+    for run_id in good:
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"INSERT INTO agent_runs ({shared}) "
+                        f"SELECT {shared} FROM agent_runs_damaged WHERE id = :id"
+                    ),
+                    {"id": run_id},
+                )
+            copied += 1
+        except Exception:  # noqa: BLE001 - never let one row abort the rebuild
+            skipped.append(run_id)
+    try:
         with engine.begin() as conn:
-            conn.execute(text("DELETE FROM agent_runs WHERE id = :id"), {"id": run_id})
-        deleted.append(run_id)
+            conn.exec_driver_sql("DROP TABLE agent_runs_damaged")
+    except Exception:  # noqa: BLE001 - dropping damaged pages can itself fail
+        log.warning("could not drop agent_runs_damaged; quarantined table left behind")
     log.warning(
-        "agent_runs repair: cleared summary on %s, deleted unreadable %s",
+        "agent_runs rebuild: copied %s row(s), healed summary on %s, skipped unreadable %s",
+        copied,
         healed or "none",
-        deleted or "none",
+        sorted(set(skipped)) or "none",
     )
 
 
