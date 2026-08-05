@@ -387,48 +387,65 @@ def _repair_unreadable_agent_runs() -> None:
     from app import models
 
     old_cols = [c["name"] for c in inspector.get_columns("agent_runs")]
-    with engine.begin() as conn:
-        conn.exec_driver_sql("DROP TABLE IF EXISTS agent_runs_damaged")
-        conn.exec_driver_sql("ALTER TABLE agent_runs RENAME TO agent_runs_damaged")
-        # Named indexes follow the rename and keep their names; drop them so the
-        # fresh table can recreate identically-named indexes without collision.
-        leftover_idx = conn.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND tbl_name='agent_runs_damaged' AND name NOT LIKE 'sqlite_autoindex%'"
-        ).fetchall()
-        for (idx_name,) in leftover_idx:
-            conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{idx_name}"')
-
-    models.Base.metadata.tables["agent_runs"].create(bind=engine)
-
-    new_cols = [c["name"] for c in inspect(engine).get_columns("agent_runs")]
-    shared = ", ".join(c for c in old_cols if c in new_cols)
     copied = 0
     skipped: list[int] = list(bad)
-    for run_id in good:
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        f"INSERT INTO agent_runs ({shared}) "
-                        f"SELECT {shared} FROM agent_runs_damaged WHERE id = :id"
-                    ),
-                    {"id": run_id},
-                )
-            copied += 1
-        except Exception:  # noqa: BLE001 - never let one row abort the rebuild
-            skipped.append(run_id)
     try:
         with engine.begin() as conn:
-            conn.exec_driver_sql("DROP TABLE agent_runs_damaged")
-    except Exception:  # noqa: BLE001 - dropping damaged pages can itself fail
-        log.warning("could not drop agent_runs_damaged; quarantined table left behind")
-    log.warning(
-        "agent_runs rebuild: copied %s row(s), healed summary on %s, skipped unreadable %s",
-        copied,
-        healed or "none",
-        sorted(set(skipped)) or "none",
-    )
+            conn.exec_driver_sql("DROP TABLE IF EXISTS agent_runs_damaged")
+            conn.exec_driver_sql("ALTER TABLE agent_runs RENAME TO agent_runs_damaged")
+            # Named indexes follow the rename and keep their names; drop them so
+            # the fresh table can recreate identically-named indexes safely.
+            leftover_idx = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='agent_runs_damaged' AND name NOT LIKE 'sqlite_autoindex%'"
+            ).fetchall()
+            for (idx_name,) in leftover_idx:
+                conn.exec_driver_sql(f'DROP INDEX IF EXISTS "{idx_name}"')
+
+        models.Base.metadata.tables["agent_runs"].create(bind=engine)
+
+        new_cols = [c["name"] for c in inspect(engine).get_columns("agent_runs")]
+        shared = ", ".join(c for c in old_cols if c in new_cols)
+        for run_id in good:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"INSERT INTO agent_runs ({shared}) "
+                            f"SELECT {shared} FROM agent_runs_damaged WHERE id = :id"
+                        ),
+                        {"id": run_id},
+                    )
+                copied += 1
+            except Exception:  # noqa: BLE001 - one bad row must not abort the rebuild
+                skipped.append(run_id)
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("DROP TABLE agent_runs_damaged")
+        except Exception:  # noqa: BLE001 - dropping damaged pages can itself fail
+            log.warning("could not drop agent_runs_damaged; quarantined table left behind")
+        log.warning(
+            "agent_runs rebuild: copied %s row(s), healed summary on %s, skipped unreadable %s",
+            copied,
+            healed or "none",
+            sorted(set(skipped)) or "none",
+        )
+        return
+    except Exception:  # noqa: BLE001 - fall through to the last-resort reset
+        log.exception("agent_runs rebuild failed; falling back to a clean empty table")
+
+    # Last resort. agent_runs is history only — no other table's integrity
+    # depends on it — so an empty table beats a broken one that 500s every
+    # campaign page. DROP frees pages without parsing row content, so it
+    # succeeds on damage that defeats every read-based recovery above.
+    for table in ("agent_runs", "agent_runs_damaged"):
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")
+        except Exception:  # noqa: BLE001
+            log.warning("could not drop %s during reset", table)
+    models.Base.metadata.tables["agent_runs"].create(bind=engine)
+    log.warning("agent_runs reset: table recreated empty; run history lost, app functional")
 
 
 def _apply_lightweight_migrations() -> None:

@@ -1,11 +1,13 @@
 """Daily campaign rollup for the autonomous agent UI."""
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.agent_config import AgentConfig
@@ -18,6 +20,34 @@ from app.models.company import Company
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
 from app.services.inbound_text import clean_inbound_reply
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _run_history(db: Session, query: Callable[[], T], default: T) -> T:
+    """Run an ``agent_runs`` query, degrading to ``default`` if it cannot execute.
+
+    agent_runs is history: nothing else depends on it structurally. So a damaged
+    row there must not take down the campaigns list or a campaign dashboard —
+    the pages an operator actually works from, and whose real content (people,
+    drafts, replies) lives in other tables. Run counters degrade to
+    zero/empty and the pages still render; the boot-time repair in
+    ``db.session`` rebuilds the table on the next restart.
+
+    Rolls the session back on failure so the caller's later queries still work.
+
+    Catches broadly on purpose: corruption surfaces as ``DatabaseError`` for a
+    damaged page but as ``JSONDecodeError`` for a damaged ``summary`` payload,
+    and neither should be able to take a page down.
+    """
+    try:
+        return query()
+    except Exception:  # noqa: BLE001 - degrading history must never fail a page
+        db.rollback()
+        logger.warning("agent_runs query failed; showing run history as empty", exc_info=True)
+        return default
 
 
 def _unresolved_interrupted_run(
@@ -73,16 +103,20 @@ def campaign_dashboard(
     """Aggregate agent runs and email outcomes by calendar day (UTC)."""
     since = datetime.utcnow() - timedelta(days=max(1, days))
 
-    runs = list(
-        db.execute(
-            select(AgentRun)
-            .where(
-                AgentRun.principal_id == principal_id,
-                AgentRun.started_at.isnot(None),
-                AgentRun.started_at >= since,
-            )
-            .order_by(AgentRun.started_at.desc())
-        ).scalars().all()
+    runs = _run_history(
+        db,
+        lambda: list(
+            db.execute(
+                select(AgentRun)
+                .where(
+                    AgentRun.principal_id == principal_id,
+                    AgentRun.started_at.isnot(None),
+                    AgentRun.started_at >= since,
+                )
+                .order_by(AgentRun.started_at.desc())
+            ).scalars().all()
+        ),
+        [],
     )
 
     by_day: dict[date, dict[str, Any]] = defaultdict(
@@ -205,18 +239,22 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
 
     # Latest running run per campaign.
     running: dict[int, AgentRun] = {}
-    for r in db.execute(
-        select(AgentRun).where(
-            AgentRun.status == "running",
-            AgentRun.campaign_id.in_(campaign_ids),
-        )
-    ).scalars().all():
+    for r in _run_history(
+        db,
+        lambda: db.execute(
+            select(AgentRun).where(
+                AgentRun.status == "running",
+                AgentRun.campaign_id.in_(campaign_ids),
+            )
+        ).scalars().all(),
+        [],
+    ):
         running[r.campaign_id] = r
 
     # Interrupted runs that still need Continue (no completed run after them).
     needs_continue: dict[int, AgentRun] = {}
     for cid in campaign_ids:
-        interrupted = _unresolved_interrupted_run(db, cid)
+        interrupted = _run_history(db, lambda: _unresolved_interrupted_run(db, cid), None)
         if interrupted is not None:
             needs_continue[cid] = interrupted
 
@@ -315,16 +353,20 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
 
     since = datetime.utcnow() - timedelta(days=max(1, days))
 
-    runs = list(
-        db.execute(
-            select(AgentRun)
-            .where(
-                AgentRun.campaign_id == campaign_id,
-                AgentRun.started_at.isnot(None),
-                AgentRun.started_at >= since,
-            )
-            .order_by(AgentRun.started_at.desc())
-        ).scalars().all()
+    runs = _run_history(
+        db,
+        lambda: list(
+            db.execute(
+                select(AgentRun)
+                .where(
+                    AgentRun.campaign_id == campaign_id,
+                    AgentRun.started_at.isnot(None),
+                    AgentRun.started_at >= since,
+                )
+                .order_by(AgentRun.started_at.desc())
+            ).scalars().all()
+        ),
+        [],
     )
 
     by_day: dict[date, dict[str, Any]] = defaultdict(
@@ -451,23 +493,33 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         }
 
     # Last completed (or most recent) run for the funnel visual.
-    last_run = db.execute(
-        select(AgentRun)
-        .where(AgentRun.campaign_id == campaign_id)
-        .order_by(AgentRun.created_at.desc())
-    ).scalars().first()
+    last_run = _run_history(
+        db,
+        lambda: db.execute(
+            select(AgentRun)
+            .where(AgentRun.campaign_id == campaign_id)
+            .order_by(AgentRun.created_at.desc())
+        ).scalars().first(),
+        None,
+    )
     last_run_out = _run_snapshot(last_run)
 
     # A failed run left by a server restart — only surface while unresolved.
     # After Continue (or any completed run afterward), the banner goes away.
-    interrupted_run = _unresolved_interrupted_run(db, campaign_id)
+    interrupted_run = _run_history(
+        db, lambda: _unresolved_interrupted_run(db, campaign_id), None
+    )
 
-    running_run = db.execute(
-        select(AgentRun).where(
-            AgentRun.campaign_id == campaign_id,
-            AgentRun.status == "running",
-        )
-    ).scalars().first()
+    running_run = _run_history(
+        db,
+        lambda: db.execute(
+            select(AgentRun).where(
+                AgentRun.campaign_id == campaign_id,
+                AgentRun.status == "running",
+            )
+        ).scalars().first(),
+        None,
+    )
     current_run_out = _run_snapshot(running_run)
 
     # Daily-off without the paused flag is leftover from the old "Turn off
@@ -586,11 +638,15 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
         return {"campaign_id": campaign_id, "items": [], "total": 0}
 
     # Latest per-person pipeline status from the most recent agent run.
-    latest_run = db.execute(
-        select(AgentRun)
-        .where(AgentRun.campaign_id == campaign_id)
-        .order_by(AgentRun.created_at.desc())
-    ).scalars().first()
+    latest_run = _run_history(
+        db,
+        lambda: db.execute(
+            select(AgentRun)
+            .where(AgentRun.campaign_id == campaign_id)
+            .order_by(AgentRun.created_at.desc())
+        ).scalars().first(),
+        None,
+    )
     pipeline_status: dict[int, str] = {}
     if latest_run and latest_run.summary:
         for p in latest_run.summary.get("people") or []:

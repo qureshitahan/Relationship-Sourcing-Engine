@@ -1,10 +1,12 @@
 """Autonomous outreach agent: planning, playbooks, config, runs."""
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -28,6 +30,8 @@ from app.schemas.requests import (
 from app.services.agent import get_or_create_config, launch_run
 from app.services.agent.planner import criteria_from_dict, plan_agent_search
 from app.services.agent.dashboard import campaign_dashboard, list_campaigns
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -329,8 +333,16 @@ def list_runs(
         query = query.where(AgentRun.principal_id == principal_id)
         count_query = count_query.where(AgentRun.principal_id == principal_id)
     query = query.order_by(AgentRun.created_at.desc()).limit(limit).offset(offset)
-    items = db.execute(query).scalars().all()
-    total = db.execute(count_query).scalar_one()
+    # Run history is non-essential: if agent_runs is unreadable (corrupt row), an
+    # empty list keeps every page that embeds this list working until the
+    # boot-time repair rebuilds the table.
+    try:
+        items = db.execute(query).scalars().all()
+        total = db.execute(count_query).scalar_one()
+    except Exception:  # noqa: BLE001 - damaged page or damaged summary JSON
+        db.rollback()
+        logger.warning("agent_runs unreadable; returning empty run list", exc_info=True)
+        items, total = [], 0
     return Page[AgentRunOut](items=items, total=total, limit=limit, offset=offset)
 
 
