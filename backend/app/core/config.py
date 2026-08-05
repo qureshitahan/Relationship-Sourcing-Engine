@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # Default page sizes for ICP discovery (cost control).
     discovery_org_limit: int = 25
     discovery_people_limit: int = 25
+    # Hard ceiling on how many prospects one discovery run can request/import,
+    # regardless of the requested people_limit. Applied in relationship_discovery
+    # and in the Apollo provider's own pagination so a single run can scale up to
+    # this many people in one go (e.g. "Max prospects = 1000").
+    discovery_max_people_limit: int = 1000
     # Default headcount ceiling applied when a run doesn't specify employee_max.
     # Set to 0 to disable (broadest search). Mega-brand filtering still applies
     # post-search in relationship_discovery.
@@ -190,6 +195,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
 
     # --- Bulk send-from-run pacing (background jobs) ---
+    # Seconds between successive Apollo /people/bulk_match calls (each call
+    # covers up to 10 people). A 500-prospect reveal is ~50 such calls; a small
+    # gap keeps Apollo from rate-limiting the batch, which otherwise fails
+    # silently (soft_fail) and looks like "these people have no email on file".
+    # Reveal runs in the background, so pacing does not block the UI.
+    apollo_reveal_pace_seconds: float = 0.25
     # Seconds between individual sends in a run-level bulk send. Spacing protects
     # deliverability (a burst of identical-origin sends looks like spam). Sending
     # runs in the background, so pacing does not block the UI.

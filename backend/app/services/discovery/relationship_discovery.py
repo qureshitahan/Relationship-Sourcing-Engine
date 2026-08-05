@@ -12,6 +12,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.discovery_run import DiscoveryRun
@@ -130,7 +131,7 @@ def run_discovery(
 
     orgs_found = orgs_imported = people_found = people_imported = duplicates = 0
     insights_generated = 0
-    target = max(1, min(criteria.people_limit or 25, 500))
+    target = max(1, min(criteria.people_limit or 25, settings.discovery_max_people_limit))
     seen_apollo_ids: set[str] = set()
     expansion_state = ExpansionState()
 
@@ -163,7 +164,7 @@ def run_discovery(
 
         while people_imported < target and round_num <= MAX_EXPANSION_ROUNDS:
             need = target - people_imported
-            fetch_limit = min(max(need * 2, 30), 500)
+            fetch_limit = min(max(need * 2, 30), settings.discovery_max_people_limit)
             working_criteria.people_limit = fetch_limit
 
             discovered_people = provider.discover_people(

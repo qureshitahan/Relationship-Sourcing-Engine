@@ -24,6 +24,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -233,7 +234,7 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                 criteria, organization_ids=organization_ids, direct=direct
             )
 
-        target = max(1, min(criteria.people_limit or 25, 500))
+        target = max(1, min(criteria.people_limit or 25, settings.discovery_max_people_limit))
         job_titles = [t for t in (criteria.organization_job_titles or []) if t]
         exclude = exclude_external_ids or set()
 
@@ -291,7 +292,7 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
         mark_board_signal: bool = False,
         exclude_external_ids: Optional[set[str]] = None,
     ) -> List[DiscoveredPerson]:
-        target = max(1, min(limit, 500))
+        target = max(1, min(limit, settings.discovery_max_people_limit))
         per_page = min(100, target)
         collected: List[DiscoveredPerson] = []
         exclude = exclude_external_ids or set()
@@ -403,7 +404,10 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
         )
 
         # Apollo allows up to 10 people per bulk_match call.
-        for batch_start in range(0, len(contacts), 10):
+        pace = max(0.0, float(settings.apollo_reveal_pace_seconds))
+        batch_starts = range(0, len(contacts), 10)
+        empty_batches = 0
+        for i, batch_start in enumerate(batch_starts):
             batch = contacts[batch_start : batch_start + 10]
             details = [self._reveal_detail(c) for c in batch]
 
@@ -417,6 +421,13 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
 
             data = self._post("/people/bulk_match", payload, soft_fail=True)
             if not data:
+                # _post already logged the HTTP failure; count it so a caller can
+                # tell "Apollo rejected most of this run" apart from "Apollo just
+                # doesn't have these people's emails" (both look like "no email"
+                # per-contact otherwise).
+                empty_batches += 1
+                if pace and i < len(batch_starts) - 1:
+                    time.sleep(pace)
                 continue
 
             matches = data.get("matches") or []
@@ -424,6 +435,21 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                 if not isinstance(match, dict):
                     continue
                 self._apply_match(contact, match)
+
+            # Space out successive bulk_match calls — firing dozens back-to-back
+            # (e.g. ~50 calls for a 500-prospect run) risks Apollo rate-limiting,
+            # which fails silently here (soft_fail) and would otherwise look like
+            # "these people just have no email on file".
+            if pace and i < len(batch_starts) - 1:
+                time.sleep(pace)
+
+        if empty_batches:
+            logger.warning(
+                "Apollo bulk_match: %s/%s batches returned no data (rate-limited or "
+                "API error) — those contacts were not revealed.",
+                empty_batches,
+                len(batch_starts),
+            )
 
     def _reveal_detail(self, contact: EnrichmentContact) -> Dict[str, Any]:
         """Build the most specific identifier payload Apollo can match on."""
