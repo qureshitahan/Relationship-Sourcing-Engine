@@ -1,24 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
 import {
-  batchGenerateInsights,
   getDiscoveryRun,
   listDiscoveryRuns,
   listPrincipals,
   listProspects,
-  revealProspect,
   setProspectApproval,
   setProspectStatus,
   type ProspectFilters,
 } from "../api/client";
 import type { DiscoveryRun, Prospect } from "../types";
 import WorkflowSteps from "../components/WorkflowSteps";
-import {
-  draftBlockers,
-  serialMapForProspects,
-} from "../utils/prospectReady";
+import { serialMapForProspects } from "../utils/prospectReady";
 import {
   Badge,
   Button,
@@ -229,7 +224,6 @@ export default function Prospects() {
   const unresearchedCount = items.filter(needsResearch).length;
   const revealedCount = items.filter((p) => Boolean(p.email)).length;
   const approvedCount = items.filter((p) => p.approved_for_outreach).length;
-  const unrevealedCount = items.filter((p) => !p.email).length;
 
   // --- Selection -----------------------------------------------------------
   const selectedProspects = items.filter((p) => selected.has(p.id));
@@ -268,106 +262,6 @@ export default function Prospects() {
   const cancelRef = useRef(false);
 
   const CONCURRENCY = 2;
-
-  async function runResearchAll() {
-    if (!principalId || !runId) return;
-    const todo = items.filter(needsResearch);
-    if (todo.length === 0) return;
-
-    setBatchMessage(null);
-    setProgress({
-      label: "Researching with Claude",
-      running: true,
-      total: todo.length,
-      done: 0,
-      ok: 0,
-      skipped: 0,
-      failed: 0,
-      current: ["Running batch research…"],
-    });
-
-    try {
-      const result = await batchGenerateInsights({
-        principal_id: principalId,
-        discovery_run_id: runId,
-        skip_existing: true,
-        auto_reject_below: 0,
-      });
-      await qc.invalidateQueries({ queryKey: ["prospects"] });
-      setBatchMessage(
-        `Research done: ${result.researched} researched, ${result.skipped} already done, ` +
-          `${result.failed} failed. ${result.qualified} scored ≥50 relevance.`
-      );
-    } catch {
-      setBatchMessage("Batch research failed — check backend logs and retry.");
-    } finally {
-      setProgress(null);
-    }
-  }
-
-  async function runResearchSelected() {
-    if (!principalId) return;
-    const todo = selectedProspects.filter(needsResearch);
-    if (todo.length === 0) {
-      setBatchMessage("Selected prospects are already researched.");
-      return;
-    }
-    setBatchMessage(null);
-    setProgress({
-      label: "Researching selected",
-      running: true,
-      total: todo.length,
-      done: 0,
-      ok: 0,
-      skipped: 0,
-      failed: 0,
-      current: ["Running batch research…"],
-    });
-    try {
-      const result = await batchGenerateInsights({
-        principal_id: principalId,
-        contact_ids: todo.map((p) => p.id),
-        skip_existing: false,
-        auto_reject_below: 0,
-      });
-      await qc.invalidateQueries({ queryKey: ["prospects"] });
-      setBatchMessage(
-        `Research done: ${result.researched} researched, ${result.failed} failed.`
-      );
-      clearSelection();
-    } catch {
-      setBatchMessage("Research failed for selected prospects.");
-    } finally {
-      setProgress(null);
-    }
-  }
-
-  async function runRevealAll() {
-    if (!runId) return;
-    // Reveal per-contact (like Research all / Reveal selected) so the progress
-    // bar updates live — how many revealed vs. still pending — instead of sitting
-    // at 0/total while one big backend call runs to completion.
-    const targets = items.filter((p) => !p.email);
-    if (targets.length === 0) {
-      setBatchMessage("All prospects in this run already have an email revealed.");
-      return;
-    }
-    if (
-      !window.confirm(
-        `Reveal email for all ${targets.length} unrevealed prospect(s) in this run? Uses Apollo credits.`
-      )
-    )
-      return;
-    runBulk("Revealing contacts", targets, async (p) => {
-      if (p.email) return "skipped";
-      await revealProspect(p.id);
-      return "ok";
-    });
-  }
-
-  async function runResearch() {
-    await runResearchAll();
-  }
 
   /** Generic bulk runner over the selected prospects. */
   async function runBulk(
@@ -453,43 +347,17 @@ export default function Prospects() {
     clearSelection();
   }
 
-  function bulkReveal() {
-    const targets = selectedProspects.filter((p) => !p.email);
-    if (targets.length === 0) {
-      setBatchMessage("Selected prospects already have email revealed.");
-      return;
-    }
-    if (
-      !window.confirm(
-        `Reveal email & phone for ${targets.length} prospect(s)? This uses Apollo credits.`
-      )
-    )
-      return;
-    runBulk("Reveal", targets, async (p) => {
-      if (p.email) return "skipped";
-      await revealProspect(p.id);
-      return "ok";
-    });
-  }
-
   function bulkApprove() {
-    const blocked = selectedProspects.filter((p) => draftBlockers(p).length > 0);
-    const ok = selectedProspects.filter((p) => draftBlockers(p).length === 0);
-    if (ok.length === 0) {
-      setBatchMessage(
-        blocked.length === 1
-          ? `Cannot approve: ${draftBlockers(blocked[0]).join(", ")}.`
-          : "Selected prospects need successful research and a revealed email before approval."
-      );
+    // No client-side eligibility pre-filter: approval itself now triggers
+    // research + reveal on the backend for anyone who needs it (see
+    // prospects.py set_approval), so every selected prospect gets a real
+    // attempt instead of silently being skipped for "not ready yet".
+    const targets = selectedProspects.filter((p) => !p.approved_for_outreach);
+    if (targets.length === 0) {
+      setBatchMessage("Selected prospects are already approved.");
       return;
     }
-    if (blocked.length > 0) {
-      setBatchMessage(
-        `Approving ${ok.length} eligible prospect(s); skipping ${blocked.length} without research/email.`
-      );
-    }
-    runBulk("Approve", ok, async (p) => {
-      if (p.approved_for_outreach) return "skipped";
+    runBulk("Approve", targets, async (p) => {
       await setProspectApproval(p.id, true);
       return "ok";
     });
@@ -526,18 +394,6 @@ export default function Prospects() {
   };
 
   const clearRunFilter = () => setRunFilter("");
-
-  useEffect(() => {
-    if (searchParams.get("autoprocess") !== "1" || !runId || !principalId) return;
-    const next = new URLSearchParams(searchParams);
-    next.delete("autoprocess");
-    setSearchParams(next, { replace: true });
-    void (async () => {
-      await runResearchAll();
-      await runRevealAll();
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot after Discover
-  }, [runId, principalId]);
 
   const busy = Boolean(progress?.running);
 
@@ -659,18 +515,6 @@ export default function Prospects() {
               {items.length} · Revealed {revealedCount}/{items.length} · Approved{" "}
               {approvedCount}
             </span>
-            <div className="flex flex-wrap items-center gap-2">
-              {unresearchedCount > 0 && principalId && !busy && (
-                <Button onClick={runResearch}>
-                  Research all {unresearchedCount}
-                </Button>
-              )}
-              {unrevealedCount > 0 && !busy && (
-                <Button variant="secondary" onClick={runRevealAll}>
-                  Reveal all {unrevealedCount}
-                </Button>
-              )}
-            </div>
           </div>
         </div>
       )}
@@ -714,9 +558,8 @@ export default function Prospects() {
 
       {runId && unresearchedCount > 0 && (
         <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
-          <strong>{unresearchedCount} not yet researched.</strong> Use{" "}
-          <em>Research all</em> or select rows and <em>Research selected</em>, then{" "}
-          <em>Reveal</em> and <em>Approve</em>. Draft emails on the Drafts page.
+          <strong>{unresearchedCount} not yet researched.</strong> Select rows and click{" "}
+          <em>Approve for outreach</em> — research and contact reveal happen automatically.
         </div>
       )}
 
@@ -789,12 +632,6 @@ export default function Prospects() {
           <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="font-medium">{selected.size} selected</span>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" onClick={runResearchSelected} disabled={busy}>
-              Research selected
-            </Button>
-            <Button variant="secondary" onClick={bulkReveal} disabled={busy}>
-              Reveal contact details
-            </Button>
             <Button variant="secondary" onClick={bulkApprove} disabled={busy}>
               Approve for outreach
             </Button>

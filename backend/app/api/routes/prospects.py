@@ -347,6 +347,39 @@ def set_approval(
         principal = _principal_for_research(db, contact)
         if principal is None:
             raise HTTPException(status_code=400, detail="No principal configured")
+
+        # Approval is the one action the user takes — research and email/LinkedIn
+        # reveal are no longer separate manual steps. If this prospect isn't
+        # ready yet, do the work here (best effort) before re-checking, instead
+        # of just rejecting the approval and making the user go run two other
+        # buttons first.
+        blockers = outreach_draft_blockers(
+            db, principal_id=principal.id, contact=contact
+        )
+        if "email not revealed" in blockers:
+            try:
+                ensure_discovery_fit(db, contact)
+                reveal_contact(db, contact)
+                db.commit()
+            except RevealNotAllowed as exc:
+                db.rollback()
+                raise HTTPException(status_code=400, detail=str(exc))
+            except Exception:  # noqa: BLE001 - best effort; re-checked below
+                db.rollback()
+        if "not researched" in blockers or "research failed — retry research first" in blockers:
+            company = db.get(Company, contact.company_id) if contact.company_id else None
+            try:
+                generate_insight(
+                    db,
+                    principal,
+                    contact=contact,
+                    company=company,
+                    outreach_goal=outreach_goal_for_contact(db, contact, principal),
+                )
+                db.commit()
+            except Exception:  # noqa: BLE001 - best effort; re-checked below
+                db.rollback()
+
         blockers = outreach_draft_blockers(
             db, principal_id=principal.id, contact=contact
         )
@@ -361,7 +394,11 @@ def set_approval(
         if blockers:
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot approve: {', '.join(blockers)}",
+                detail=(
+                    f"Cannot approve: {', '.join(blockers)}. Automatic research/reveal "
+                    "was attempted but could not resolve this — Apollo or Anthropic may "
+                    "not have data for this prospect."
+                ),
             )
 
     contact.approved_for_outreach = payload.approved_for_outreach

@@ -19,18 +19,11 @@ import {
 } from "../api/client";
 import { MultiSelectDropdown } from "../components/MultiSelectDropdown";
 import {
-  BOARD_JOB_TITLE_OPTIONS,
-  COMPANY_TYPE_OPTIONS,
-  CONTACT_EMAIL_STATUS_OPTIONS,
-  DEFAULT_BOARD_JOB_TITLES,
-  DEFAULT_DISCOVERY_TITLES,
   DEFAULT_GEOGRAPHIES,
   GEOGRAPHY_OPTIONS,
   GEOGRAPHY_SUGGESTIONS,
   INDUSTRY_OPTIONS,
   SENIORITY_OPTIONS,
-  THEME_OPTIONS,
-  TITLE_OPTIONS,
 } from "../constants/discoveryOptions";
 import WorkflowSteps from "../components/WorkflowSteps";
 import {
@@ -47,39 +40,25 @@ import {
 } from "../components/ui";
 import type { AgentPlan } from "../types";
 
+// Only the essential filters are kept in the UI (Industry, Seniorities,
+// Location, Max prospects) — every other Apollo filter (titles, company
+// types, keywords, themes, domains, employee range, job-posting signals) is
+// intentionally omitted so discovery casts the widest possible net. The
+// backend treats all of those as optional and simply skips the filter when
+// absent (see apollo.py _build_people_search_payload), so leaving them out
+// broadens matches instead of breaking anything.
 function applyPlanCriteria(
   c: Record<string, unknown>,
   setters: {
-    setTitles: (v: string[]) => void;
     setSeniorities: (v: string[]) => void;
     setIndustries: (v: string[]) => void;
-    setCompanyTypes: (v: string[]) => void;
     setGeographies: (v: string[]) => void;
-    setKeywords: (v: string[]) => void;
-    setThemes: (v: string[]) => void;
-    setOrganizationJobTitles: (v: string[]) => void;
-    setContactEmailStatus: (v: string[]) => void;
-    setOrganizationDomains: (v: string[]) => void;
-    setEmployeeMin: (v: string) => void;
-    setEmployeeMax: (v: string) => void;
     setPeopleLimit: (v: string) => void;
   }
 ) {
-  if (Array.isArray(c.titles)) setters.setTitles(c.titles as string[]);
   if (Array.isArray(c.seniorities)) setters.setSeniorities(c.seniorities as string[]);
   if (Array.isArray(c.industries)) setters.setIndustries(c.industries as string[]);
-  if (Array.isArray(c.company_types)) setters.setCompanyTypes(c.company_types as string[]);
   if (Array.isArray(c.geographies)) setters.setGeographies(c.geographies as string[]);
-  if (Array.isArray(c.keywords)) setters.setKeywords(c.keywords as string[]);
-  if (Array.isArray(c.themes)) setters.setThemes(c.themes as string[]);
-  if (Array.isArray(c.organization_job_titles))
-    setters.setOrganizationJobTitles(c.organization_job_titles as string[]);
-  if (Array.isArray(c.contact_email_status))
-    setters.setContactEmailStatus(c.contact_email_status as string[]);
-  if (Array.isArray(c.organization_domains))
-    setters.setOrganizationDomains(c.organization_domains as string[]);
-  if (c.employee_min != null) setters.setEmployeeMin(String(c.employee_min));
-  if (c.employee_max != null) setters.setEmployeeMax(String(c.employee_max));
   if (c.people_limit != null) setters.setPeopleLimit(String(c.people_limit));
 }
 
@@ -118,27 +97,18 @@ export default function Discover() {
     enabled: activeRunId != null,
     refetchInterval: (query) => {
       const s = query.state.data?.status;
-      return s === "completed" || s === "failed" ? false : 2000;
+      const js = query.state.data?.job_status;
+      // Keep polling through the automatic post-import reveal pass (job_status
+      // stays "running" briefly after status flips to "completed") so the
+      // banner below can show live email/LinkedIn reveal progress.
+      if (s !== "completed" && s !== "failed") return 2000;
+      return js === "running" ? 2000 : false;
     },
   });
 
   const [industries, setIndustries] = useState<string[]>(["Healthcare", "Healthcare Services"]);
-  const [companyTypes, setCompanyTypes] = useState<string[]>([
-    "private_equity",
-    "operating_company",
-  ]);
   const [geographies, setGeographies] = useState<string[]>(DEFAULT_GEOGRAPHIES);
-  const [titles, setTitles] = useState<string[]>(DEFAULT_DISCOVERY_TITLES);
   const [seniorities, setSeniorities] = useState<string[]>([]);
-  const [contactEmailStatus, setContactEmailStatus] = useState<string[]>([]);
-  const [organizationDomains, setOrganizationDomains] = useState<string[]>([]);
-  const [keywords, setKeywords] = useState<string[]>([]);
-  const [themes, setThemes] = useState<string[]>([]);
-  const [organizationJobTitles, setOrganizationJobTitles] = useState<string[]>(
-    DEFAULT_BOARD_JOB_TITLES
-  );
-  const [employeeMin, setEmployeeMin] = useState("");
-  const [employeeMax, setEmployeeMax] = useState("");
   const [peopleLimit, setPeopleLimit] = useState("100");
 
   const { data: agentConfig } = useQuery({
@@ -155,18 +125,9 @@ export default function Discover() {
   }, [agentConfig, principalId]);
 
   const planSetters = {
-    setTitles,
     setSeniorities,
     setIndustries,
-    setCompanyTypes,
     setGeographies,
-    setKeywords,
-    setThemes,
-    setOrganizationJobTitles,
-    setContactEmailStatus,
-    setOrganizationDomains,
-    setEmployeeMin,
-    setEmployeeMax,
     setPeopleLimit,
   };
 
@@ -204,28 +165,22 @@ export default function Discover() {
 
   const run = useMutation({
     mutationFn: () => {
+      // Only the essential filters are sent — Industry, Seniorities, Location
+      // (geographies), Max prospects. Every other Apollo filter is left unset
+      // on purpose so discovery casts the widest net (see applyPlanCriteria
+      // above for why omitting is safe rather than restrictive).
       const payload: DiscoveryRunPayload = {
         principal_id: Number(principalId),
         industries,
-        company_types: companyTypes,
         geographies,
-        titles,
         seniorities,
-        contact_email_status:
-          contactEmailStatus.length > 0 ? contactEmailStatus : undefined,
-        organization_domains:
-          organizationDomains.length > 0 ? organizationDomains : undefined,
-        keywords,
-        themes,
-        organization_job_titles:
-          organizationJobTitles.length > 0 ? organizationJobTitles : undefined,
-        employee_min: employeeMin.trim() ? Number(employeeMin) : undefined,
-        employee_max: employeeMax.trim() ? Number(employeeMax) : undefined,
         people_limit: peopleLimit.trim() ? Number(peopleLimit) : 100,
         people_first: true,
         auto_expand_to_target: true,
-        // Import only — no slow auto-research. Reveal emails from the Bulk
-        // Outreach column (quantity), or research on the Prospects page (quality).
+        // auto_process stays false: skip the slow per-prospect LLM research step.
+        // Email + LinkedIn reveal now runs automatically server-side right after
+        // import (see discovery_jobs.py _discovery_worker) regardless of this
+        // flag, so prospects still come back with contact details filled in.
         auto_process: false,
         search_goal:
           objective.trim() ||
@@ -351,10 +306,10 @@ export default function Discover() {
                 AI-assisted setup (optional)
               </div>
               <p className="mb-3 text-xs text-indigo-900/80">
-                Describe your goal in plain English. Claude suggests titles, industries,
-                company types, geographies, keywords, and themes — then fills the filter
-                fields below. You can edit everything before running. First click may ask
-                2–3 clarifying questions; click Plan again to apply.
+                Describe your goal in plain English. Claude suggests industries, seniorities,
+                and locations — then fills the filter fields below. You can edit everything
+                before running. First click may ask 2–3 clarifying questions; click Plan
+                again to apply.
               </p>
               <textarea
                 className="w-full rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:outline-none"
@@ -406,22 +361,27 @@ export default function Discover() {
             </div>
 
             <div className="space-y-6">
+              {/* Deliberately minimal: only Industry, Seniorities, Location, and
+                  Max prospects. Every other Apollo filter (titles, company types,
+                  keywords, themes, domains, employee range, job-posting signals)
+                  narrows the match pool, so it's left unset to maximize how many
+                  prospects a run can return — see applyPlanCriteria above. */}
               <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
                 <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  People — who to reach
+                  Search filters
                 </div>
                 <div className="grid gap-5 md:grid-cols-2">
                   <MultiSelectDropdown
-                    label="Titles"
-                    hint="Job titles the person holds. Apollo expands to similar titles automatically. Add custom titles for niche roles."
-                    selected={titles}
-                    onChange={setTitles}
-                    options={TITLE_OPTIONS}
-                    placeholder="Search titles or add custom…"
+                    label="Industry"
+                    hint="Broad keyword tags — pick from the list or type any industry. Prefer 1-3 wide buckets for the most matches."
+                    selected={industries}
+                    onChange={setIndustries}
+                    options={INDUSTRY_OPTIONS}
+                    placeholder="Search industries or type custom…"
                   />
                   <MultiSelectDropdown
                     label="Seniorities"
-                    hint="All 11 Apollo seniority levels (complete API enum). Optional — leave empty for broadest search."
+                    hint="All 11 Apollo seniority levels. Optional — leave empty for the broadest search."
                     selected={seniorities}
                     onChange={setSeniorities}
                     options={SENIORITY_OPTIONS}
@@ -429,66 +389,7 @@ export default function Discover() {
                     placeholder="Select seniority levels…"
                   />
                   <MultiSelectDropdown
-                    label="Email status"
-                    hint="Apollo enum only — Verified, Likely to engage, or Unverified. Optional filter."
-                    selected={contactEmailStatus}
-                    onChange={setContactEmailStatus}
-                    options={CONTACT_EMAIL_STATUS_OPTIONS}
-                    allowCustom={false}
-                    placeholder="Filter by email status…"
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-800">
-                  Active job postings — optional boost
-                </div>
-                <p className="mb-3 text-xs text-amber-900">
-                  When set, people whose employer has a matching <strong>active job posting</strong>{" "}
-                  (e.g. Independent Director) are ranked first — but everyone matching your titles
-                  and industries is still included. Companies without open postings appear normally.
-                </p>
-                <MultiSelectDropdown
-                  label="Employer job posting titles"
-                  hint="Open roles at the person's current employer (e.g. Independent Director, Director of Pharmacy)."
-                  selected={organizationJobTitles}
-                  onChange={setOrganizationJobTitles}
-                  options={BOARD_JOB_TITLE_OPTIONS}
-                  placeholder="Search or add posting titles…"
-                />
-              </div>
-
-              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
-                <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Organizations — where they work
-                </div>
-                <div className="grid gap-5 md:grid-cols-2">
-                  <MultiSelectDropdown
-                    label="Industries"
-                    hint="Broad keyword tags — pick from the list or type any industry. Prefer 1-3 wide buckets."
-                    selected={industries}
-                    onChange={setIndustries}
-                    options={INDUSTRY_OPTIONS}
-                    placeholder="Search industries or type custom…"
-                  />
-                  <MultiSelectDropdown
-                    label="Company types"
-                    hint="Keyword tags for employer type — select presets or type custom (e.g. search fund, MSO)."
-                    selected={companyTypes}
-                    onChange={setCompanyTypes}
-                    options={COMPANY_TYPE_OPTIONS}
-                    placeholder="Search company types or type custom…"
-                  />
-                  <MultiSelectDropdown
-                    label="Employer domains"
-                    hint="Optional — limit to specific employers by domain (e.g. shorecp.com). Leave empty for broad discovery."
-                    selected={organizationDomains}
-                    onChange={setOrganizationDomains}
-                    placeholder="e.g. vistria.com, revelstokecp.com…"
-                  />
-                  <MultiSelectDropdown
-                    label="Geographies"
+                    label="Location"
                     hint="Where the person is based (not employer HQ). US default; all 50 states listed. Type any city, state, or country."
                     selected={geographies}
                     onChange={setGeographies}
@@ -496,63 +397,6 @@ export default function Discover() {
                     suggestions={GEOGRAPHY_SUGGESTIONS}
                     placeholder="Search locations or type custom…"
                   />
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
-                <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Signals — keywords & themes
-                </div>
-                <div className="grid gap-5 md:grid-cols-2">
-                  <MultiSelectDropdown
-                    label="Keywords"
-                    hint="Free-text terms matched against company profiles (e.g. roll-up, formulary)."
-                    selected={keywords}
-                    onChange={setKeywords}
-                    placeholder="e.g. roll-up, consolidation…"
-                  />
-                  <MultiSelectDropdown
-                    label="Investment / acquisition themes"
-                    hint="Strategic angles — used as search keywords and to ground AI relevance scoring."
-                    selected={themes}
-                    onChange={setThemes}
-                    options={THEME_OPTIONS}
-                    placeholder="Search themes or add custom…"
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
-                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                  Company size & result cap
-                </div>
-                <p className="mb-3 text-xs text-slate-400">
-                  Employee min filters out very small companies (e.g. fewer than 10 people).
-                  Leave max empty for the broadest net. Use employee max to focus on mid-market or smaller companies.
-                </p>
-                <div className="flex flex-wrap items-end gap-4">
-                  <label className="block">
-                    <span className="text-xs font-medium text-slate-600">Employee min</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      className="mt-1 w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                      value={employeeMin}
-                      placeholder="optional"
-                      onChange={(e) => setEmployeeMin(e.target.value.replace(/\D/g, ""))}
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-xs font-medium text-slate-600">Employee max</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      className="mt-1 w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                      value={employeeMax}
-                      placeholder="optional"
-                      onChange={(e) => setEmployeeMax(e.target.value.replace(/\D/g, ""))}
-                    />
-                  </label>
                   <label className="block">
                     <span className="text-xs font-medium text-slate-600">
                       Max prospects (people)
@@ -595,9 +439,8 @@ export default function Discover() {
                   : "Run discovery"}
               </Button>
               <span className="text-xs text-slate-400">
-                {titles.length} title(s) · {industries.length} industry filter(s)
-                {organizationJobTitles.length > 0 &&
-                  ` · ${organizationJobTitles.length} job posting signal(s)`}
+                {industries.length} industry filter(s)
+                {seniorities.length > 0 && ` · ${seniorities.length} seniority filter(s)`}
               </span>
             </div>
 
@@ -608,6 +451,18 @@ export default function Discover() {
                   ?.data?.detail ||
                   (run.error as Error)?.message ||
                   "Unknown error — check backend logs."}
+              </div>
+            )}
+            {(activeRun.data?.provider_warnings?.length ?? 0) > 0 && (
+              <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+                <div className="font-medium">Provider issue detected</div>
+                <p className="mt-1">
+                  {activeRun.data!.provider_warnings!.join(" ")}
+                </p>
+                <p className="mt-1 text-rose-700">
+                  This is why prospects may be missing emails/LinkedIn URLs even
+                  though discovery "completed" — it isn't caused by your filters.
+                </p>
               </div>
             )}
             {(activeRun.data?.status === "pending" ||
@@ -667,6 +522,16 @@ export default function Discover() {
                   <p className="mt-2 text-amber-700">
                     Apollo returned no matches. Try fewer industry filters (one broad bucket),
                     widen the employee range, or verify your API key is valid.
+                  </p>
+                )}
+                {activeRun.data.job_kind === "reveal" && (
+                  <p className="mt-2 text-slate-600">
+                    {activeRun.data.job_status === "running"
+                      ? `Fetching emails & LinkedIn URLs… ${activeRun.data.job_done ?? 0}/${
+                          activeRun.data.job_total ?? 0
+                        }`
+                      : "Emails & LinkedIn URLs fetched (best effort — Apollo doesn't have " +
+                        "contact details for every prospect)."}
                   </p>
                 )}
                 <div className="mt-2 flex flex-wrap gap-4">

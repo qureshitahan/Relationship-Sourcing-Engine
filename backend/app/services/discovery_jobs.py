@@ -176,9 +176,10 @@ def _discovery_worker(
             search_goal=search_goal,
             run=run,
         )
-        # Optional: research + reveal every imported prospect (same behaviour as
-        # the old synchronous auto_process, just off the request thread).
         if auto_process and run.status == DiscoveryStatus.COMPLETED:
+            # Full auto-process: research + reveal every imported prospect (same
+            # behaviour as the old synchronous auto_process, just off the request
+            # thread).
             try:
                 process_discovery_run(
                     db, run_id, principal=principal, skip_existing_research=False
@@ -186,6 +187,21 @@ def _discovery_worker(
             except Exception as exc:  # noqa: BLE001
                 run.error_message = (
                     (run.error_message or "") + f" Auto-process failed: {exc}"
+                ).strip()
+                db.commit()
+        elif run.status == DiscoveryStatus.COMPLETED:
+            # Every discovery run — no matter the target count — should come back
+            # with as complete a profile as Apollo can give us (email + LinkedIn
+            # URL), not just names/titles. Apollo's People Search never returns an
+            # email and often masks the LinkedIn URL, so run the same reveal pass
+            # used by the manual "Reveal emails" button automatically, right after
+            # import. Best-effort: some prospects genuinely have no email in
+            # Apollo's database, so a handful may still come back unrevealed.
+            try:
+                _reveal_worker(run_id)
+            except Exception as exc:  # noqa: BLE001
+                run.error_message = (
+                    (run.error_message or "") + f" Auto-reveal failed: {exc}"
                 ).strip()
                 db.commit()
     except Exception:  # noqa: BLE001 - never let the worker die silently
@@ -214,8 +230,11 @@ def launch_run_reveal(run_id: int) -> None:
     ).start()
 
 
+RUN_REVEAL_CHUNK_SIZE = 25
+
+
 def _reveal_worker(run_id: int) -> None:
-    from app.services.contacts import RevealNotAllowed, reveal_contact
+    from app.services.contacts import reveal_contacts_bulk
 
     db = SessionLocal()
     try:
@@ -238,32 +257,45 @@ def _reveal_worker(run_id: int) -> None:
             _finish_job(db, run, JOB_DONE)
             return
 
+        # Batch through Apollo's bulk_match path (up to 10 contacts per HTTP
+        # call, paced inside the provider) instead of one Apollo call per
+        # contact. A 500-prospect run previously fired ~500 individual reveal
+        # requests, which tripped Apollo's rate limit partway through; failures
+        # there are soft-swallowed, so the run "completed" but silently left most
+        # prospects unrevealed. Chunking here is only to keep the progress bar
+        # incremental — reveal_contacts_bulk still applies email/LinkedIn/name.
         revealed = 0
-        failures: list[str] = []
-        for index, contact in enumerate(targets):
+        chunk_failures = 0
+        for start in range(0, len(targets), RUN_REVEAL_CHUNK_SIZE):
             if _cancelled(db, run):
                 break
+            chunk = targets[start : start + RUN_REVEAL_CHUNK_SIZE]
             try:
-                reveal_contact(db, contact)
+                revealed += reveal_contacts_bulk(db, chunk)
                 db.commit()
-                if (contact.email or "").strip():
-                    revealed += 1
-            except RevealNotAllowed as exc:
+            except Exception:  # noqa: BLE001 - keep revealing the rest
                 db.rollback()
-                failures.append(f"{contact.name or contact.id}: {exc}")
-            except Exception as exc:  # noqa: BLE001 - keep revealing the rest
-                db.rollback()
-                logger.exception("Bulk reveal failed for contact %s", contact.id)
-                failures.append(f"{contact.name or contact.id}: {exc}")
-            _progress(db, run, index + 1)
+                chunk_failures += 1
+                logger.exception(
+                    "Bulk reveal chunk failed for run %s (contacts %s-%s)",
+                    run_id,
+                    chunk[0].id,
+                    chunk[-1].id,
+                )
+            _progress(db, run, min(start + RUN_REVEAL_CHUNK_SIZE, len(targets)))
 
-        error = (
-            f"{len(failures)} could not be revealed: " + "; ".join(failures[:5])
-            if failures
-            else None
-        )
+        notes: list[str] = []
+        if chunk_failures:
+            notes.append(f"{chunk_failures} batch(es) errored and were skipped.")
+        if targets and revealed < len(targets) * 0.3:
+            notes.append(
+                f"Only {revealed}/{len(targets)} prospects got an email. Apollo may "
+                "not have contact data for this audience, or the account hit a rate "
+                "limit — check backend logs for 'bulk_match' warnings."
+            )
+        error = " ".join(notes) or None
         _finish_job(db, run, JOB_DONE, error)
-        logger.info("Run %s bulk reveal: %s revealed, %s failed", run_id, revealed, len(failures))
+        logger.info("Run %s bulk reveal: %s revealed of %s", run_id, revealed, len(targets))
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bulk reveal worker failed for run %s", run_id)
         _fail(db, run_id, str(exc))
