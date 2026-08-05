@@ -266,6 +266,40 @@ def _add_missing_columns() -> None:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}'))
 
 
+# Single-column indexes added to a model after a deployment already has data.
+# create_all's index=True only lands on freshly-created tables, so an existing
+# database needs this to actually get the index too.
+_ADDITIVE_INDEXES: dict[str, list[str]] = {
+    # Discovery dedup (_find_contact) looks up every candidate by linkedin_url;
+    # without an index that's a full table scan per candidate, and it gets
+    # slower as the table grows and as broader search filters surface more
+    # candidates per run — this is why discovery got slower after filters were
+    # widened, not just from the extra volume.
+    "contacts": ["linkedin_url"],
+}
+
+
+def _add_missing_indexes() -> None:
+    """Add any missing additive single-column indexes (idempotent)."""
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, columns in _ADDITIVE_INDEXES.items():
+            if table not in existing_tables:
+                continue
+            single_col_indexed = {
+                ix["column_names"][0]
+                for ix in inspector.get_indexes(table)
+                if len(ix.get("column_names") or []) == 1
+            }
+            for column in columns:
+                if column in single_col_indexed:
+                    continue
+                conn.execute(
+                    text(f'CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table} ({column})')
+                )
+
+
 def _is_corruption_error(exc: Exception) -> bool:
     """True if the exception looks like SQLite file corruption (any of the
     several ways a damaged page surfaces), so we know to try a REINDEX repair."""
@@ -564,6 +598,7 @@ def _apply_lightweight_migrations() -> None:
     steps = (
         _drop_agent_configs_principal_unique,
         _add_missing_columns,
+        _add_missing_indexes,
         # After columns exist (the ORM probe names them all), quarantine any
         # rows a prior corruption event left unreadable...
         _repair_unreadable_agent_runs,
