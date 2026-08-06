@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   deleteEmail,
-  generateRunDrafts,
+  draftRunEmails,
   getDiscoveryRun,
   listDiscoveryRuns,
   listEmails,
@@ -448,7 +448,14 @@ export default function Emails() {
     queryKey: ["discovery-run", runId],
     queryFn: () => getDiscoveryRun(runId!),
     enabled: !!runId,
+    // Poll while a background job (drafting) is running so the progress line
+    // below stays live, then stop so an idle page isn't hitting the API.
+    refetchInterval: (query) =>
+      query.state.data?.job_status === "running" ? 2000 : false,
   });
+
+  const draftJobRunning =
+    run?.job_kind === "draft_email" && run?.job_status === "running";
 
   const { data, isLoading } = useQuery({
     queryKey: ["emails", statusFilter, runId],
@@ -553,31 +560,20 @@ export default function Emails() {
 
   const draftApproved = useMutation({
     mutationFn: () =>
-      generateRunDrafts({
-        discovery_run_id: runId!,
-        principal_id: run?.principal_id ?? undefined,
-        outreach_goal: outreachPurpose ?? undefined,
-      }),
-    onSuccess: (res) => {
-      const warn =
-        res.provider_warnings?.length
-          ? ` Provider issue: ${res.provider_warnings.join(" ")}`
-          : "";
+      // Background job, not an inline request. Drafting is one LLM call per
+      // prospect, so a few hundred approved prospects runs far past any HTTP
+      // timeout — inline drafting failed outright at ~169 prospects and lost
+      // every email it had already written. The worker commits per batch and
+      // reports progress on the run's job_* fields, polled below.
+      draftRunEmails(runId!, outreachPurpose ?? undefined),
+    onSuccess: () => {
       setBulkNote(
-        `Drafted ${res.generated} email(s) for approved prospects` +
-          // `skipped` counts BOTH prospects that already had a draft AND ones
-          // blocked by a missing prerequisite, so it must not claim "already
-          // had drafts" — that read as a lie when zero drafts existed.
-          (res.skipped ? ` (${res.skipped} skipped)` : "") +
-          (res.errors.length
-            ? `. ${res.errors.length} skipped for: ${res.errors[0]}`
-            : ".") +
-          warn
+        "Drafting started in the background. Progress appears above — you can " +
+          "leave this page and come back."
       );
-      qc.invalidateQueries({ queryKey: ["emails"] });
-      qc.invalidateQueries({ queryKey: ["prospects"] });
+      qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
     },
-    onError: () => setBulkNote("Could not draft approved prospects — check backend logs."),
+    onError: () => setBulkNote("Could not start drafting — check backend logs."),
   });
 
   const items = data?.items ?? [];
@@ -806,7 +802,21 @@ export default function Emails() {
         </div>
       )}
 
-      {runId && approvedWithoutDraft.length > 0 && (
+      {/* Live progress for the background drafting job. Shown on its own so it
+          survives the amber block disappearing as prospects gain drafts. */}
+      {runId && draftJobRunning && (
+        <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm text-violet-900">
+          <strong>
+            Writing emails… {run?.job_done ?? 0}/{run?.job_total ?? 0}
+          </strong>
+          <span className="ml-2 text-violet-800">
+            Each email is written individually, so this takes a few minutes. Safe
+            to leave this page — drafts are saved as they are written.
+          </span>
+        </div>
+      )}
+
+      {runId && approvedWithoutDraft.length > 0 && !draftJobRunning && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-950">
           <span>
             <strong>{approvedWithoutDraft.length}</strong> approved prospect
@@ -826,7 +836,7 @@ export default function Emails() {
             }
           >
             {draftApproved.isPending
-              ? "Drafting…"
+              ? "Starting…"
               : `Draft all ${approvedWithoutDraft.length} approved`}
           </Button>
         </div>
