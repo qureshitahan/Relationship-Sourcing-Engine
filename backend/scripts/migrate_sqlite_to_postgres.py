@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import sys
 import sqlite3
+import json
 import time
 
-from sqlalchemy import create_engine, insert, text
+from sqlalchemy import create_engine, insert, text, JSON
 
 sys.path.insert(0, ".")
 from app.db.base import Base
@@ -49,6 +50,14 @@ def migrate(sqlite_path: str, pg_url: str) -> None:
         for table in Base.metadata.sorted_tables:
             tname = table.name
             pk_cols = list(table.primary_key.columns)
+            # SQLite has no native JSON type - these columns come back from
+            # sqlite3 as raw TEXT strings. Inserting a string straight into a
+            # Postgres JSON column double-encodes it (the column becomes a
+            # JSON string containing JSON text, instead of the parsed
+            # object/array), which then fails Pydantic validation on read.
+            # Parse these columns back into real Python objects first so
+            # SQLAlchemy's JSON type serializes them correctly exactly once.
+            json_cols = [c.name for c in table.columns if isinstance(c.type, JSON)]
             started = time.monotonic()
 
             sconn = sqlite3.connect(sqlite_path)
@@ -87,7 +96,15 @@ def migrate(sqlite_path: str, pg_url: str) -> None:
                         continue
                     if row is None:
                         continue
-                    batch.append(dict(row))
+                    record = dict(row)
+                    for col in json_cols:
+                        val = record.get(col)
+                        if isinstance(val, str):
+                            try:
+                                record[col] = json.loads(val)
+                            except ValueError:
+                                pass  # leave as-is; not valid JSON text either way
+                    batch.append(record)
 
                     if len(batch) >= BATCH_SIZE:
                         pconn.execute(insert(table), batch)

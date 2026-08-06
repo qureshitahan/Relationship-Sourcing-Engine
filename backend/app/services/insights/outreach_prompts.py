@@ -17,6 +17,19 @@ _VOICE = (
     "credibility naturally if it fits; never list credentials."
 )
 
+_AIDA = (
+    "Structure every email on AIDA, compressed into the tight format below — "
+    "not as four separate lines, but as a thread running through the same "
+    "2-3 sentences:\n"
+    "  Attention -> the subject line earns the open.\n"
+    "  Interest -> the hook's first clause is about THEM, not you.\n"
+    "  Desire -> the hook names something specific and relevant enough that "
+    "the value is self-evident, without stating a pitch.\n"
+    "  Action -> one low-friction question, not a meeting ask.\n"
+    "Never let Desire tip into a sales pitch — specificity creates the "
+    "desire, not adjectives or claims."
+)
+
 _STRUCTURE = (
     "BODY (2-3 short lines, ~30-50 words total — keep it tight):\n"
     "1) 'Hi <FirstName>,'\n"
@@ -31,7 +44,8 @@ _STRUCTURE = (
 )
 
 _SUBJECT_RULES = (
-    "SUBJECT: 2-5 words, specific and human, like a note from a peer. "
+    "SUBJECT: 2-5 words, specific and human, like a note from a peer — this is the "
+    "Attention step, it must earn the open on its own. "
     "No dashes, no exclamation marks. BANNED: Introduction, Reaching out, Quick note."
 )
 
@@ -43,6 +57,8 @@ OUTREACH_SINGLE_SYSTEM = (
     "Use STRATEGIC INSIGHT key_facts and talking_points for the hook when available. "
     "Relate subtly to PRINCIPAL.credential_summary or one proof point — never dump resume text. "
     "The email should move the principal's OBJECTIVE forward without naming it bluntly.\n\n"
+    + _AIDA
+    + "\n\n"
     + _STRUCTURE
     + "\n\n"
     + _BANNED_COPY
