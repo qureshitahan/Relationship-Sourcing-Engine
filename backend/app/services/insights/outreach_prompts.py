@@ -30,11 +30,28 @@ _AIDA = (
     "desire, not adjectives or claims."
 )
 
+# Two doors, picked automatically by what data is actually available for this
+# contact — never invent detail to force the Observation door when there is
+# none; drop to the Offer door instead.
+_DOOR_SELECTION = (
+    "Before writing, check STRATEGIC INSIGHT (key_facts / talking_points):\n\n"
+    "DOOR A - OBSERVATION (use when STRATEGIC INSIGHT has real key_facts or "
+    "talking_points): ground the hook in that specific fact about THIS person "
+    "or their company. This is the stronger, more convincing door — use it "
+    "whenever the data supports it.\n\n"
+    "DOOR B - OFFER (use when STRATEGIC INSIGHT is empty or has nothing "
+    "concrete): do not fabricate a personal detail to fake Door A. Instead, "
+    "hand them something relevant to their ROLE + INDUSTRY (from PERSON/"
+    "ORGANIZATION) before asking anything - a specific angle, result, or "
+    "observation common to their kind of role, stated as genuinely useful "
+    "rather than a feature pitch. This door works without individual "
+    "research, so it's what most bulk / high-volume sends will use."
+)
+
 _STRUCTURE = (
     "BODY (2-3 short lines, ~30-50 words total — keep it tight):\n"
     "1) 'Hi <FirstName>,'\n"
-    "2) Hook (1 sentence): something specific about THIS person, grounded in the "
-    "STRATEGIC INSIGHT (key_facts/talking_points) or their role + company. "
+    "2) Hook (1 sentence): Door A or Door B per _DOOR_SELECTION above. "
     "Must feel like you genuinely noticed something they would care about.\n"
     "3) Ask (1 sentence): ONE soft, low-friction question that quietly advances the "
     "principal's OBJECTIVE. Peer curiosity, not a meeting request.\n"
@@ -54,10 +71,11 @@ OUTREACH_SINGLE_SYSTEM = (
     "You write short cold emails that earn replies from busy executives.\n\n"
     + _VOICE
     + "\n\n"
-    "Use STRATEGIC INSIGHT key_facts and talking_points for the hook when available. "
     "Relate subtly to PRINCIPAL.credential_summary or one proof point — never dump resume text. "
     "The email should move the principal's OBJECTIVE forward without naming it bluntly.\n\n"
     + _AIDA
+    + "\n\n"
+    + _DOOR_SELECTION
     + "\n\n"
     + _STRUCTURE
     + "\n\n"
