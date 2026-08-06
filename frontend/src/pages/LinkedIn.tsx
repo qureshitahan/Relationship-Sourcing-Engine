@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
+import { usePersistedState } from "../hooks/usePersistedState";
 import {
   checkLinkedInUpdates,
   createLinkedInConnectLink,
@@ -52,14 +53,31 @@ function distanceLabel(d?: string | null): string | null {
 
 function MessageCard({ msg }: { msg: LinkedInMessage }) {
   const qc = useQueryClient();
-  const [body, setBody] = useState(msg.body);
-  const [note, setNote] = useState(msg.invitation_note ?? "");
-  const [replyText, setReplyText] = useState("");
+  // Persisted per-message: navigating away (e.g. to Emails/Campaigns) before
+  // clicking Save/Send used to silently lose whatever was typed here, since
+  // the component fully unmounts on route change.
+  const [body, setBody, clearBodyDraft] = usePersistedState(`linkedin-msg:${msg.id}:body`, msg.body);
+  const [note, setNote, clearNoteDraft] = usePersistedState(
+    `linkedin-msg:${msg.id}:note`,
+    msg.invitation_note ?? ""
+  );
+  const [replyText, setReplyText, clearReplyDraft] = usePersistedState(
+    `linkedin-msg:${msg.id}:reply`,
+    ""
+  );
   const [showReply, setShowReply] = useState(false);
 
+  // Sync to a genuinely new server value (e.g. regenerate) — but not on first
+  // mount, or this would immediately overwrite a just-restored edit.
+  const mountedRef = useRef(false);
   useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
     setBody(msg.body);
     setNote(msg.invitation_note ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [msg.id, msg.body, msg.invitation_note]);
 
   const editable = msg.status === "draft" || msg.status === "approved";
@@ -68,7 +86,11 @@ function MessageCard({ msg }: { msg: LinkedInMessage }) {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["linkedin"] });
   const save = useMutation({
     mutationFn: () => updateLinkedIn(msg.id, { body, invitation_note: note }),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      clearBodyDraft();
+      clearNoteDraft();
+      invalidate();
+    },
   });
   const status = useMutation({
     mutationFn: (s: string) => setLinkedInStatus(msg.id, s),
@@ -80,12 +102,17 @@ function MessageCard({ msg }: { msg: LinkedInMessage }) {
   });
   const remove = useMutation({
     mutationFn: () => deleteLinkedIn(msg.id),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      clearBodyDraft();
+      clearNoteDraft();
+      clearReplyDraft();
+      invalidate();
+    },
   });
   const reply = useMutation({
     mutationFn: () => replyLinkedIn(msg.id, replyText),
     onSuccess: () => {
-      setReplyText("");
+      clearReplyDraft();
       setShowReply(false);
       invalidate();
     },

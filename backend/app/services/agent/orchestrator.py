@@ -652,7 +652,18 @@ def _finalize_run(
     errors: list[str],
 ) -> None:
     """Shared run wrap-up: status, summary, digest, audit (both pipeline modes)."""
-    run.status = "completed"
+    # A run that errored and achieved nothing is a failure, not a completion.
+    # Discovery exceptions are caught so one bad stage cannot abort the pipeline,
+    # but that left a crashed run reporting "completed" with every counter at
+    # zero — indistinguishable on screen from a run that was never started, which
+    # is why "Run now" read as a dead button. Say what actually happened.
+    achieved_nothing = not (run.discovered or run.drafted or run.sent)
+    if errors and achieved_nothing:
+        run.status = "failed"
+        if not run.error_message:
+            run.error_message = errors[0]
+    else:
+        run.status = "completed"
     run.summary = {**(run.summary or {}), "errors": errors[:50]}
     run.finished_at = datetime.utcnow()
     config.last_run_at = datetime.utcnow()

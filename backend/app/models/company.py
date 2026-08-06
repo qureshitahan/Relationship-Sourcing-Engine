@@ -21,8 +21,13 @@ class Company(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
-    # Normalized key for dedup (lowercased / stripped name).
-    normalized_name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    # Normalized key for dedup (lowercased / stripped name). Unique at the DB
+    # level: without it, concurrent discovery runs inserted the same company
+    # twice and the duplicate then aborted every later run that touched it.
+    # Existing databases are merged and indexed by _dedupe_companies() on boot.
+    normalized_name: Mapped[str] = mapped_column(
+        String(255), index=True, unique=True, nullable=False
+    )
 
     # --- Core firmographics (filled by enrichment) ---
     domain: Mapped[Optional[str]] = mapped_column(String(255), index=True)

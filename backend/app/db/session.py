@@ -606,6 +606,9 @@ def _apply_lightweight_migrations() -> None:
         # (campaign pages, prospect lists) stop erroring.
         _repair_corrupt_indexes,
         _backfill_campaigns,
+        # Merge duplicate companies before anything reads them by dedup key;
+        # a duplicate aborts the whole discovery run (MultipleResultsFound).
+        _dedupe_companies,
         _backfill_contact_campaign_ids,
         # Runs after campaign ids are stamped, so a contact's campaign is known
         # before we use it to decide which principal owns its research.
@@ -696,6 +699,111 @@ def _backfill_insight_principal() -> None:
             "insight principal backfill: moved %s insight(s) onto the owning principal",
             moved,
         )
+
+
+#: Every table that points at ``companies.id``. Used by the dedup merge below
+#: to re-point children off duplicate rows before those rows are deleted.
+_COMPANY_CHILD_TABLES = (
+    "contacts",
+    "relevance_insights",
+    "email_drafts",
+    "linkedin_messages",
+    "calls",
+    "suppressions",
+)
+
+
+def _dedupe_companies() -> None:
+    """Merge duplicate ``companies`` rows, then make the dedup key unique.
+
+    ``Company.normalized_name`` was only indexed, never unique, so nothing at the
+    database level stopped two rows sharing a key — concurrent discovery runs and
+    the SQLite->Postgres migration both produced them. ``get_or_create_company``
+    then raised ``MultipleResultsFound`` and aborted the entire discovery run the
+    first time it touched an affected company, which is why "Run now" looked like
+    it did nothing.
+
+    Oldest row wins (same rule as ``get_or_create_company``). Children are
+    re-pointed onto the survivor before the duplicates are deleted, so no contact,
+    insight, draft, or message is lost. The unique index is created last and only
+    if the merge left the column clean — an index that fails to build must not
+    fail boot, and the ``first()`` read is already duplicate-tolerant regardless.
+    """
+    log = logging.getLogger(__name__)
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "companies" not in tables:
+        return
+
+    # Resolve the child list against the live schema, not the model list: an
+    # older database can have the table without the column (or not at all), and
+    # one bad UPDATE would roll the whole merge back and leave the duplicates.
+    children = [
+        t
+        for t in _COMPANY_CHILD_TABLES
+        if t in tables and "company_id" in {c["name"] for c in inspector.get_columns(t)}
+    ]
+
+    with engine.begin() as conn:
+        dupes = conn.execute(
+            text(
+                """
+                SELECT normalized_name, MIN(id) AS keep_id
+                FROM companies
+                GROUP BY normalized_name
+                HAVING COUNT(*) > 1
+                """
+            )
+        ).all()
+        merged = 0
+        for normalized_name, keep_id in dupes:
+            params = {"keep": keep_id, "name": normalized_name}
+            for child in children:
+                conn.execute(
+                    text(
+                        f"""
+                        UPDATE {child}
+                        SET company_id = :keep
+                        WHERE company_id IN (
+                            SELECT id FROM companies
+                            WHERE normalized_name = :name AND id <> :keep
+                        )
+                        """
+                    ),
+                    params,
+                )
+            result = conn.execute(
+                text(
+                    "DELETE FROM companies "
+                    "WHERE normalized_name = :name AND id <> :keep"
+                ),
+                params,
+            )
+            merged += result.rowcount or 0
+        if merged:
+            log.warning(
+                "company dedup: merged %s duplicate row(s) across %s name(s)",
+                merged, len(dupes),
+            )
+
+    # Separate transaction: if the unique index still cannot be built (a name
+    # slipped in between the merge and here), boot must continue anyway.
+    already_unique = any(
+        ix.get("unique") and ix.get("column_names") == ["normalized_name"]
+        for ix in inspector.get_indexes("companies")
+    )
+    if already_unique:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_companies_normalized_name ON companies (normalized_name)"
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 - duplicates must not block boot
+        log.warning("Could not create unique index on companies.normalized_name: %s", exc)
 
 
 def _backfill_contact_campaign_ids() -> None:

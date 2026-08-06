@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { listCampaigns, listPrincipals } from "../api/client";
 import { Badge, Button, Loading } from "../components/ui";
 import type { CampaignSummary } from "../types";
+import { relativeTime } from "../utils/time";
 
 type Tone = "green" | "blue" | "amber" | "slate" | "red";
 
@@ -14,17 +15,6 @@ const STATUS_TONE: Record<CampaignSummary["status"], Tone> = {
   ready: "green",
   draft: "amber",
 };
-
-function relativeTime(iso?: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 function statusLabel(c: CampaignSummary): string {
   if (c.status === "draft") return "Needs setup";
