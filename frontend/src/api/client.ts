@@ -212,8 +212,12 @@ export const getDiscoveryRun = (id: number) =>
 // Run-level bulk jobs (all return immediately; poll the run for job_* progress).
 export const revealRunEmails = (id: number) =>
   api.post<DiscoveryRun>(`/api/discovery/runs/${id}/reveal`).then((r) => r.data);
-export const draftRunEmails = (id: number) =>
-  api.post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-emails`).then((r) => r.data);
+export const draftRunEmails = (id: number, outreachGoal?: string) =>
+  api
+    .post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-emails`, {
+      outreach_goal: outreachGoal ?? null,
+    })
+    .then((r) => r.data);
 export const sendRunEmails = (id: number) =>
   api.post<DiscoveryRun>(`/api/discovery/runs/${id}/send-emails`).then((r) => r.data);
 export const sendRunLinkedin = (id: number) =>

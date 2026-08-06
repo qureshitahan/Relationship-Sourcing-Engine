@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
+from app.models.contact import Contact
 from app.models.discovery_run import DiscoveryRun
 from app.models.enums import DiscoveryStatus
 from app.models.principal import Principal
@@ -93,9 +94,39 @@ def _criteria_from_request(
     )
 
 
-def _discovery_run_out(run: DiscoveryRun) -> DiscoveryRunOut:
+def _researched_counts(db: Session, run_ids: list[int]) -> dict[int, int]:
+    """How many prospects of each run actually have research, counted live.
+
+    ``DiscoveryRun.insights_generated`` is only written while discovery itself
+    runs, so research done afterwards — the normal path, since Approve triggers
+    it — never reaches the stored counter. That left every such run reporting
+    "0 researched" while its prospects were plainly researched and draftable.
+
+    One grouped query for the whole page, so listing runs stays a fixed number
+    of queries rather than one per run.
+    """
+    if not run_ids:
+        return {}
+    rows = db.execute(
+        select(Contact.discovery_run_id, func.count(Contact.id))
+        .where(
+            Contact.discovery_run_id.in_(run_ids),
+            Contact.relevance_score.isnot(None),
+        )
+        .group_by(Contact.discovery_run_id)
+    ).all()
+    return {rid: int(count or 0) for rid, count in rows}
+
+
+def _discovery_run_out(
+    run: DiscoveryRun, *, researched: Optional[int] = None
+) -> DiscoveryRunOut:
     data = DiscoveryRunOut.model_validate(run)
     data.provider_warnings = active_warnings()
+    if researched is not None:
+        # Live count beats the stored counter, which only sees discovery-time
+        # research. Never report fewer than the run recorded for itself.
+        data.insights_generated = max(researched, run.insights_generated or 0)
     return data
 
 
@@ -167,8 +198,9 @@ def list_runs(
     query = query.order_by(DiscoveryRun.created_at.desc()).limit(limit).offset(offset)
     items = db.execute(query).scalars().all()
     total = db.execute(count_query).scalar_one()
+    researched = _researched_counts(db, [r.id for r in items])
     return Page[DiscoveryRunOut](
-        items=[_discovery_run_out(r) for r in items],
+        items=[_discovery_run_out(r, researched=researched.get(r.id, 0)) for r in items],
         total=total,
         limit=limit,
         offset=offset,
@@ -180,7 +212,8 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     discovery_run = db.get(DiscoveryRun, run_id)
     if not discovery_run:
         raise HTTPException(status_code=404, detail="Discovery run not found")
-    return _discovery_run_out(discovery_run)
+    researched = _researched_counts(db, [run_id]).get(run_id, 0)
+    return _discovery_run_out(discovery_run, researched=researched)
 
 
 @router.delete("/runs/{run_id}")
@@ -234,12 +267,24 @@ def reveal_run_emails(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/draft-emails", response_model=DiscoveryRunOut, status_code=202)
-def draft_run_emails(run_id: int, db: Session = Depends(get_db)):
-    """Draft outreach emails for every approved prospect in the run (background)."""
+def draft_run_emails(
+    run_id: int,
+    outreach_goal: Optional[str] = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+):
+    """Draft outreach emails for every approved prospect in the run (background).
+
+    Returns immediately with 202; progress lands on the run's ``job_*`` columns.
+    Drafting is one LLM call per prospect, so a few hundred approved prospects
+    takes far longer than any HTTP timeout — this must never be done inline.
+
+    ``outreach_goal`` is the purpose the operator typed on the Drafts page; it
+    steers what every email argues. Falls back to the run's stored goal.
+    """
     run = _run_for_job(db, run_id)
     if run.principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
-    launch_run_draft(run_id)
+    launch_run_draft(run_id, outreach_goal=outreach_goal)
     db.refresh(run)
     return _discovery_run_out(run)
 
