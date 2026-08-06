@@ -607,6 +607,9 @@ def _apply_lightweight_migrations() -> None:
         _repair_corrupt_indexes,
         _backfill_campaigns,
         _backfill_contact_campaign_ids,
+        # Runs after campaign ids are stamped, so a contact's campaign is known
+        # before we use it to decide which principal owns its research.
+        _backfill_insight_principal,
     )
     repair_tried = False
     for step in steps:
@@ -634,6 +637,65 @@ def _apply_lightweight_migrations() -> None:
                 "DB migration step '%s' failed; continuing so the app can boot",
                 step.__name__,
             )
+
+
+def _backfill_insight_principal() -> None:
+    """Re-point research that was saved against the wrong principal.
+
+    Until routes/prospects.py was fixed, the Research button sent no principal
+    and the backend fell back to "oldest principal by id" — on a multi-principal
+    deployment almost never the right one. The damage is invisible from the
+    Prospects page, because ``Contact.relevance_score`` is shared across
+    principals while ``RelevanceInsight`` is per-principal: the prospect looks
+    researched, then drafting rejects it with "research failed".
+
+    Move each misattributed insight onto the principal that actually owns the
+    prospect — its campaign first, else its discovery run. Nothing is
+    re-researched, so this costs no tokens.
+
+    Correlated-subquery form so it runs on both SQLite and Postgres. The NOT
+    EXISTS guard respects UNIQUE(principal_id, contact_id): where the right
+    principal already has its own research, the stale row is left alone rather
+    than colliding.
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if not {"relevance_insights", "contacts"} <= tables:
+        return
+
+    owner_sql = """
+        SELECT CASE
+                 WHEN ac.principal_id IS NOT NULL THEN ac.principal_id
+                 ELSE dr.principal_id
+               END
+        FROM contacts c
+        LEFT JOIN agent_configs ac ON ac.id = c.campaign_id
+        LEFT JOIN discovery_runs dr ON dr.id = c.discovery_run_id
+        WHERE c.id = relevance_insights.contact_id
+    """
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                f"""
+                UPDATE relevance_insights
+                SET principal_id = ({owner_sql})
+                WHERE contact_id IS NOT NULL
+                  AND ({owner_sql}) IS NOT NULL
+                  AND ({owner_sql}) <> principal_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM relevance_insights other
+                      WHERE other.contact_id = relevance_insights.contact_id
+                        AND other.principal_id = ({owner_sql})
+                  )
+                """
+            )
+        )
+        moved = result.rowcount or 0
+    if moved:
+        logging.getLogger(__name__).warning(
+            "insight principal backfill: moved %s insight(s) onto the owning principal",
+            moved,
+        )
 
 
 def _backfill_contact_campaign_ids() -> None:
