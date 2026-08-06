@@ -7,6 +7,12 @@ gunicorn==22.0.0
 SQLAlchemy==2.0.30
 pydantic==2.7.4
 pydantic-settings==2.3.4
+# Postgres driver (Azure Database for PostgreSQL). psycopg2-binary has no
+# prebuilt wheel for newer Python yet and needs a C compiler to build from
+# source; psycopg (v3) ships a working wheel and is the actively maintained
+# driver, so use that instead. DATABASE_URL must use the postgresql+psycopg://
+# scheme (not bare postgresql://) so SQLAlchemy picks this driver.
+psycopg[binary]==3.3.4
 
 # File parsing / imports
 python-multipart==0.0.9
