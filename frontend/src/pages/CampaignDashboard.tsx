@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -586,12 +586,32 @@ export default function CampaignDashboard() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [pauseOpen, setPauseOpen] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
+  const toastTimer = useRef<number | null>(null);
 
-  const notify = (msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast(null), 4000);
+  const clearToastTimer = () => {
+    if (toastTimer.current !== null) {
+      window.clearTimeout(toastTimer.current);
+      toastTimer.current = null;
+    }
   };
+
+  // Success messages fade; failures do NOT. A run that refuses to start (paused,
+  // already in progress, backend error) used to say so for four seconds and then
+  // erase itself, which is why "Run now" read as a dead button — the reason was
+  // on screen but gone before it was noticed. Errors now wait to be dismissed.
+  const notify = (msg: string) => {
+    clearToastTimer();
+    setToast({ msg, isError: false });
+    toastTimer.current = window.setTimeout(() => setToast(null), 4000);
+  };
+
+  const notifyError = (msg: string) => {
+    clearToastTimer();
+    setToast({ msg, isError: true });
+  };
+
+  useEffect(() => clearToastTimer, []);
 
   const { data: campaign, isLoading, isError } = useQuery({
     queryKey: ["campaign", campaignId],
@@ -633,7 +653,7 @@ export default function CampaignDashboard() {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         "Could not start run.";
-      notify(String(msg));
+      notifyError(String(msg));
     },
   });
 
@@ -650,7 +670,7 @@ export default function CampaignDashboard() {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         "Could not stop the run.";
-      notify(String(msg));
+      notifyError(String(msg));
     },
   });
 
@@ -670,7 +690,7 @@ export default function CampaignDashboard() {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         "Could not pause the campaign.";
-      notify(String(msg));
+      notifyError(String(msg));
       setPauseOpen(false);
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
@@ -688,7 +708,7 @@ export default function CampaignDashboard() {
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
     },
-    onError: () => notify("Could not resume the campaign."),
+    onError: () => notifyError("Could not resume the campaign."),
   });
 
   const scheduleApproved = useMutation({
@@ -704,7 +724,7 @@ export default function CampaignDashboard() {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         "Could not schedule the approved emails.";
-      notify(String(msg));
+      notifyError(String(msg));
     },
   });
 
@@ -739,6 +759,28 @@ export default function CampaignDashboard() {
   const readyToQueue = campaign.approved_unscheduled ?? 0;
   const maxFunnel = Math.max(t.discovered, t.qualified, t.drafted, t.sent, 1);
   const interrupted = !!campaign.interrupted_run;
+  // A run that broke in its background thread reported nothing at all: the POST
+  // had already returned 202, so no error toast could fire, and the only failure
+  // banner was gated on the word "Interrupted". Worse, a discovery crash is
+  // caught and logged as a run "error" while the run still finishes as
+  // *completed* with every counter at zero — so the page looked completely
+  // unchanged. That is exactly what "Run now does nothing" was. Treat an
+  // outright failure, or a run that errored and accomplished nothing, as one
+  // thing worth saying out loud at the top of the page.
+  const lastRun = campaign.last_run;
+  const lastRunErrors = lastRun?.errors ?? [];
+  const lastRunDidNothing =
+    !!lastRun &&
+    !(lastRun.discovered ?? 0) &&
+    !(lastRun.drafted ?? 0) &&
+    !(lastRun.sent ?? 0);
+  const failedRun =
+    !running &&
+    !interrupted &&
+    lastRun &&
+    (lastRun.status === "failed" || (lastRunErrors.length > 0 && lastRunDidNothing))
+      ? lastRun
+      : null;
   const canContinue =
     !running &&
     !paused &&
@@ -749,8 +791,25 @@ export default function CampaignDashboard() {
   return (
     <div className="pb-12">
       {toast && (
-        <div className="fixed bottom-6 right-6 z-50 max-w-sm rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-800 shadow-lg">
-          {toast}
+        <div
+          role={toast.isError ? "alert" : "status"}
+          className={`fixed bottom-6 right-6 z-50 flex max-w-sm items-start gap-3 rounded-xl border px-4 py-3 text-sm shadow-lg ${
+            toast.isError
+              ? "border-rose-300 bg-rose-50 text-rose-900"
+              : "border-slate-200 bg-white text-slate-800"
+          }`}
+        >
+          <span className="min-w-0">{toast.msg}</span>
+          {toast.isError && (
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              aria-label="Dismiss"
+              className="-mr-1 shrink-0 rounded px-1.5 text-rose-500 hover:bg-rose-100 hover:text-rose-800"
+            >
+              ✕
+            </button>
+          )}
         </div>
       )}
 
@@ -823,6 +882,29 @@ export default function CampaignDashboard() {
               . Press <strong>Continue</strong> to finish researching and drafting
               those people.
             </p>
+          </div>
+        )}
+
+        {failedRun && !paused && (
+          <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-950 ring-1 ring-rose-200">
+            <p className="font-semibold">
+              {lastRunDidNothing
+                ? "The last run did not get anywhere"
+                : "Last run failed"}
+            </p>
+            <p className="mt-1 text-rose-800">
+              It stopped
+              {failedRun.discovered
+                ? ` after finding ${failedRun.discovered} people`
+                : " before it found anyone"}
+              . Nothing already in this campaign was lost — you can safely run it
+              again.
+            </p>
+            {(failedRun.error_message || lastRunErrors[0]) && (
+              <p className="mt-2 break-words font-mono text-xs text-rose-700">
+                {failedRun.error_message || lastRunErrors[0]}
+              </p>
+            )}
           </div>
         )}
 
