@@ -38,9 +38,42 @@ router = APIRouter(prefix="/prospects", tags=["prospects"])
 def _principal_for_research(db: Session, contact: Contact) -> Optional[Principal]:
     """Pick the principal to research a prospect against.
 
-    Prefer a principal already linked via an existing insight; otherwise fall
-    back to the first principal in the system (single-principal deployments).
+    Relevance is always relative to a principal ("why should *this* person speak
+    with *this* principal"), so picking the wrong one silently produces research
+    that the draft step then rejects — the prospect looks researched on the
+    Prospects page but drafting reports "research failed".
+
+    Resolution order, most authoritative first:
+
+    1. The prospect's own campaign — a contact is owned by one campaign.
+    2. The discovery run that imported the prospect.
+    3. An existing insight for this contact, when it points at a live principal.
+    4. Any active principal (oldest first) — only meaningful single-principal.
+
+    Ordering matters: the contact's own lineage beats an existing insight,
+    because a wrong insight is exactly what we may be here to correct. Inactive
+    principals are never chosen as a fallback — a deactivated principal ranking
+    first by id is how every run ended up researched against the wrong one.
     """
+    from app.models.agent_config import AgentConfig
+
+    # 1. The campaign that owns this prospect.
+    if contact.campaign_id:
+        config = db.get(AgentConfig, contact.campaign_id)
+        if config and config.principal_id:
+            principal = db.get(Principal, config.principal_id)
+            if principal:
+                return principal
+
+    # 2. The discovery run that imported it.
+    if contact.discovery_run_id:
+        run = db.get(DiscoveryRun, contact.discovery_run_id)
+        if run and run.principal_id:
+            principal = db.get(Principal, run.principal_id)
+            if principal:
+                return principal
+
+    # 3. An existing insight, but only if that principal is still active.
     insight = db.execute(
         select(RelevanceInsight)
         .where(RelevanceInsight.contact_id == contact.id)
@@ -48,9 +81,15 @@ def _principal_for_research(db: Session, contact: Contact) -> Optional[Principal
     ).scalars().first()
     if insight and insight.principal_id:
         principal = db.get(Principal, insight.principal_id)
-        if principal:
+        if principal and principal.is_active:
             return principal
-    return db.execute(select(Principal).order_by(Principal.id.asc())).scalars().first()
+
+    # 4. Last resort: an ACTIVE principal.
+    return db.execute(
+        select(Principal)
+        .where(Principal.is_active.is_(True))
+        .order_by(Principal.id.asc())
+    ).scalars().first()
 
 
 def _rollup_outreach_status(rows: list[tuple[int, str, object, object]]) -> dict[int, str]:

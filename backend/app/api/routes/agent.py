@@ -57,13 +57,18 @@ def _resolve_principal_id(db: Session, principal_id: Optional[int]) -> int:
         if not db.get(Principal, principal_id):
             raise HTTPException(status_code=404, detail="Principal not found")
         return principal_id
+    # Only ACTIVE principals: a deactivated one ranking first by id is how work
+    # silently got attributed to the wrong principal (deletes are soft, so the
+    # row keeps its low id forever).
     first = db.execute(
-        select(Principal).order_by(Principal.id.asc())
+        select(Principal)
+        .where(Principal.is_active.is_(True))
+        .order_by(Principal.id.asc())
     ).scalars().first()
     if not first:
         raise HTTPException(
             status_code=400,
-            detail="No principal exists yet. Create a principal first.",
+            detail="No active principal exists yet. Create a principal first.",
         )
     return first.id
 
