@@ -5,6 +5,7 @@ import { isAxiosError } from "axios";
 
 import { createCampaign, listPrincipals, planAgentSearch } from "../api/client";
 import { ChipSelect } from "../components/ChipSelect";
+import { usePersistedState } from "../hooks/usePersistedState";
 import {
   COMPANY_TYPE_OPTIONS,
   INDUSTRY_OPTIONS,
@@ -55,31 +56,87 @@ export default function CampaignWizard() {
   const [searchParams] = useSearchParams();
   const presetPrincipal = Number(searchParams.get("principal")) || null;
 
-  const [step, setStep] = useState(0);
-  const [maxStep, setMaxStep] = useState(0);
-  const [principalId, setPrincipalId] = useState<number | null>(presetPrincipal);
-  const [objective, setObjective] = useState("");
-  const [plan, setPlan] = useState<AgentPlan | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  // Persisted to sessionStorage (not just useState): navigating away mid-wizard
+  // (e.g. to check LinkedIn) fully unmounts this page, and a plain useState
+  // would lose everything typed/selected so far. Cleared on successful create.
+  const [step, setStep, clearStep] = usePersistedState("campaign-wizard:step", 0);
+  const [maxStep, setMaxStep, clearMaxStep] = usePersistedState("campaign-wizard:maxStep", 0);
+  const [principalId, setPrincipalId, clearPrincipalId] = usePersistedState<number | null>(
+    "campaign-wizard:principalId",
+    presetPrincipal
+  );
+  const [objective, setObjective, clearObjective] = usePersistedState("campaign-wizard:objective", "");
+  const [plan, setPlan, clearPlan] = usePersistedState<AgentPlan | null>("campaign-wizard:plan", null);
+  const [answers, setAnswers, clearAnswers] = usePersistedState<Record<string, string>>(
+    "campaign-wizard:answers",
+    {}
+  );
 
-  const [titles, setTitles] = useState<string[]>([]);
-  const [seniorities, setSeniorities] = useState<string[]>([]);
-  const [industries, setIndustries] = useState<string[]>(["Healthcare Services"]);
-  const [companyTypes, setCompanyTypes] = useState<string[]>(["private_equity"]);
+  const [titles, setTitles, clearTitles] = usePersistedState<string[]>("campaign-wizard:titles", []);
+  const [seniorities, setSeniorities, clearSeniorities] = usePersistedState<string[]>(
+    "campaign-wizard:seniorities",
+    []
+  );
+  const [industries, setIndustries, clearIndustries] = usePersistedState<string[]>(
+    "campaign-wizard:industries",
+    ["Healthcare Services"]
+  );
+  const [companyTypes, setCompanyTypes, clearCompanyTypes] = usePersistedState<string[]>(
+    "campaign-wizard:companyTypes",
+    ["private_equity"]
+  );
 
-  const [peoplePerDay, setPeoplePerDay] = useState(50);
-  const [mailboxCap, setMailboxCap] = useState(50);
+  const [peoplePerDay, setPeoplePerDay, clearPeoplePerDay] = usePersistedState(
+    "campaign-wizard:peoplePerDay",
+    50
+  );
+  const [mailboxCap, setMailboxCap, clearMailboxCap] = usePersistedState("campaign-wizard:mailboxCap", 50);
   // Default new campaigns to review-before-send so the first runs are safe to inspect.
-  const [autoSend, setAutoSend] = useState(false);
-  const [autoSchedule, setAutoSchedule] = useState(true);
-  const [followupEnabled, setFollowupEnabled] = useState(true);
-  const [runHour, setRunHour] = useState(9);
-  const [timezone, setTimezone] = useState("America/New_York");
-  const [digest, setDigest] = useState("");
-  const [name, setName] = useState("");
-  const [enabled, setEnabled] = useState(true);
-  const [runNow, setRunNow] = useState(true);
+  const [autoSend, setAutoSend, clearAutoSend] = usePersistedState("campaign-wizard:autoSend", false);
+  const [autoSchedule, setAutoSchedule, clearAutoSchedule] = usePersistedState(
+    "campaign-wizard:autoSchedule",
+    true
+  );
+  const [followupEnabled, setFollowupEnabled, clearFollowupEnabled] = usePersistedState(
+    "campaign-wizard:followupEnabled",
+    true
+  );
+  const [runHour, setRunHour, clearRunHour] = usePersistedState("campaign-wizard:runHour", 9);
+  const [timezone, setTimezone, clearTimezone] = usePersistedState(
+    "campaign-wizard:timezone",
+    "America/New_York"
+  );
+  const [digest, setDigest, clearDigest] = usePersistedState("campaign-wizard:digest", "");
+  const [name, setName, clearName] = usePersistedState("campaign-wizard:name", "");
+  const [enabled, setEnabled, clearEnabled] = usePersistedState("campaign-wizard:enabled", true);
+  const [runNow, setRunNow, clearRunNow] = usePersistedState("campaign-wizard:runNow", true);
   const [error, setError] = useState<string | null>(null);
+
+  // Wipe every persisted field once the campaign is actually created, so the
+  // next visit to "New campaign" starts blank instead of reloading this draft.
+  const clearWizardDraft = () => {
+    clearStep();
+    clearMaxStep();
+    clearPrincipalId();
+    clearObjective();
+    clearPlan();
+    clearAnswers();
+    clearTitles();
+    clearSeniorities();
+    clearIndustries();
+    clearCompanyTypes();
+    clearPeoplePerDay();
+    clearMailboxCap();
+    clearAutoSend();
+    clearAutoSchedule();
+    clearFollowupEnabled();
+    clearRunHour();
+    clearTimezone();
+    clearDigest();
+    clearName();
+    clearEnabled();
+    clearRunNow();
+  };
 
   const { data: principals, isLoading: principalsLoading } = useQuery({
     queryKey: ["principals", "active"],
@@ -90,13 +147,13 @@ export default function CampaignWizard() {
     if (principalId == null && principals?.items.length) {
       setPrincipalId(principals.items[0].id);
     }
-  }, [principals, principalId]);
+  }, [principals, principalId, setPrincipalId]);
 
   // Remember the furthest step reached so the stepper can jump back to any
   // visited step to correct earlier answers.
   useEffect(() => {
     setMaxStep((m) => Math.max(m, step));
-  }, [step]);
+  }, [step, setMaxStep]);
 
   const principalName = useMemo(
     () => principals?.items.find((p) => p.id === principalId)?.name ?? "",
@@ -161,7 +218,10 @@ export default function CampaignWizard() {
         enabled,
         run_now: runNow,
       }),
-    onSuccess: (c) => navigate(`/campaigns/${c.id}`),
+    onSuccess: (c) => {
+      clearWizardDraft();
+      navigate(`/campaigns/${c.id}`);
+    },
     onError: (e) => setError(apiErrorMessage(e, "Could not create the campaign.")),
   });
 

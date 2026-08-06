@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
+import { usePersistedState } from "../hooks/usePersistedState";
 import {
   deleteEmail,
   draftRunEmails,
@@ -85,8 +86,15 @@ function DraftCard({
   onToggleSelect: (id: number) => void;
 }) {
   const qc = useQueryClient();
-  const [subject, setSubject] = useState(draft.subject);
-  const [body, setBody] = useState(draft.body);
+  // Persisted per-draft: navigating away (e.g. to LinkedIn) before clicking
+  // "Save edits" used to silently lose whatever was typed here, since the
+  // component fully unmounts on route change. Falls back to the draft's own
+  // subject/body when nothing was in progress.
+  const [subject, setSubject, clearSubjectDraft] = usePersistedState(
+    `email-draft:${draft.id}:subject`,
+    draft.subject
+  );
+  const [body, setBody, clearBodyDraft] = usePersistedState(`email-draft:${draft.id}:body`, draft.body);
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleAt, setScheduleAt] = useState(defaultScheduleValue);
 
@@ -101,10 +109,19 @@ function DraftCard({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["emails"] }),
   });
 
-  // Keep the textarea in sync when the server body changes (e.g. bulk signature).
+  // Keep the textarea in sync when the server body changes (e.g. bulk
+  // signature, regenerate) — but not on first mount, or this would
+  // immediately overwrite a just-restored in-progress edit with the
+  // pre-edit server value.
+  const mountedRef = useRef(false);
   useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
     setSubject(draft.subject);
     setBody(draft.body);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.id, draft.subject, draft.body]);
   const dirty = subject !== draft.subject || body !== draft.body;
   const lineCount = body.split("\n").filter((l) => l.trim()).length;
@@ -113,7 +130,11 @@ function DraftCard({
 
   const save = useMutation({
     mutationFn: () => updateEmail(draft.id, { subject, body }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["emails"] }),
+    onSuccess: () => {
+      clearSubjectDraft();
+      clearBodyDraft();
+      qc.invalidateQueries({ queryKey: ["emails"] });
+    },
   });
   const status = useMutation({
     mutationFn: (s: string) => setEmailStatus(draft.id, s),
@@ -125,7 +146,11 @@ function DraftCard({
   });
   const remove = useMutation({
     mutationFn: () => deleteEmail(draft.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["emails"] }),
+    onSuccess: () => {
+      clearSubjectDraft();
+      clearBodyDraft();
+      qc.invalidateQueries({ queryKey: ["emails"] });
+    },
   });
   const schedule = useMutation({
     mutationFn: () =>
