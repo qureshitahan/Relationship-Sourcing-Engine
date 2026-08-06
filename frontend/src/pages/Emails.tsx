@@ -565,8 +565,13 @@ export default function Emails() {
           : "";
       setBulkNote(
         `Drafted ${res.generated} email(s) for approved prospects` +
-          (res.skipped ? ` (${res.skipped} already had drafts)` : "") +
-          (res.errors.length ? `. ${res.errors.length} error(s).` : ".") +
+          // `skipped` counts BOTH prospects that already had a draft AND ones
+          // blocked by a missing prerequisite, so it must not claim "already
+          // had drafts" — that read as a lie when zero drafts existed.
+          (res.skipped ? ` (${res.skipped} skipped)` : "") +
+          (res.errors.length
+            ? `. ${res.errors.length} skipped for: ${res.errors[0]}`
+            : ".") +
           warn
       );
       qc.invalidateQueries({ queryKey: ["emails"] });

@@ -178,9 +178,12 @@ export default function Prospects() {
     queryFn: () => listDiscoveryRuns({ limit: 25 }),
   });
 
+  // Active only: a deactivated principal keeps its low id forever, so an
+  // unfiltered list can surface one as the default and attribute research to
+  // the wrong person.
   const { data: principals } = useQuery({
-    queryKey: ["principals"],
-    queryFn: () => listPrincipals(),
+    queryKey: ["principals", "active"],
+    queryFn: () => listPrincipals({ active: true }),
   });
 
   const principalId = run?.principal_id ?? principals?.items[0]?.id;
