@@ -7,6 +7,7 @@ count are found. Research / relevance scoring happens later on the Prospects pag
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 from sqlalchemy import select
@@ -161,17 +162,32 @@ def run_discovery(
         use_direct = people_first or not discovered_org_ids
         round_num = 0
         rounds_without_progress = 0
+        run_started = time.monotonic()
 
         while people_imported < target and round_num <= MAX_EXPANSION_ROUNDS:
             need = target - people_imported
             fetch_limit = min(max(need * 2, 30), settings.discovery_max_people_limit)
             working_criteria.people_limit = fetch_limit
 
+            round_started = time.monotonic()
             discovered_people = provider.discover_people(
                 working_criteria,
                 organization_ids=discovered_org_ids or None,
                 direct=use_direct,
                 exclude_external_ids=seen_apollo_ids,
+            )
+            round_seconds = time.monotonic() - round_started
+            # Diagnostic: broad filters + a large target on a mature contacts
+            # table can make Apollo pagination the actual bottleneck (each round
+            # re-fetches up to fetch_limit results, mostly-duplicate rounds still
+            # cost the same number of Apollo API calls). This makes that visible
+            # in logs instead of only seeing the total run time.
+            logger.info(
+                "Discovery run %s round %s: fetch_limit=%s apollo_call=%.1fs "
+                "returned=%s imported_so_far=%s/%s elapsed=%.1fs",
+                run.id, round_num, fetch_limit, round_seconds,
+                len(discovered_people), people_imported, target,
+                time.monotonic() - run_started,
             )
             people_found += len(discovered_people)
 
@@ -253,6 +269,12 @@ def run_discovery(
                 imported_this_round += 1
 
             db.flush()
+            logger.info(
+                "Discovery run %s round %s done: imported_this_round=%s "
+                "duplicates_total=%s round_elapsed=%.1fs",
+                run.id, round_num, imported_this_round, duplicates,
+                time.monotonic() - round_started,
+            )
 
             if people_imported >= target:
                 break
@@ -277,6 +299,13 @@ def run_discovery(
                 rounds_without_progress = 0
             else:
                 break
+
+        logger.info(
+            "Discovery run %s import phase finished: rounds=%s people_found=%s "
+            "people_imported=%s duplicates=%s total_elapsed=%.1fs",
+            run.id, round_num, people_found, people_imported, duplicates,
+            time.monotonic() - run_started,
+        )
 
         if generate_insights:
             from app.services.insights.engine import generate_insight
