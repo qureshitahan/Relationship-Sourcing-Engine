@@ -19,20 +19,10 @@ import {
   updateCampaign,
 } from "../api/client";
 import { Badge, Button, Card, Loading, ScoreBar } from "../components/ui";
+import { relativeTime } from "../utils/time";
 import type { CampaignDetail, CampaignProspect, CampaignRunSnapshot, EmailDraft } from "../types";
 
 type Tone = "green" | "blue" | "amber" | "slate" | "purple";
-
-function relativeTime(iso?: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 const inputCls =
   "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100";
