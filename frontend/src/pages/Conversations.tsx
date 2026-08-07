@@ -19,6 +19,7 @@ import {
   Loading,
   PageHeader,
 } from "../components/ui";
+import { usePersistedState } from "../hooks/usePersistedState";
 import type { EmailDraft } from "../types";
 
 /** Default the schedule picker to ~tomorrow 9am, formatted for datetime-local. */
@@ -178,9 +179,9 @@ const SILENCE_PRESETS = [
 export default function Conversations() {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const [view, setView] = useState<ViewKey>("awaiting");
-  const [silence, setSilence] = useState(0);
-  const [search, setSearch] = useState("");
+  const [view, setView] = usePersistedState<ViewKey>("conversations:view", "awaiting");
+  const [silence, setSilence] = usePersistedState("conversations:silence", 0);
+  const [search, setSearch] = usePersistedState("conversations:search", "");
   const [note, setNote] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
