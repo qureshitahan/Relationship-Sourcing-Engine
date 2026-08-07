@@ -458,7 +458,7 @@ export default function Emails() {
   const runId = searchParams.get("run")
     ? Number(searchParams.get("run"))
     : undefined;
-  const [statusFilter, setStatusFilter] = useState("draft");
+  const [statusFilter, setStatusFilter] = usePersistedState("emails:statusFilter", "draft");
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkNote, setBulkNote] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);

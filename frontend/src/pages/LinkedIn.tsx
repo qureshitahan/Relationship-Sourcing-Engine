@@ -284,7 +284,7 @@ export default function LinkedIn() {
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const runId = searchParams.get("run") ? Number(searchParams.get("run")) : undefined;
-  const [statusFilter, setStatusFilter] = useState("");
+  const [statusFilter, setStatusFilter] = usePersistedState("linkedin:statusFilter", "");
   const [note, setNote] = useState<string | null>(null);
   // While a bulk approve+send is in flight, auto-refresh the list until this
   // timestamp so the user watches messages move draft -> invited/sent.

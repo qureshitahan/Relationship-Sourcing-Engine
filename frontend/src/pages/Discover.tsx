@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
@@ -26,6 +26,7 @@ import {
   SENIORITY_OPTIONS,
 } from "../constants/discoveryOptions";
 import WorkflowSteps from "../components/WorkflowSteps";
+import { usePersistedState } from "../hooks/usePersistedState";
 import {
   Badge,
   Button,
@@ -84,13 +85,29 @@ export default function Discover() {
     },
   });
 
-  const [principalId, setPrincipalId] = useState<number | "">("");
-  const [objective, setObjective] = useState("");
-  const [plan, setPlan] = useState<AgentPlan | null>(null);
-  const [planAnswers, setPlanAnswers] = useState<Record<string, string>>({});
-  const [planNote, setPlanNote] = useState<string | null>(null);
+  // Persisted (sessionStorage) rather than plain useState: navigating to
+  // another module and back should not wipe a filter set, an in-progress AI
+  // plan, or the run being watched — React Router unmounts this component
+  // on route change, which would otherwise reset all of it.
+  const [principalId, setPrincipalId] = usePersistedState<number | "">(
+    "discover:principalId",
+    ""
+  );
+  const [objective, setObjective] = usePersistedState("discover:objective", "");
+  const [plan, setPlan] = usePersistedState<AgentPlan | null>("discover:plan", null);
+  const [planAnswers, setPlanAnswers] = usePersistedState<Record<string, string>>(
+    "discover:planAnswers",
+    {}
+  );
+  const [planNote, setPlanNote] = usePersistedState<string | null>(
+    "discover:planNote",
+    null
+  );
   // Id of the run kicked off by the "Run discovery" button, polled until done.
-  const [activeRunId, setActiveRunId] = useState<number | null>(null);
+  const [activeRunId, setActiveRunId] = usePersistedState<number | null>(
+    "discover:activeRunId",
+    null
+  );
   const activeRun = useQuery({
     queryKey: ["discovery-run", activeRunId],
     queryFn: () => getDiscoveryRun(activeRunId as number),
@@ -106,10 +123,19 @@ export default function Discover() {
     },
   });
 
-  const [industries, setIndustries] = useState<string[]>(["Healthcare", "Healthcare Services"]);
-  const [geographies, setGeographies] = useState<string[]>(DEFAULT_GEOGRAPHIES);
-  const [seniorities, setSeniorities] = useState<string[]>([]);
-  const [peopleLimit, setPeopleLimit] = useState("100");
+  const [industries, setIndustries] = usePersistedState<string[]>("discover:industries", [
+    "Healthcare",
+    "Healthcare Services",
+  ]);
+  const [geographies, setGeographies] = usePersistedState<string[]>(
+    "discover:geographies",
+    DEFAULT_GEOGRAPHIES
+  );
+  const [seniorities, setSeniorities] = usePersistedState<string[]>(
+    "discover:seniorities",
+    []
+  );
+  const [peopleLimit, setPeopleLimit] = usePersistedState("discover:peopleLimit", "100");
 
   const { data: agentConfig } = useQuery({
     queryKey: ["agent", "config", principalId],
@@ -122,7 +148,7 @@ export default function Discover() {
     if (agentConfig.discover_target) {
       setPeopleLimit(String(agentConfig.discover_target));
     }
-  }, [agentConfig, principalId]);
+  }, [agentConfig, principalId, setPeopleLimit]);
 
   const planSetters = {
     setSeniorities,

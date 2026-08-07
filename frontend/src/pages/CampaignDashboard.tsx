@@ -19,6 +19,7 @@ import {
   updateCampaign,
 } from "../api/client";
 import { Badge, Button, Card, Loading, ScoreBar } from "../components/ui";
+import { usePersistedState } from "../hooks/usePersistedState";
 import { relativeTime } from "../utils/time";
 import type { CampaignDetail, CampaignProspect, CampaignRunSnapshot, EmailDraft } from "../types";
 
@@ -574,10 +575,18 @@ export default function CampaignDashboard() {
   const campaignId = Number(id);
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const [editing, setEditing] = useState(false);
+  // Persisted (not plain useState) so navigating to another module and back
+  // reopens the edit panel exactly as it was left — React Router unmounts
+  // this whole component on route change, which would otherwise wipe it.
+  // Keyed per campaign so switching between campaigns doesn't leak state.
+  const [editing, setEditing] = usePersistedState(
+    `campaign:${campaignId}:editing`,
+    false
+  );
   const [pauseOpen, setPauseOpen] = useState(false);
   const [toast, setToast] = useState<{ msg: string; isError: boolean } | null>(null);
   const toastTimer = useRef<number | null>(null);
+  const scrollRestored = useRef(false);
 
   const clearToastTimer = () => {
     if (toastTimer.current !== null) {
@@ -612,6 +621,28 @@ export default function CampaignDashboard() {
       return status === "running" ? 3000 : false;
     },
   });
+
+  // Same "reopen where they left off" behavior for scroll position: save it
+  // continuously while on the page, restore it once the content has actually
+  // rendered (restoring against the loading skeleton would land in the wrong
+  // place since the page is still short).
+  const scrollKey = `campaign:${campaignId}:scrollY`;
+  useEffect(() => {
+    const onScroll = () => {
+      sessionStorage.setItem(scrollKey, String(window.scrollY));
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [scrollKey]);
+
+  useEffect(() => {
+    if (scrollRestored.current || isLoading || !campaign) return;
+    scrollRestored.current = true;
+    const saved = Number(sessionStorage.getItem(scrollKey) ?? 0);
+    if (saved > 0) {
+      requestAnimationFrame(() => window.scrollTo(0, saved));
+    }
+  }, [isLoading, campaign, scrollKey]);
 
   const { data: prospects } = useQuery({
     queryKey: ["campaign", campaignId, "prospects"],
@@ -725,10 +756,6 @@ export default function CampaignDashboard() {
       navigate("/agent");
     },
   });
-
-  useEffect(() => {
-    setEditing(false);
-  }, [campaignId]);
 
   if (isLoading) return <Loading />;
   if (isError || !campaign) {

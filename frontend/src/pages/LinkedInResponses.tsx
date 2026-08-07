@@ -10,6 +10,7 @@ import {
 import type { LinkedInMessage } from "../types";
 import { Badge, Button, Card, Loading, PageHeader } from "../components/ui";
 import { LinkedInScanProgress } from "../components/LinkedInScanProgress";
+import { usePersistedState } from "../hooks/usePersistedState";
 
 function relativeTime(iso?: string | null): string {
   if (!iso) return "—";
@@ -24,12 +25,15 @@ function relativeTime(iso?: string | null): string {
 export default function LinkedInResponses() {
   const qc = useQueryClient();
   const [note, setNote] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = usePersistedState("linkedin-responses:search", "");
   // While a background reply-scan runs, auto-refresh the list until this time.
   const [refreshUntil, setRefreshUntil] = useState(0);
   const [scanning, setScanning] = useState(false);
   // Which account's responses to show. Defaults to the active account below.
-  const [accountFilter, setAccountFilter] = useState<string | null>(null);
+  const [accountFilter, setAccountFilter] = usePersistedState<string | null>(
+    "linkedin-responses:accountFilter",
+    null
+  );
   const [replyDrafts, setReplyDrafts] = useState<Record<number, string>>({});
   const [openOriginal, setOpenOriginal] = useState<Set<number>>(new Set());
 
