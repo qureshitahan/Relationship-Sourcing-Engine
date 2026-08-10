@@ -191,6 +191,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "job_status": "VARCHAR(20)",
         "job_total": "INTEGER",
         "job_done": "INTEGER",
+        "job_sent": "INTEGER",
         "job_error": "TEXT",
         "job_cancel_requested": "BOOLEAN DEFAULT 0",
     },

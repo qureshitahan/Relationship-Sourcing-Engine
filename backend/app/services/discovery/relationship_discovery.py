@@ -104,6 +104,7 @@ def run_discovery(
     search_goal: Optional[str] = None,
     campaign_id: Optional[int] = None,
     run: Optional[DiscoveryRun] = None,
+    require_email_and_linkedin: bool = False,
 ) -> DiscoveryRun:
     provider = get_discovery_provider()
     original_criteria = copy_criteria(criteria)
@@ -131,6 +132,7 @@ def run_discovery(
         db.flush()
 
     orgs_found = orgs_imported = people_found = people_imported = duplicates = 0
+    incomplete_skipped = 0
     insights_generated = 0
     target = max(1, min(criteria.people_limit or 25, settings.discovery_max_people_limit))
     seen_apollo_ids: set[str] = set()
@@ -203,11 +205,27 @@ def run_discovery(
                 break
 
             imported_this_round = 0
+            # When require_email_and_linkedin is on, a contact isn't counted as
+            # imported the moment it's created — it goes here first, gets
+            # revealed as a batch (see below), and only survives if the reveal
+            # actually fills in both email and linkedin_url. Apollo's People
+            # Search reports has_email for free, but NOT linkedin_url (that
+            # turned out to be reveal-gated too, despite looking free in the
+            # raw response shape) — so linkedin_url can only be checked after
+            # a real (credit-spending) reveal call, not from the search hit.
+            pending_reveal_check: list[Contact] = []
             for person in discovered_people:
                 if people_imported >= target:
                     break
                 if person.external_id:
                     seen_apollo_ids.add(person.external_id)
+
+                if require_email_and_linkedin and not person.has_email:
+                    # Free pre-filter: Apollo already told us this person has no
+                    # revealable email, so there's no point spending a reveal
+                    # call (or a Contact row) on them at all.
+                    incomplete_skipped += 1
+                    continue
 
                 company = get_or_create_company(
                     db, person.organization_name, linkedin_url=person.organization_linkedin_url
@@ -265,14 +283,30 @@ def run_discovery(
                     status=ProspectStatus.REVIEW,
                 )
                 db.add(contact)
-                people_imported += 1
-                imported_this_round += 1
+                if require_email_and_linkedin:
+                    pending_reveal_check.append(contact)
+                else:
+                    people_imported += 1
+                    imported_this_round += 1
+
+            if pending_reveal_check:
+                from app.services.contacts import reveal_contacts_bulk
+
+                db.flush()
+                reveal_contacts_bulk(db, pending_reveal_check)
+                for contact in pending_reveal_check:
+                    if people_imported < target and contact.email and contact.linkedin_url:
+                        people_imported += 1
+                        imported_this_round += 1
+                    else:
+                        db.delete(contact)
+                        incomplete_skipped += 1
 
             db.flush()
             logger.info(
                 "Discovery run %s round %s done: imported_this_round=%s "
-                "duplicates_total=%s round_elapsed=%.1fs",
-                run.id, round_num, imported_this_round, duplicates,
+                "duplicates_total=%s incomplete_skipped_total=%s round_elapsed=%.1fs",
+                run.id, round_num, imported_this_round, duplicates, incomplete_skipped,
                 time.monotonic() - round_started,
             )
 
@@ -302,8 +336,8 @@ def run_discovery(
 
         logger.info(
             "Discovery run %s import phase finished: rounds=%s people_found=%s "
-            "people_imported=%s duplicates=%s total_elapsed=%.1fs",
-            run.id, round_num, people_found, people_imported, duplicates,
+            "people_imported=%s duplicates=%s incomplete_skipped=%s total_elapsed=%.1fs",
+            run.id, round_num, people_found, people_imported, duplicates, incomplete_skipped,
             time.monotonic() - run_started,
         )
 
@@ -343,8 +377,16 @@ def run_discovery(
                 " Stub provider returns mock data only (max ~24 people). "
                 "Set DISCOVERY_PROVIDER=apollo in .env and restart the backend."
             )
-        elif duplicates:
-            shortfall_note += f" {duplicates} skipped as duplicates from prior runs."
+        else:
+            reasons = []
+            if duplicates:
+                reasons.append(f"{duplicates} skipped as duplicates from prior runs")
+            if incomplete_skipped:
+                reasons.append(
+                    f"{incomplete_skipped} skipped for missing email or LinkedIn"
+                )
+            if reasons:
+                shortfall_note += " " + "; ".join(reasons) + "."
         criteria_snapshot["shortfall_note"] = shortfall_note
         if summary:
             summary = f"{summary} {shortfall_note}"

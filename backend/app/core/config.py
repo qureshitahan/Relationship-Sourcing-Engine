@@ -212,9 +212,18 @@ class Settings(BaseSettings):
     # flagged. A run-level bulk LinkedIn send stops once today's total reaches this.
     # LinkedIn realistically tolerates well under this; 50 is an aggressive max.
     linkedin_daily_send_cap: int = 50
-    # How many drafts to generate per LLM batch in a run-level bulk draft job
-    # (progress is reported per batch).
-    bulk_draft_batch_size: int = 10
+    # How many drafts to generate CONCURRENTLY in a run-level bulk draft job —
+    # each draft is one Claude call, and Claude calls are I/O-bound (network
+    # wait), so running several at once cuts wall-clock roughly linearly
+    # without extra Anthropic cost. Kept modest to stay well under Anthropic's
+    # per-account concurrent-request limits.
+    bulk_draft_batch_size: int = 8
+    # How many prospects to research+reveal+approve CONCURRENTLY in a
+    # run-level bulk approve job. Approval was previously driven one-request-
+    # at-a-time from the browser (2 in flight) with a full web-search Claude
+    # call inside every request — the single biggest reason bulk outreach on
+    # ~500 prospects took hours instead of minutes.
+    bulk_approve_workers: int = 8
 
     # --- Sending cadence (drip) ---
     # When the agent auto-sends, it sends in small batches with a pause between

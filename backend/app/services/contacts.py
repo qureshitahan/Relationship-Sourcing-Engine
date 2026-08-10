@@ -20,6 +20,7 @@ from app.models.enums import (
     PhoneRevealStatus,
     RoleCategory,
 )
+from app.models.principal import Principal
 from app.services.audit import log_action
 from app.services.enrichment import get_enrichment_provider
 from app.services.enrichment.base import DiscoveryCriteria, EnrichmentContact
@@ -27,6 +28,11 @@ from app.services.enrichment.base import DiscoveryCriteria, EnrichmentContact
 
 class RevealNotAllowed(Exception):
     """Raised when a credit-consuming reveal is blocked by the board-fit gate."""
+
+
+class ApprovalBlocked(Exception):
+    """Raised when a contact still isn't outreach-ready after best-effort
+    auto-research/reveal (see approve_contact)."""
 
 # Target titles with a base usefulness weight (0-100). Higher = better entry point.
 TARGET_TITLES = {
@@ -570,6 +576,74 @@ def reveal_contact(db: Session, contact: Contact) -> Contact:
         ),
     )
     return contact
+
+
+def approve_contact(
+    db: Session, contact: Contact, principal: Principal, *, approved_by: str = "user"
+) -> None:
+    """Approve one contact for outreach, best-effort auto-research/reveal first.
+
+    Shared by the single-prospect approval endpoint (one HTTP request) and the
+    run-level bulk-approve background job (many of these fanned out across a
+    thread pool) so both apply identical rules. Raises RevealNotAllowed or
+    ApprovalBlocked if the contact still isn't ready afterward; caller decides
+    how to surface that (HTTP 400 for one, a per-contact failure note for many).
+    Commits its own work.
+    """
+    from app.services.insights.engine import generate_insight
+    from app.services.linkedin_providers import public_identifier_from_url
+    from app.services.outreach_eligibility import outreach_draft_blockers
+    from app.services.outreach_goal import outreach_goal_for_contact
+
+    blockers = outreach_draft_blockers(db, principal_id=principal.id, contact=contact)
+    if "email not revealed" in blockers:
+        try:
+            ensure_discovery_fit(db, contact)
+            reveal_contact(db, contact)
+            db.commit()
+        except RevealNotAllowed:
+            db.rollback()
+            raise
+        except Exception:  # noqa: BLE001 - best effort; re-checked below
+            db.rollback()
+    if "not researched" in blockers or "research failed — retry research first" in blockers:
+        company = db.get(Company, contact.company_id) if contact.company_id else None
+        try:
+            generate_insight(
+                db,
+                principal,
+                contact=contact,
+                company=company,
+                outreach_goal=outreach_goal_for_contact(db, contact, principal),
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - best effort; re-checked below
+            db.rollback()
+
+    blockers = outreach_draft_blockers(db, principal_id=principal.id, contact=contact)
+    # A prospect reachable on LinkedIn (a personal /in/ profile) can be
+    # approved without a revealed email (email drafting still enforces its
+    # own email requirement). Company pages don't count — they can't be
+    # messaged. This lets multi-channel outreach not miss anyone.
+    if public_identifier_from_url(contact.linkedin_url or ""):
+        blockers = [b for b in blockers if b != "email not revealed"]
+    if blockers:
+        raise ApprovalBlocked(
+            f"Cannot approve: {', '.join(blockers)}. Automatic research/reveal "
+            "was attempted but could not resolve this — Apollo or Anthropic may "
+            "not have data for this prospect."
+        )
+
+    contact.approved_for_outreach = True
+    log_action(
+        db,
+        AuditAction.PROSPECT_APPROVAL,
+        entity_type="contact",
+        entity_id=contact.id,
+        actor=approved_by,
+        summary="approved_for_outreach=True",
+    )
+    db.commit()
 
 
 def reveal_contacts_bulk(db: Session, contacts: List[Contact]) -> int:

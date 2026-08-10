@@ -136,6 +136,10 @@ export default function Discover() {
     []
   );
   const [peopleLimit, setPeopleLimit] = usePersistedState("discover:peopleLimit", "100");
+  const [requireEmailAndLinkedin, setRequireEmailAndLinkedin] = usePersistedState(
+    "discover:requireEmailAndLinkedin",
+    false
+  );
 
   const { data: agentConfig } = useQuery({
     queryKey: ["agent", "config", principalId],
@@ -208,6 +212,7 @@ export default function Discover() {
         // import (see discovery_jobs.py _discovery_worker) regardless of this
         // flag, so prospects still come back with contact details filled in.
         auto_process: false,
+        require_email_and_linkedin: requireEmailAndLinkedin,
         search_goal:
           objective.trim() ||
           (plan?.rationale && !plan.questions.length ? plan.rationale : undefined),
@@ -435,6 +440,14 @@ export default function Discover() {
                       placeholder="100"
                       onChange={(e) => setPeopleLimit(e.target.value.replace(/\D/g, ""))}
                     />
+                  </label>
+                  <label className="flex items-center gap-1.5 pt-5 text-xs font-medium text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={requireEmailAndLinkedin}
+                      onChange={(e) => setRequireEmailAndLinkedin(e.target.checked)}
+                    />
+                    Only complete prospects (email + LinkedIn)
                   </label>
                 </div>
               </div>

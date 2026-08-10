@@ -302,7 +302,9 @@ class DiscoveryRunOut(ORMModel):
     job_status: Optional[str] = None
     job_total: Optional[int] = None
     job_done: Optional[int] = None
+    job_sent: Optional[int] = None
     job_error: Optional[str] = None
+    job_cancel_requested: Optional[bool] = None
 
 
 class AgentRunOut(ORMModel):

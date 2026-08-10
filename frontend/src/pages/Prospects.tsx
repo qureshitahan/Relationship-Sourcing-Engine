@@ -1,12 +1,15 @@
 import { useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
 import {
+  approveRunProspects,
+  cancelRunJob,
   getDiscoveryRun,
   listDiscoveryRuns,
   listPrincipals,
   listProspects,
+  pipelineRunProspects,
   setProspectApproval,
   setProspectStatus,
   type ProspectFilters,
@@ -106,6 +109,7 @@ function buildExportUrl(filters: ProspectFilters): string {
   if (filters.role_category) params.set("role_category", filters.role_category);
   if (filters.status) params.set("status", filters.status);
   if (filters.approved != null) params.set("approved", String(filters.approved));
+  if (filters.has_email_and_linkedin) params.set("has_email_and_linkedin", "true");
   if (filters.search) params.set("search", filters.search);
   if (filters.sort) params.set("sort", filters.sort);
   return `/api/prospects/export.csv?${params.toString()}`;
@@ -171,6 +175,10 @@ export default function Prospects() {
     queryKey: ["discovery-run", runId],
     queryFn: () => getDiscoveryRun(runId!),
     enabled: !!runId,
+    // Live-poll while a run-level bulk job (approve/reveal/draft/send) is in
+    // flight so its progress bar actually moves.
+    refetchInterval: (query) =>
+      query.state.data?.job_status === "running" ? 1500 : false,
   });
 
   const { data: runs } = useQuery({
@@ -350,20 +358,77 @@ export default function Prospects() {
     clearSelection();
   }
 
+  // Fast path: one backend job researches/reveals/approves several
+  // prospects at once (a thread pool), instead of the browser driving 2
+  // requests at a time — this is what turns a 500-prospect approve from
+  // hours into minutes. Progress shows via the `run` query above (job_*).
+  const approveJob = useMutation({
+    mutationFn: (contactIds: number[]) => approveRunProspects(runId!, contactIds),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["discovery-run", runId] });
+      qc.invalidateQueries({ queryKey: ["discovery-runs"] });
+    },
+  });
+
+  // Approach B: approve + draft + send in one job, with sending overlapped
+  // against still-in-progress approve/draft instead of waiting for the whole
+  // batch to finish drafting first. Use when the goal is "get outreach out
+  // the door fast", not just "get these approved".
+  const pipelineJob = useMutation({
+    mutationFn: (contactIds: number[]) => pipelineRunProspects(runId!, contactIds),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["discovery-run", runId] });
+      qc.invalidateQueries({ queryKey: ["discovery-runs"] });
+    },
+  });
+
+  // Lets an operator stop an in-progress Approve/Draft/Send job after the item
+  // it's currently working on, instead of waiting for the whole batch (e.g.
+  // hundreds of prospects) to finish or fail on its own.
+  const cancelJob = useMutation({
+    mutationFn: () => cancelRunJob(runId!),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["discovery-run", runId] });
+      qc.invalidateQueries({ queryKey: ["discovery-runs"] });
+    },
+  });
+
   function bulkApprove() {
-    // No client-side eligibility pre-filter: approval itself now triggers
-    // research + reveal on the backend for anyone who needs it (see
-    // prospects.py set_approval), so every selected prospect gets a real
-    // attempt instead of silently being skipped for "not ready yet".
+    // No client-side eligibility pre-filter: approval itself triggers
+    // research + reveal on the backend for anyone who needs it, so every
+    // selected prospect gets a real attempt instead of silently being
+    // skipped for "not ready yet".
     const targets = selectedProspects.filter((p) => !p.approved_for_outreach);
     if (targets.length === 0) {
       setBatchMessage("Selected prospects are already approved.");
       return;
     }
+    if (runId) {
+      approveJob.mutate(targets.map((p) => p.id));
+      clearSelection();
+      return;
+    }
+    // No single run in view (cross-run selection) — the fast run-scoped job
+    // can't target this, so fall back to one request at a time.
     runBulk("Approve", targets, async (p) => {
       await setProspectApproval(p.id, true);
       return "ok";
     });
+  }
+
+  function bulkPipeline() {
+    // Sends the selection through approve -> draft -> send as one job, with
+    // sending starting as soon as the first prospect is ready instead of
+    // waiting for the whole batch. Needs a run in view — there's no
+    // cross-run fallback since this isn't a "one request at a time" action.
+    if (!runId) {
+      setBatchMessage("Select a single run to use Approve + Draft + Send.");
+      return;
+    }
+    const targets = selectedProspects;
+    if (targets.length === 0) return;
+    pipelineJob.mutate(targets.map((p) => p.id));
+    clearSelection();
   }
 
   function bulkReject() {
@@ -399,6 +464,7 @@ export default function Prospects() {
   const clearRunFilter = () => setRunFilter("");
 
   const busy = Boolean(progress?.running);
+  const runJobBusy = run?.job_status === "running";
 
   return (
     <div>
@@ -522,6 +588,76 @@ export default function Prospects() {
         </div>
       )}
 
+      {run?.job_status === "running" && (
+        <div className="mb-4 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">
+          <div className="mb-1.5 flex items-center justify-between gap-3">
+            <span className="font-medium text-slate-700">
+              {run.job_kind === "approve"
+                ? "Approving (research + reveal, several at once)…"
+                : run.job_kind === "reveal"
+                  ? "Revealing…"
+                  : run.job_kind === "draft_email"
+                    ? "Drafting…"
+                    : run.job_kind === "pipeline"
+                      ? "Approving + drafting + sending (overlapped)…"
+                      : "Working…"}{" "}
+              {run.job_done ?? 0} / {run.job_total ?? 0}
+              {run.job_kind === "pipeline" && (
+                <span className="ml-2 text-emerald-700">
+                  · Sent {run.job_sent ?? 0}
+                </span>
+              )}
+              {run.job_cancel_requested && (
+                <span className="ml-2 text-amber-600">(stopping…)</span>
+              )}
+            </span>
+            <Button
+              variant="danger"
+              onClick={() => cancelJob.mutate()}
+              disabled={cancelJob.isPending || run.job_cancel_requested}
+            >
+              Stop
+            </Button>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="h-full bg-slate-900 transition-all"
+              style={{
+                width: `${Math.round(
+                  ((run.job_done ?? 0) / Math.max(1, run.job_total ?? 0)) * 100
+                )}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {(run?.job_kind === "approve" || run?.job_kind === "pipeline") &&
+        run?.job_status === "done" &&
+        (run?.job_error ? (
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900">
+            <div className="mb-1 font-medium">
+              {run.job_done ?? 0} of {run.job_total ?? 0} processed
+              {run.job_kind === "pipeline" && ` · ${run.job_sent ?? 0} sent`} — some issues:
+            </div>
+            <ul className="list-disc space-y-0.5 pl-5">
+              {run.job_error
+                .split("; ")
+                .filter(Boolean)
+                .map((line, i) => (
+                  <li key={i}>{line}</li>
+                ))}
+            </ul>
+          </div>
+        ) : (
+          (run.job_total ?? 0) > 0 && (
+            <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-900">
+              ✓ All {run.job_total} processed successfully
+              {run.job_kind === "pipeline" && ` — ${run.job_sent ?? 0} sent`}.
+            </div>
+          )
+        ))}
+
       {progress?.running && (
         <div className="mb-4 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">
           <div className="mb-1.5 flex items-center justify-between">
@@ -611,6 +747,19 @@ export default function Prospects() {
             <option value="50">Qualified only (≥50)</option>
             <option value="70">Strong fit only (≥70)</option>
           </select>
+          <label className="flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={filters.has_email_and_linkedin ?? false}
+              onChange={(e) =>
+                setFilters((f) => ({
+                  ...f,
+                  has_email_and_linkedin: e.target.checked || undefined,
+                }))
+              }
+            />
+            Has email + LinkedIn
+          </label>
           <select
             className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
             value={filters.sort ?? "relevance"}
@@ -635,8 +784,20 @@ export default function Prospects() {
           <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="font-medium">{selected.size} selected</span>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" onClick={bulkApprove} disabled={busy}>
+            <Button variant="secondary" onClick={bulkApprove} disabled={busy || runJobBusy}>
               Approve for outreach
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={bulkPipeline}
+              disabled={busy || runJobBusy || !runId}
+              title={
+                runId
+                  ? "Approve, draft, and send this selection — sending starts as soon as the first one is ready"
+                  : "Select a single run to use this"
+              }
+            >
+              Approve + Draft + Send
             </Button>
             {stage === "rejected" ? (
               <Button variant="secondary" onClick={bulkRestore} disabled={busy}>

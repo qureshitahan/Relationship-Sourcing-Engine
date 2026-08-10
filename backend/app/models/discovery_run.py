@@ -51,6 +51,10 @@ class DiscoveryRun(Base, TimestampMixin):
     job_status: Mapped[Optional[str]] = mapped_column(String(20))
     job_total: Mapped[Optional[int]] = mapped_column(Integer)
     job_done: Mapped[Optional[int]] = mapped_column(Integer)
+    # For the pipeline job specifically: how many drafts have actually been sent
+    # so far, distinct from job_done (which counts approve+draft progress) — the
+    # send stage runs on its own dedicated thread and can lag behind produce.
+    job_sent: Mapped[Optional[int]] = mapped_column(Integer)
     job_error: Mapped[Optional[str]] = mapped_column(Text)
     job_cancel_requested: Mapped[Optional[bool]] = mapped_column(default=False)
 

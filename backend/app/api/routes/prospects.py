@@ -26,10 +26,15 @@ from app.schemas.requests import (
     ProspectStatusRequest,
 )
 from app.services.audit import log_action
-from app.services.contacts import RevealNotAllowed, ensure_discovery_fit, reveal_contact
+from app.services.contacts import (
+    ApprovalBlocked,
+    RevealNotAllowed,
+    approve_contact,
+    ensure_discovery_fit,
+    reveal_contact,
+)
 from app.services.discovery.process_run import batch_reveal_contacts
 from app.services.insights.engine import InsightResearchError, generate_insight
-from app.services.outreach_eligibility import outreach_draft_blockers
 from app.services.outreach_goal import outreach_goal_for_contact
 
 router = APIRouter(prefix="/prospects", tags=["prospects"])
@@ -130,6 +135,7 @@ def list_prospects(
     approved: Optional[bool] = None,
     min_relevance: Optional[float] = None,
     researched: Optional[bool] = None,
+    has_email_and_linkedin: Optional[bool] = None,
     search: Optional[str] = None,
     sort: str = "relevance",
     limit: int = Query(50, le=1000),
@@ -162,6 +168,11 @@ def list_prospects(
         filters.append(Contact.relevance_score.isnot(None))
     elif researched is False:
         filters.append(Contact.relevance_score.is_(None))
+    if has_email_and_linkedin:
+        filters.append(Contact.email.isnot(None))
+        filters.append(Contact.email != "")
+        filters.append(Contact.linkedin_url.isnot(None))
+        filters.append(Contact.linkedin_url != "")
     if search:
         filters.append(Contact.name.ilike(f"%{search}%"))
     for f in filters:
@@ -239,6 +250,7 @@ def export_prospects(
     status: Optional[str] = None,
     approved: Optional[bool] = None,
     min_relevance: Optional[float] = None,
+    has_email_and_linkedin: Optional[bool] = None,
     search: Optional[str] = None,
     sort: str = "usefulness",
 ):
@@ -254,6 +266,13 @@ def export_prospects(
         query = query.where(Contact.approved_for_outreach.is_(approved))
     if min_relevance is not None:
         query = query.where(Contact.relevance_score >= min_relevance)
+    if has_email_and_linkedin:
+        query = query.where(
+            Contact.email.isnot(None),
+            Contact.email != "",
+            Contact.linkedin_url.isnot(None),
+            Contact.linkedin_url != "",
+        )
     if search:
         query = query.where(Contact.name.ilike(f"%{search}%"))
     if sort == "recent":
@@ -386,70 +405,24 @@ def set_approval(
         principal = _principal_for_research(db, contact)
         if principal is None:
             raise HTTPException(status_code=400, detail="No principal configured")
-
-        # Approval is the one action the user takes — research and email/LinkedIn
-        # reveal are no longer separate manual steps. If this prospect isn't
-        # ready yet, do the work here (best effort) before re-checking, instead
-        # of just rejecting the approval and making the user go run two other
-        # buttons first.
-        blockers = outreach_draft_blockers(
-            db, principal_id=principal.id, contact=contact
-        )
-        if "email not revealed" in blockers:
-            try:
-                ensure_discovery_fit(db, contact)
-                reveal_contact(db, contact)
-                db.commit()
-            except RevealNotAllowed as exc:
-                db.rollback()
-                raise HTTPException(status_code=400, detail=str(exc))
-            except Exception:  # noqa: BLE001 - best effort; re-checked below
-                db.rollback()
-        if "not researched" in blockers or "research failed — retry research first" in blockers:
-            company = db.get(Company, contact.company_id) if contact.company_id else None
-            try:
-                generate_insight(
-                    db,
-                    principal,
-                    contact=contact,
-                    company=company,
-                    outreach_goal=outreach_goal_for_contact(db, contact, principal),
-                )
-                db.commit()
-            except Exception:  # noqa: BLE001 - best effort; re-checked below
-                db.rollback()
-
-        blockers = outreach_draft_blockers(
-            db, principal_id=principal.id, contact=contact
-        )
-        # A prospect reachable on LinkedIn (a personal /in/ profile) can be
-        # approved without a revealed email (email drafting still enforces its
-        # own email requirement). Company pages don't count — they can't be
-        # messaged. This lets multi-channel outreach not miss anyone.
-        from app.services.linkedin_providers import public_identifier_from_url
-
-        if public_identifier_from_url(contact.linkedin_url or ""):
-            blockers = [b for b in blockers if b != "email not revealed"]
-        if blockers:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Cannot approve: {', '.join(blockers)}. Automatic research/reveal "
-                    "was attempted but could not resolve this — Apollo or Anthropic may "
-                    "not have data for this prospect."
-                ),
+        try:
+            approve_contact(
+                db, contact, principal, approved_by=payload.approved_by or "user"
             )
+        except (RevealNotAllowed, ApprovalBlocked) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        contact.approved_for_outreach = False
+        log_action(
+            db,
+            AuditAction.PROSPECT_APPROVAL,
+            entity_type="contact",
+            entity_id=contact.id,
+            actor=payload.approved_by or "user",
+            summary="approved_for_outreach=False",
+        )
+        db.commit()
 
-    contact.approved_for_outreach = payload.approved_for_outreach
-    log_action(
-        db,
-        AuditAction.PROSPECT_APPROVAL,
-        entity_type="contact",
-        entity_id=contact.id,
-        actor=payload.approved_by or "user",
-        summary=f"approved_for_outreach={payload.approved_for_outreach}",
-    )
-    db.commit()
     db.refresh(contact)
     return contact
 

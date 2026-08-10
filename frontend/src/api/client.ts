@@ -197,6 +197,9 @@ export interface DiscoveryRunPayload {
   auto_process?: boolean;
   /** Plain-language goal from AI-assisted setup — drives relevance research. */
   search_goal?: string;
+  /** Skip anyone missing an email or LinkedIn URL; keep searching until the
+   * requested count of COMPLETE prospects is found. */
+  require_email_and_linkedin?: boolean;
 }
 // Discovery now runs in the background and returns immediately (202) with a
 // pending run; poll getDiscoveryRun(id) until status is completed/failed.
@@ -212,9 +215,22 @@ export const getDiscoveryRun = (id: number) =>
 // Run-level bulk jobs (all return immediately; poll the run for job_* progress).
 export const revealRunEmails = (id: number) =>
   api.post<DiscoveryRun>(`/api/discovery/runs/${id}/reveal`).then((r) => r.data);
+export const approveRunProspects = (id: number, contactIds?: number[]) =>
+  api
+    .post<DiscoveryRun>(`/api/discovery/runs/${id}/approve`, {
+      contact_ids: contactIds ?? null,
+    })
+    .then((r) => r.data);
 export const draftRunEmails = (id: number, outreachGoal?: string) =>
   api
     .post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-emails`, {
+      outreach_goal: outreachGoal ?? null,
+    })
+    .then((r) => r.data);
+export const pipelineRunProspects = (id: number, contactIds?: number[], outreachGoal?: string) =>
+  api
+    .post<DiscoveryRun>(`/api/discovery/runs/${id}/pipeline`, {
+      contact_ids: contactIds ?? null,
       outreach_goal: outreachGoal ?? null,
     })
     .then((r) => r.data);
@@ -259,6 +275,7 @@ export interface ProspectFilters {
   approved?: boolean;
   min_relevance?: number;
   researched?: boolean;
+  has_email_and_linkedin?: boolean;
   search?: string;
   sort?: string;
   limit?: number;
