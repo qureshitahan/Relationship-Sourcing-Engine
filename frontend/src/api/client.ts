@@ -541,19 +541,25 @@ export const generateLinkedIn = (payload: {
   api
     .post<LinkedInMessage>("/api/linkedin/generate", payload, { timeout: 120000 })
     .then((r) => r.data);
-export const generateRunLinkedIn = (payload: {
-  discovery_run_id: number;
-  principal_id?: number;
-  outreach_goal?: string;
-}) =>
+/**
+ * Start LinkedIn drafting for a run's approved prospects in the BACKGROUND.
+ *
+ * Replaces the inline /linkedin/generate-run call, which held the request open
+ * for one Claude call per prospect: the browser gave up long before it finished
+ * and the server was killed before its single end-of-loop commit, so a large run
+ * reliably produced nothing. Progress lands on the run's job_* fields — poll
+ * getDiscoveryRun(id) the way the Drafts page does.
+ */
+export const draftRunLinkedIn = (
+  id: number,
+  outreachGoal?: string,
+  principalId?: number
+) =>
   api
-    .post<{
-      discovery_run_id: number;
-      candidates: number;
-      generated: number;
-      skipped: number;
-      errors: string[];
-    }>("/api/linkedin/generate-run", payload, { timeout: 180000 })
+    .post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-linkedin`, {
+      outreach_goal: outreachGoal ?? null,
+      principal_id: principalId ?? null,
+    })
     .then((r) => r.data);
 export const updateLinkedIn = (
   id: number,

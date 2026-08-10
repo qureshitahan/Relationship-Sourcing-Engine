@@ -44,6 +44,7 @@ JOB_DISCOVERY = "discovery"
 JOB_REVEAL = "reveal"
 JOB_APPROVE = "approve"
 JOB_DRAFT_EMAIL = "draft_email"
+JOB_DRAFT_LINKEDIN = "draft_linkedin"
 JOB_SEND_EMAIL = "send_email"
 JOB_SEND_LINKEDIN = "send_linkedin"
 JOB_PIPELINE = "pipeline"
@@ -651,6 +652,218 @@ def _draft_worker(
         _finish_job(db, run, JOB_DONE)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bulk draft worker failed for run %s", run_id)
+        _fail(db, run_id, str(exc))
+    finally:
+        db.close()
+
+
+# --- bulk LinkedIn drafting ------------------------------------------------
+#
+# Previously this ran inline in the /linkedin/generate-run request: one Claude
+# call per approved prospect, sequentially, committing only after the whole loop.
+# On a 150-prospect run that is ~10 minutes of work against a browser that gives
+# up after 30s and an Azure worker that is killed at 600s — so the request died
+# before reaching its single commit and every message was lost, every time. The
+# email side was moved to a background job for exactly this reason; this brings
+# LinkedIn in line: concurrent generation, a commit per message, and progress on
+# the run's job_* fields.
+
+
+def launch_run_linkedin_draft(
+    run_id: int,
+    *,
+    outreach_goal: Optional[str] = None,
+    draft_principal_id: Optional[int] = None,
+) -> None:
+    """Draft LinkedIn messages for a run's approved prospects, in the background.
+
+    ``draft_principal_id`` drafts as a different principal than the one who
+    discovered the run, mirroring ``launch_run_draft``.
+    """
+    _mark_starting(run_id, JOB_DRAFT_LINKEDIN)
+    threading.Thread(
+        target=_linkedin_draft_worker,
+        args=(run_id, outreach_goal),
+        kwargs=dict(draft_principal_id=draft_principal_id),
+        name=f"run-linkedin-draft-{run_id}",
+        daemon=True,
+    ).start()
+
+
+def _linkedin_draft_one(
+    contact_id: int, principal_id: int, outreach_goal: Optional[str]
+) -> tuple[int, object, Optional[int]]:
+    """One Claude call, in a worker thread with its own session.
+
+    Returns (contact_id, LinkedInContent-or-None, insight_id-or-None); the caller
+    owns the DB write, exactly as ``_draft_one`` does for email.
+    """
+    from app.services.linkedin_outreach import generate_linkedin_content
+
+    db = SessionLocal()
+    try:
+        contact = db.get(Contact, contact_id)
+        principal = db.get(Principal, principal_id)
+        if contact is None or principal is None:
+            return contact_id, None, None
+        company = db.get(Company, contact.company_id) if contact.company_id else None
+        insight = db.execute(
+            select(RelevanceInsight)
+            .where(
+                RelevanceInsight.principal_id == principal_id,
+                RelevanceInsight.contact_id == contact_id,
+            )
+            .order_by(RelevanceInsight.created_at.desc())
+        ).scalars().first()
+        if insight is None:
+            # Same cost-friendly fallback as email drafting: reuse another
+            # principal's research rather than writing with no context at all.
+            insight = _reusable_insight_for_contact(db, contact_id)
+        content = generate_linkedin_content(
+            db, principal, contact, company, insight, outreach_goal=outreach_goal
+        )
+        return contact_id, content, (insight.id if insight else None)
+    except Exception:  # noqa: BLE001 - one bad prospect must not stop the run
+        logger.exception("LinkedIn draft generation failed for contact %s", contact_id)
+        return contact_id, None, None
+    finally:
+        db.close()
+
+
+def _linkedin_draft_worker(
+    run_id: int,
+    outreach_goal: Optional[str],
+    *,
+    draft_principal_id: Optional[int] = None,
+) -> None:
+    from app.models.enums import AuditAction, LinkedInStatus
+    from app.models.linkedin_message import LinkedInMessage
+    from app.services.audit import log_action
+    from app.services.linkedin_providers import public_identifier_from_url
+    from app.services.outreach_goal import outreach_goal_for_run
+
+    db = SessionLocal()
+    try:
+        run = db.get(DiscoveryRun, run_id)
+        if run is None:
+            return
+        effective_principal_id = draft_principal_id or run.principal_id
+        principal = db.get(Principal, effective_principal_id) if effective_principal_id else None
+        if principal is None:
+            _start_job(db, run, JOB_DRAFT_LINKEDIN, 0)
+            _finish_job(
+                db,
+                run,
+                JOB_FAILED,
+                "No principal to draft as." if draft_principal_id else "This run has no principal.",
+            )
+            return
+
+        approved = list(
+            db.execute(
+                select(Contact).where(
+                    Contact.discovery_run_id == run_id,
+                    Contact.approved_for_outreach.is_(True),
+                ).order_by(Contact.id)
+            ).scalars().all()
+        )
+        # Only personal /in/ profiles can be messaged; company pages cannot.
+        messageable = [
+            c
+            for c in approved
+            if public_identifier_from_url(c.linkedin_url or "") and not c.do_not_contact
+        ]
+        # Same "open" set the single-message route uses: a draft or an approved
+        # message means this prospect is already queued, so do not write a second.
+        existing_ids = set(
+            db.execute(
+                select(LinkedInMessage.contact_id).where(
+                    LinkedInMessage.principal_id == principal.id,
+                    LinkedInMessage.status.in_(
+                        [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
+                    ),
+                )
+            ).scalars().all()
+        )
+        to_draft = [c for c in messageable if c.id not in existing_ids]
+
+        _start_job(db, run, JOB_DRAFT_LINKEDIN, len(to_draft))
+        if not to_draft:
+            no_profile = len(approved) - len(messageable)
+            _finish_job(
+                db,
+                run,
+                JOB_DONE,
+                (
+                    f"Nothing to draft: {no_profile} of {len(approved)} approved "
+                    "prospects have no personal LinkedIn profile."
+                )
+                if no_profile
+                else None,
+            )
+            return
+
+        goal = (outreach_goal or "").strip() or outreach_goal_for_run(run.criteria)
+        workers = max(1, int(settings.bulk_draft_batch_size))
+        by_id = {c.id: c for c in to_draft}
+        done = 0
+        generated = 0
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_linkedin_draft_one, c.id, principal.id, goal): c.id
+                for c in to_draft
+            }
+            for future in as_completed(futures):
+                if _cancelled(db, run):
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                contact_id, content, insight_id = future.result()
+                contact = by_id.get(contact_id)
+                if content and contact:
+                    try:
+                        # Commit per message, never once at the end: a worker
+                        # restart mid-run then costs only the message in flight.
+                        db.add(
+                            LinkedInMessage(
+                                principal_id=principal.id,
+                                company_id=contact.company_id,
+                                contact_id=contact_id,
+                                insight_id=insight_id,
+                                body=content.body,
+                                invitation_note=content.invitation_note,
+                                status=LinkedInStatus.DRAFT,
+                            )
+                        )
+                        db.commit()
+                        generated += 1
+                    except Exception as exc:  # noqa: BLE001 - keep drafting the rest
+                        db.rollback()
+                        logger.warning(
+                            "Saving LinkedIn draft failed for contact %s in run %s: %s",
+                            contact_id, run_id, exc,
+                        )
+                done += 1
+                _progress(db, run, done)
+
+        if generated:
+            log_action(
+                db,
+                AuditAction.LINKEDIN_DRAFT,
+                entity_type="discovery_run",
+                entity_id=run_id,
+                summary=f"Bulk-drafted {generated} LinkedIn message(s) for run {run_id}",
+            )
+            db.commit()
+        skipped = len(approved) - len(to_draft)
+        _finish_job(
+            db,
+            run,
+            JOB_DONE,
+            f"{skipped} approved prospect(s) skipped — no personal LinkedIn profile, "
+            "or a message already exists." if skipped else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Bulk LinkedIn draft worker failed for run %s", run_id)
         _fail(db, run_id, str(exc))
     finally:
         db.close()

@@ -6,7 +6,8 @@ import {
   checkLinkedInUpdates,
   createLinkedInConnectLink,
   deleteLinkedIn,
-  generateRunLinkedIn,
+  draftRunLinkedIn,
+  getDiscoveryRun,
   listDiscoveryRuns,
   listLinkedInAccounts,
   listLinkedInMessages,
@@ -18,7 +19,7 @@ import {
   setLinkedInStatus,
   updateLinkedIn,
 } from "../api/client";
-import type { LinkedInMessage } from "../types";
+import type { DiscoveryRun, LinkedInMessage } from "../types";
 import {
   Badge,
   Button,
@@ -323,27 +324,61 @@ export default function LinkedIn() {
     refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
+  // The run row carries live job_* progress while a background job runs, so it
+  // is polled separately from the (unchanging) run list above.
+  const { data: runJob } = useQuery({
+    queryKey: ["discoveryRun", runId],
+    queryFn: () => getDiscoveryRun(runId!),
+    enabled: !!runId,
+    refetchInterval: (q) =>
+      (q.state.data as DiscoveryRun | undefined)?.job_status === "running" ? 2000 : false,
+  });
+  const draftJobRunning =
+    runJob?.job_kind === "draft_linkedin" && runJob?.job_status === "running";
+
   const currentRun = runs?.items.find((r) => r.id === runId);
 
   const draftRun = useMutation({
+    // Background job, not an inline request. Drafting is one Claude call per
+    // prospect, so a run of any size outlived both the browser's timeout and
+    // the worker's — and the old route committed only after the whole loop, so
+    // a killed request saved nothing at all. The worker commits per message.
     mutationFn: () =>
-      generateRunLinkedIn({
-        discovery_run_id: runId!,
-        // Only sent when an override is actually selected — omitting it keeps
-        // the request identical to prior behaviour (backend defaults to the
-        // run's own principal).
-        ...(draftPrincipalId ? { principal_id: Number(draftPrincipalId) } : {}),
-      }),
-    onSuccess: (res) => {
+      draftRunLinkedIn(
+        runId!,
+        undefined,
+        draftPrincipalId ? Number(draftPrincipalId) : undefined
+      ),
+    onSuccess: () => {
       setNote(
-        `Drafted ${res.generated} LinkedIn message(s)` +
-          (res.skipped ? ` (${res.skipped} skipped)` : "") +
-          (res.errors.length ? `. ${res.errors.length} error(s).` : ".")
+        "Drafting started in the background. Progress appears above — you can " +
+          "leave this page and come back."
       );
-      qc.invalidateQueries({ queryKey: ["linkedin"] });
+      qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
     },
-    onError: () => setNote("Could not draft messages — check backend logs."),
+    onError: (e: unknown) => {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setNote(String(detail ?? "Could not start drafting."));
+    },
   });
+
+  // Pull the finished messages in once the job stops, then report the outcome.
+  const wasDrafting = useRef(false);
+  useEffect(() => {
+    if (wasDrafting.current && !draftJobRunning) {
+      qc.invalidateQueries({ queryKey: ["linkedin"] });
+      if (runJob?.job_status === "failed") {
+        setNote(runJob.job_error || "Drafting failed — check backend logs.");
+      } else if (runJob?.job_status === "done") {
+        setNote(
+          `Drafted ${runJob.job_done ?? 0} LinkedIn message(s).` +
+            (runJob.job_error ? ` ${runJob.job_error}` : "")
+        );
+      }
+    }
+    wasDrafting.current = !!draftJobRunning;
+  }, [draftJobRunning, runJob, qc]);
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
@@ -458,8 +493,39 @@ export default function LinkedIn() {
         </div>
       )}
       {note && (
-        <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+        // Failures used to land in this same green box, reading as success.
+        <div
+          className={`mb-4 rounded-lg border px-4 py-2 text-sm ${
+            /could not|failed/i.test(note)
+              ? "border-rose-200 bg-rose-50 text-rose-900"
+              : "border-emerald-200 bg-emerald-50 text-emerald-800"
+          }`}
+        >
           {note}
+        </div>
+      )}
+
+      {draftJobRunning && (
+        <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-medium">
+              Writing LinkedIn messages… {runJob?.job_done ?? 0} of{" "}
+              {runJob?.job_total ?? 0}
+            </span>
+            <span className="text-xs text-violet-700">
+              Runs on the server — you can leave this page.
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-violet-200">
+            <div
+              className="h-full rounded-full bg-violet-500 transition-all"
+              style={{
+                width: `${Math.round(
+                  ((runJob?.job_done ?? 0) / Math.max(1, runJob?.job_total ?? 1)) * 100
+                )}%`,
+              }}
+            />
+          </div>
         </div>
       )}
 
@@ -580,8 +646,15 @@ export default function LinkedIn() {
                     </option>
                   ))}
               </select>
-              <Button onClick={() => draftRun.mutate()} disabled={draftRun.isPending}>
-                {draftRun.isPending ? "Drafting…" : "Draft all approved"}
+              <Button
+                onClick={() => draftRun.mutate()}
+                disabled={draftRun.isPending || draftJobRunning}
+              >
+                {draftJobRunning
+                  ? "Drafting…"
+                  : draftRun.isPending
+                    ? "Starting…"
+                    : "Draft all approved"}
               </Button>
             </>
           )}
