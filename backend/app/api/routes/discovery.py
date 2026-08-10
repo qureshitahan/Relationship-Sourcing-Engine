@@ -354,10 +354,10 @@ def draft_run_linkedin(
     end-of-loop commit meant a killed request saved nothing at all.
     """
     run = _run_for_job(db, run_id)
-    if run.principal_id is None and draft_principal_id is None:
+    if run.principal_id is None and principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
     launch_run_linkedin_draft(
-        run_id, outreach_goal=outreach_goal, draft_principal_id=draft_principal_id
+        run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id
     )
     db.refresh(run)
     return _discovery_run_out(run)

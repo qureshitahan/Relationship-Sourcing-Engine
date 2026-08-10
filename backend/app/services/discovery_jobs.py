@@ -789,18 +789,25 @@ def _linkedin_draft_worker(
 
         _start_job(db, run, JOB_DRAFT_LINKEDIN, len(to_draft))
         if not to_draft:
-            no_profile = len(approved) - len(messageable)
-            _finish_job(
-                db,
-                run,
-                JOB_DONE,
-                (
-                    f"Nothing to draft: {no_profile} of {len(approved)} approved "
-                    "prospects have no personal LinkedIn profile."
+            # Always say WHY. "done, 0 of 0" with no note is the state the old
+            # route left behind, and it is indistinguishable from a failure.
+            if not approved:
+                reason = (
+                    "No approved prospects in this run — approve people on the "
+                    "Prospects page first."
                 )
-                if no_profile
-                else None,
-            )
+            elif not messageable:
+                reason = (
+                    f"None of the {len(approved)} approved prospects can be messaged: "
+                    "they have no personal LinkedIn profile (a /in/ link), or are on "
+                    "the do-not-contact list."
+                )
+            else:
+                reason = (
+                    f"All {len(messageable)} messageable prospects already have a "
+                    "LinkedIn message."
+                )
+            _finish_job(db, run, JOB_DONE, reason)
             return
 
         goal = (outreach_goal or "").strip() or outreach_goal_for_run(run.criteria)
