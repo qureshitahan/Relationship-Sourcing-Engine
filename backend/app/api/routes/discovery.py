@@ -309,6 +309,7 @@ def pipeline_run_prospects(
 def draft_run_emails(
     run_id: int,
     outreach_goal: Optional[str] = Body(default=None, embed=True),
+    principal_id: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db),
 ):
     """Draft outreach emails for every approved prospect in the run (background).
@@ -319,11 +320,20 @@ def draft_run_emails(
 
     ``outreach_goal`` is the purpose the operator typed on the Drafts page; it
     steers what every email argues. Falls back to the run's stored goal.
+
+    ``principal_id`` optionally drafts these already-discovered prospects as a
+    DIFFERENT principal than the one whose search actually found them — reuses
+    this run's (already paid for) prospect list instead of re-running Apollo
+    discovery just to send from another identity. Omit to draft as the run's
+    own principal (existing behaviour).
     """
     run = _run_for_job(db, run_id)
-    if run.principal_id is None:
+    if principal_id is not None:
+        if db.get(Principal, principal_id) is None:
+            raise HTTPException(status_code=404, detail="Principal not found")
+    elif run.principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
-    launch_run_draft(run_id, outreach_goal=outreach_goal)
+    launch_run_draft(run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id)
     db.refresh(run)
     return _discovery_run_out(run)
 

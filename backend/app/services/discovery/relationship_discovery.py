@@ -252,6 +252,7 @@ def run_discovery(
                     company,
                     person.linkedin_url,
                     campaign_id=campaign_id,
+                    principal_id=principal.id,
                 )
                 if existing is not None:
                     duplicates += 1
@@ -275,6 +276,7 @@ def run_discovery(
                     external_id=person.external_id,
                     source=run.provider,
                     discovery_run_id=run.id,
+                    principal_id=principal.id,
                     campaign_id=campaign_id,
                     has_email=bool(person.has_email),
                     confidence_score=70.0 if person.has_email else 45.0,
@@ -462,11 +464,23 @@ def _find_contact(
     linkedin_url: Optional[str] = None,
     *,
     campaign_id: Optional[int] = None,
+    principal_id: Optional[int] = None,
 ) -> Optional[Contact]:
-    """Dedup within a campaign (or globally when campaign_id is unset)."""
+    """Dedup within a campaign when campaign_id is set; otherwise within a
+    principal's own prospect pool when principal_id is set; otherwise globally.
+
+    Campaign scoping wins when both are given — a campaign is a more specific,
+    pre-existing grouping and callers that pass one already rely on that exact
+    behaviour. Principal scoping is what lets the same real person be reused
+    across principals: someone Dalbir already discovered still counts as "new"
+    for Farah, since Farah hasn't found (or contacted) them yet — re-running a
+    full paid discovery just to swap the sending identity is unnecessary.
+    """
     def _scoped(q):
         if campaign_id is not None:
             return q.where(Contact.campaign_id == campaign_id)
+        if principal_id is not None:
+            return q.where(Contact.principal_id == principal_id)
         return q
 
     if external_id:

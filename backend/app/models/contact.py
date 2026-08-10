@@ -51,6 +51,15 @@ class Contact(Base, TimestampMixin):
     discovery_run_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("discovery_runs.id"), index=True
     )
+    # The principal whose discovery search actually surfaced this person.
+    # Denormalized from discovery_run.principal_id (rather than only derivable
+    # via a join) so duplicate-detection can be scoped per principal cheaply:
+    # the same real person discovered by one principal should still come back
+    # as "new" for a different principal, since that principal hasn't
+    # discovered/contacted them yet.
+    principal_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("principals.id"), index=True
+    )
     # Which outreach campaign surfaced this person (prospects are not shared
     # across campaigns, even for the same principal).
     campaign_id: Mapped[Optional[int]] = mapped_column(

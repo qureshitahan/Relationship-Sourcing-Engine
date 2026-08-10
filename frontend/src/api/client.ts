@@ -221,10 +221,11 @@ export const approveRunProspects = (id: number, contactIds?: number[]) =>
       contact_ids: contactIds ?? null,
     })
     .then((r) => r.data);
-export const draftRunEmails = (id: number, outreachGoal?: string) =>
+export const draftRunEmails = (id: number, outreachGoal?: string, principalId?: number) =>
   api
     .post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-emails`, {
       outreach_goal: outreachGoal ?? null,
+      principal_id: principalId ?? null,
     })
     .then((r) => r.data);
 export const pipelineRunProspects = (id: number, contactIds?: number[], outreachGoal?: string) =>

@@ -459,14 +459,42 @@ def _approve_worker(run_id: int, contact_ids: Optional[list[int]]) -> None:
 
 # --- bulk email drafting ---------------------------------------------------
 
-def launch_run_draft(run_id: int, *, outreach_goal: Optional[str] = None) -> None:
+def launch_run_draft(
+    run_id: int,
+    *,
+    outreach_goal: Optional[str] = None,
+    draft_principal_id: Optional[int] = None,
+) -> None:
+    """``draft_principal_id`` lets an operator draft this run's prospects as a
+    DIFFERENT principal than the one who originally discovered them — reusing
+    an already-paid-for discovery instead of re-running Apollo search just to
+    change the sending identity. Defaults to the run's own principal."""
     _mark_starting(run_id, JOB_DRAFT_EMAIL)
     threading.Thread(
         target=_draft_worker,
         args=(run_id, outreach_goal),
+        kwargs=dict(draft_principal_id=draft_principal_id),
         name=f"run-draft-{run_id}",
         daemon=True,
     ).start()
+
+
+def _reusable_insight_for_contact(db: Session, contact_id: int) -> Optional[RelevanceInsight]:
+    """The most recent research for this prospect, from ANY principal.
+
+    Used as a cost-friendly fallback when drafting for a principal who hasn't
+    researched this prospect themselves: reusing existing facts/talking points
+    is far better than drafting with zero context, and — unlike generating a
+    fresh insight — spends no extra Anthropic research credits. The email
+    itself is still written in the CURRENT principal's voice (generate_outreach
+    applies principal_context separately); only the underlying research facts
+    are shared across principals.
+    """
+    return db.execute(
+        select(RelevanceInsight)
+        .where(RelevanceInsight.contact_id == contact_id)
+        .order_by(RelevanceInsight.created_at.desc())
+    ).scalars().first()
 
 
 def _draft_one(
@@ -493,6 +521,8 @@ def _draft_one(
             )
             .order_by(RelevanceInsight.created_at.desc())
         ).scalars().first()
+        if insight is None:
+            insight = _reusable_insight_for_contact(db, contact_id)
         result = generate_outreach(
             db, principal, contact, company, insight, outreach_goal=outreach_goal
         )
@@ -504,7 +534,12 @@ def _draft_one(
         db.close()
 
 
-def _draft_worker(run_id: int, outreach_goal: Optional[str]) -> None:
+def _draft_worker(
+    run_id: int,
+    outreach_goal: Optional[str],
+    *,
+    draft_principal_id: Optional[int] = None,
+) -> None:
     from app.api.routes.emails import _principal_mailbox_id
     from app.models.enums import AuditAction
     from app.services.audit import log_action
@@ -516,10 +551,19 @@ def _draft_worker(run_id: int, outreach_goal: Optional[str]) -> None:
         run = db.get(DiscoveryRun, run_id)
         if run is None:
             return
-        principal = db.get(Principal, run.principal_id) if run.principal_id else None
+        # An explicit draft_principal_id reuses this run's already-discovered
+        # prospects for a DIFFERENT principal's outreach (see launch_run_draft)
+        # instead of the run's own discovering principal.
+        effective_principal_id = draft_principal_id or run.principal_id
+        principal = db.get(Principal, effective_principal_id) if effective_principal_id else None
         if principal is None:
             _start_job(db, run, JOB_DRAFT_EMAIL, 0)
-            _finish_job(db, run, JOB_FAILED, "This run has no principal.")
+            _finish_job(
+                db,
+                run,
+                JOB_FAILED,
+                "No principal to draft as." if draft_principal_id else "This run has no principal.",
+            )
             return
 
         # Approved prospects in the run that don't already have a live draft.

@@ -63,12 +63,24 @@ class SendError(Exception):
 
 
 def _latest_insight(db: Session, principal_id: int, contact_id: int):
-    return db.execute(
+    insight = db.execute(
         select(RelevanceInsight)
         .where(
             RelevanceInsight.principal_id == principal_id,
             RelevanceInsight.contact_id == contact_id,
         )
+        .order_by(RelevanceInsight.created_at.desc())
+    ).scalars().first()
+    if insight is not None:
+        return insight
+    # Cost-friendly reuse: this principal hasn't researched this prospect
+    # themselves (e.g. they're drafting via an existing run discovered by a
+    # different principal — see generate_run_messages' principal_id override).
+    # Reuse whatever research already exists rather than drafting with zero
+    # context or spending a fresh Anthropic research call.
+    return db.execute(
+        select(RelevanceInsight)
+        .where(RelevanceInsight.contact_id == contact_id)
         .order_by(RelevanceInsight.created_at.desc())
     ).scalars().first()
 
