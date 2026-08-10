@@ -324,6 +324,9 @@ export default function LinkedIn() {
     refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
+  // True from the moment a draft job is started until its outcome is reported.
+  const [awaitingJob, setAwaitingJob] = useState(false);
+
   // The run row carries live job_* progress while a background job runs, so it
   // is polled separately from the (unchanging) run list above.
   const { data: runJob } = useQuery({
@@ -350,10 +353,8 @@ export default function LinkedIn() {
         draftPrincipalId ? Number(draftPrincipalId) : undefined
       ),
     onSuccess: () => {
-      setNote(
-        "Drafting started in the background. Progress appears above — you can " +
-          "leave this page and come back."
-      );
+      setNote("Drafting started in the background — you can leave this page.");
+      setAwaitingJob(true);
       qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
     },
     onError: (e: unknown) => {
@@ -363,22 +364,28 @@ export default function LinkedIn() {
     },
   });
 
-  // Pull the finished messages in once the job stops, then report the outcome.
-  const wasDrafting = useRef(false);
+  // Report the outcome once the job stops, then pull the finished messages in.
+  //
+  // Keyed on "we started a job", NOT on "we saw it running": a run with nothing
+  // to draft finishes in milliseconds, well inside the 2s poll, so waiting to
+  // observe the running state left "Drafting started…" on screen forever and the
+  // reason (no approved prospects, none messageable) never surfaced.
   useEffect(() => {
-    if (wasDrafting.current && !draftJobRunning) {
-      qc.invalidateQueries({ queryKey: ["linkedin"] });
-      if (runJob?.job_status === "failed") {
-        setNote(runJob.job_error || "Drafting failed — check backend logs.");
-      } else if (runJob?.job_status === "done") {
-        setNote(
-          `Drafted ${runJob.job_done ?? 0} LinkedIn message(s).` +
-            (runJob.job_error ? ` ${runJob.job_error}` : "")
-        );
-      }
+    if (!awaitingJob || runJob?.job_kind !== "draft_linkedin") return;
+    if (runJob.job_status === "running") return;
+    if (runJob.job_status === "failed") {
+      setNote(runJob.job_error || "Drafting failed — check backend logs.");
+    } else if (runJob.job_status === "done") {
+      const drafted = runJob.job_done ?? 0;
+      setNote(
+        (drafted
+          ? `Drafted ${drafted} LinkedIn message(s).`
+          : "Nothing was drafted.") + (runJob.job_error ? ` ${runJob.job_error}` : "")
+      );
     }
-    wasDrafting.current = !!draftJobRunning;
-  }, [draftJobRunning, runJob, qc]);
+    setAwaitingJob(false);
+    qc.invalidateQueries({ queryKey: ["linkedin"] });
+  }, [awaitingJob, runJob, qc]);
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
