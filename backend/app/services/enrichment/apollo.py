@@ -338,9 +338,19 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
                     collected.append(person)
                 if len(collected) >= target:
                     break
-            pagination = data.get("pagination") or {}
-            total_pages = pagination.get("total_pages") or 1
-            if page >= total_pages:
+            # Decide whether another page exists WITHOUT relying on a
+            # "pagination" object: /mixed_people/api_search does not return one.
+            # It answers {"people": [...], "total_entries": N} only, so reading
+            # `pagination.total_pages or 1` always resolved to 1 and broke out
+            # here after page 1 — every search this app has ever run saw just
+            # its first 100 results, no matter how high the ceiling above was.
+            #
+            # A short page is the last page. total_entries, when present, ends
+            # it sooner.
+            if len(people) < per_page:
+                break
+            total_entries = data.get("total_entries")
+            if isinstance(total_entries, int) and page * per_page >= total_entries:
                 break
             page += 1
 
