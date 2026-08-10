@@ -10,6 +10,7 @@ import {
   listDiscoveryRuns,
   listLinkedInAccounts,
   listLinkedInMessages,
+  listPrincipals,
   replyLinkedIn,
   selectLinkedInAccount,
   sendLinkedIn,
@@ -290,6 +291,14 @@ export default function LinkedIn() {
   // timestamp so the user watches messages move draft -> invited/sent.
   const [sendingUntil, setSendingUntil] = useState(0);
   const [scanning, setScanning] = useState(false);
+  // Lets an operator draft THIS run's already-discovered prospects as a
+  // different principal than the one who found them — reuses a paid-for
+  // discovery instead of re-running Apollo search just to change the sender.
+  // Empty string = "use the run's own principal" (existing behaviour).
+  const [draftPrincipalId, setDraftPrincipalId] = usePersistedState<string>(
+    `linkedin:${runId ?? "none"}:draftPrincipalId`,
+    ""
+  );
 
   const { data: accountsData } = useQuery({
     queryKey: ["linkedin-accounts"],
@@ -298,6 +307,10 @@ export default function LinkedIn() {
   const { data: runs } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listDiscoveryRuns({ limit: 25 }),
+  });
+  const { data: principals } = useQuery({
+    queryKey: ["principals", "active"],
+    queryFn: () => listPrincipals({ active: true }),
   });
   const { data, isLoading } = useQuery({
     queryKey: ["linkedin", statusFilter, runId],
@@ -310,8 +323,17 @@ export default function LinkedIn() {
     refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
+  const currentRun = runs?.items.find((r) => r.id === runId);
+
   const draftRun = useMutation({
-    mutationFn: () => generateRunLinkedIn({ discovery_run_id: runId! }),
+    mutationFn: () =>
+      generateRunLinkedIn({
+        discovery_run_id: runId!,
+        // Only sent when an override is actually selected — omitting it keeps
+        // the request identical to prior behaviour (backend defaults to the
+        // run's own principal).
+        ...(draftPrincipalId ? { principal_id: Number(draftPrincipalId) } : {}),
+      }),
     onSuccess: (res) => {
       setNote(
         `Drafted ${res.generated} LinkedIn message(s)` +
@@ -529,9 +551,39 @@ export default function LinkedIn() {
             ))}
           </select>
           {runId && (
-            <Button onClick={() => draftRun.mutate()} disabled={draftRun.isPending}>
-              {draftRun.isPending ? "Drafting…" : "Draft all approved"}
-            </Button>
+            <>
+              <label
+                className="text-sm font-medium text-slate-600"
+                title="Draft this run's already-discovered prospects using a different principal's voice — reuses this run instead of paying for a new discovery just to change the sender."
+              >
+                Send as
+              </label>
+              <select
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm"
+                value={draftPrincipalId}
+                onChange={(e) => setDraftPrincipalId(e.target.value)}
+              >
+                <option value="">
+                  Run&apos;s own principal
+                  {(() => {
+                    const own = principals?.items.find(
+                      (p) => p.id === currentRun?.principal_id
+                    );
+                    return own ? ` (${own.name})` : "";
+                  })()}
+                </option>
+                {(principals?.items ?? [])
+                  .filter((p) => p.id !== currentRun?.principal_id)
+                  .map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </option>
+                  ))}
+              </select>
+              <Button onClick={() => draftRun.mutate()} disabled={draftRun.isPending}>
+                {draftRun.isPending ? "Drafting…" : "Draft all approved"}
+              </Button>
+            </>
           )}
           <Button
             onClick={() => {

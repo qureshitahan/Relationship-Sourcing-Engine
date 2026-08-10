@@ -19,6 +19,7 @@ import {
 } from "../api/client";
 import { MultiSelectDropdown } from "../components/MultiSelectDropdown";
 import {
+  CONTACT_EMAIL_STATUS_OPTIONS,
   DEFAULT_GEOGRAPHIES,
   GEOGRAPHY_OPTIONS,
   GEOGRAPHY_SUGGESTIONS,
@@ -135,7 +136,18 @@ export default function Discover() {
     "discover:seniorities",
     []
   );
+  // Apollo filters this server-side during the search itself, for free — unlike
+  // require_email_and_linkedin below, which only learns the answer by spending a
+  // reveal credit per person. Defaults to unset (the widest net).
+  const [emailStatus, setEmailStatus] = usePersistedState<string[]>(
+    "discover:emailStatus",
+    []
+  );
   const [peopleLimit, setPeopleLimit] = usePersistedState("discover:peopleLimit", "100");
+  const [requireEmailAndLinkedin, setRequireEmailAndLinkedin] = usePersistedState(
+    "discover:requireEmailAndLinkedin",
+    false
+  );
 
   const { data: agentConfig } = useQuery({
     queryKey: ["agent", "config", principalId],
@@ -200,6 +212,7 @@ export default function Discover() {
         industries,
         geographies,
         seniorities,
+        contact_email_status: emailStatus.length ? emailStatus : undefined,
         people_limit: peopleLimit.trim() ? Number(peopleLimit) : 100,
         people_first: true,
         auto_expand_to_target: true,
@@ -208,6 +221,7 @@ export default function Discover() {
         // import (see discovery_jobs.py _discovery_worker) regardless of this
         // flag, so prospects still come back with contact details filled in.
         auto_process: false,
+        require_email_and_linkedin: requireEmailAndLinkedin,
         search_goal:
           objective.trim() ||
           (plan?.rationale && !plan.questions.length ? plan.rationale : undefined),
@@ -423,6 +437,15 @@ export default function Discover() {
                     suggestions={GEOGRAPHY_SUGGESTIONS}
                     placeholder="Search locations or type custom…"
                   />
+                  <MultiSelectDropdown
+                    label="Email availability"
+                    hint="Apollo filters this during the search, at no credit cost — pick Verified to get back only people who have a reachable email. Leave empty for the broadest search."
+                    selected={emailStatus}
+                    onChange={setEmailStatus}
+                    options={CONTACT_EMAIL_STATUS_OPTIONS}
+                    allowCustom={false}
+                    placeholder="Any email status…"
+                  />
                   <label className="block">
                     <span className="text-xs font-medium text-slate-600">
                       Max prospects (people)
@@ -435,6 +458,14 @@ export default function Discover() {
                       placeholder="100"
                       onChange={(e) => setPeopleLimit(e.target.value.replace(/\D/g, ""))}
                     />
+                  </label>
+                  <label className="flex items-center gap-1.5 pt-5 text-xs font-medium text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={requireEmailAndLinkedin}
+                      onChange={(e) => setRequireEmailAndLinkedin(e.target.checked)}
+                    />
+                    Only complete prospects (email + LinkedIn)
                   </label>
                 </div>
               </div>

@@ -11,12 +11,25 @@ from app.models.relevance_insight import RelevanceInsight
 def latest_insight(
     db: Session, *, principal_id: int, contact_id: int
 ) -> RelevanceInsight | None:
-    return db.execute(
+    insight = db.execute(
         select(RelevanceInsight)
         .where(
             RelevanceInsight.principal_id == principal_id,
             RelevanceInsight.contact_id == contact_id,
         )
+        .order_by(RelevanceInsight.created_at.desc())
+    ).scalars().first()
+    if insight is not None:
+        return insight
+    # Cost-friendly reuse: drafting for a principal reusing another
+    # principal's discovery run (see discovery_jobs.launch_run_draft's
+    # draft_principal_id) has no research of their own for this prospect yet.
+    # Reuse whatever research already exists rather than treating "nobody
+    # researched this FOR THIS EXACT PRINCIPAL" as "research failed" — that
+    # would wrongly block drafting and force an unnecessary re-research.
+    return db.execute(
+        select(RelevanceInsight)
+        .where(RelevanceInsight.contact_id == contact_id)
         .order_by(RelevanceInsight.created_at.desc())
     ).scalars().first()
 

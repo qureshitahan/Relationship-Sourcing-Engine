@@ -23,9 +23,11 @@ from app.schemas.entities import DiscoveryProcessSummary
 from app.services.discovery_jobs import (
     JOB_RUNNING,
     launch_discovery,
+    launch_run_approve,
     launch_run_draft,
     launch_run_email_send,
     launch_run_linkedin_send,
+    launch_run_pipeline,
     launch_run_reveal,
 )
 from app.services.enrichment import get_discovery_provider
@@ -179,6 +181,7 @@ def run(payload: DiscoveryRunRequest, db: Session = Depends(get_db)):
         auto_expand_to_target=payload.auto_expand_to_target,
         search_goal=payload.search_goal.strip() if payload.search_goal else None,
         auto_process=payload.auto_process,
+        require_email_and_linkedin=payload.require_email_and_linkedin,
     )
     return _discovery_run_out(discovery_run)
 
@@ -266,10 +269,47 @@ def reveal_run_emails(run_id: int, db: Session = Depends(get_db)):
     return _discovery_run_out(run)
 
 
+@router.post("/runs/{run_id}/approve", response_model=DiscoveryRunOut, status_code=202)
+def approve_run_prospects(
+    run_id: int,
+    contact_ids: Optional[list[int]] = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+):
+    """Research + reveal + approve many prospects at once, several in parallel
+    (background). ``contact_ids`` limits this to a specific selection (e.g.
+    checkboxes on the Prospects page); omit to approve every not-yet-approved
+    prospect in the run.
+    """
+    run = _run_for_job(db, run_id)
+    launch_run_approve(run_id, contact_ids)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/pipeline", response_model=DiscoveryRunOut, status_code=202)
+def pipeline_run_prospects(
+    run_id: int,
+    contact_ids: Optional[list[int]] = Body(default=None, embed=True),
+    outreach_goal: Optional[str] = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+):
+    """Approve + draft + send many prospects in one background job, with sending
+    overlapped against still-in-progress approve/draft work instead of waiting
+    for the whole batch to be drafted first (see discovery_jobs.py's pipeline
+    section). ``contact_ids`` limits this to a specific selection; omit to
+    target every prospect in the run that isn't already approved.
+    """
+    run = _run_for_job(db, run_id)
+    launch_run_pipeline(run_id, contact_ids, outreach_goal=outreach_goal)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
 @router.post("/runs/{run_id}/draft-emails", response_model=DiscoveryRunOut, status_code=202)
 def draft_run_emails(
     run_id: int,
     outreach_goal: Optional[str] = Body(default=None, embed=True),
+    principal_id: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db),
 ):
     """Draft outreach emails for every approved prospect in the run (background).
@@ -280,11 +320,20 @@ def draft_run_emails(
 
     ``outreach_goal`` is the purpose the operator typed on the Drafts page; it
     steers what every email argues. Falls back to the run's stored goal.
+
+    ``principal_id`` optionally drafts these already-discovered prospects as a
+    DIFFERENT principal than the one whose search actually found them — reuses
+    this run's (already paid for) prospect list instead of re-running Apollo
+    discovery just to send from another identity. Omit to draft as the run's
+    own principal (existing behaviour).
     """
     run = _run_for_job(db, run_id)
-    if run.principal_id is None:
+    if principal_id is not None:
+        if db.get(Principal, principal_id) is None:
+            raise HTTPException(status_code=404, detail="Principal not found")
+    elif run.principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
-    launch_run_draft(run_id, outreach_goal=outreach_goal)
+    launch_run_draft(run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id)
     db.refresh(run)
     return _discovery_run_out(run)
 

@@ -90,6 +90,26 @@ def _apply_org_fields(company: Company, org, criteria: DiscoveryCriteria, run_id
         company.discovery_run_id = run_id
 
 
+def _known_external_ids(db: Session, campaign_id: Optional[int]) -> set[str]:
+    """Apollo ids of people we already hold, so the provider can skip them.
+
+    This set previously started empty on every run, which made a repeat of the
+    same search re-collect the people we already had, hand them back, and only
+    then discard them one by one against the database. Round two would rediscover
+    round one's results before it could reach anything new — and with a page
+    ceiling in the way, often never reached it at all.
+
+    Seeding from the database instead means the very first page already yields
+    only new people. Scoped exactly like ``_find_contact`` below: within the
+    campaign when there is one, globally otherwise, so the provider never skips
+    someone this run is entitled to import.
+    """
+    query = select(Contact.external_id).where(Contact.external_id.isnot(None))
+    if campaign_id is not None:
+        query = query.where(Contact.campaign_id == campaign_id)
+    return {eid for (eid,) in db.execute(query) if eid}
+
+
 def run_discovery(
     db: Session,
     principal: Principal,
@@ -104,6 +124,7 @@ def run_discovery(
     search_goal: Optional[str] = None,
     campaign_id: Optional[int] = None,
     run: Optional[DiscoveryRun] = None,
+    require_email_and_linkedin: bool = False,
 ) -> DiscoveryRun:
     provider = get_discovery_provider()
     original_criteria = copy_criteria(criteria)
@@ -131,9 +152,13 @@ def run_discovery(
         db.flush()
 
     orgs_found = orgs_imported = people_found = people_imported = duplicates = 0
+    incomplete_skipped = 0
     insights_generated = 0
     target = max(1, min(criteria.people_limit or 25, settings.discovery_max_people_limit))
-    seen_apollo_ids: set[str] = set()
+    seen_apollo_ids: set[str] = _known_external_ids(db, campaign_id)
+    # Pre-excluded people never reach the duplicate counter below, so remember
+    # how many there were — otherwise a short run reports no reason at all.
+    previously_known = len(seen_apollo_ids)
     expansion_state = ExpansionState()
 
     try:
@@ -203,11 +228,27 @@ def run_discovery(
                 break
 
             imported_this_round = 0
+            # When require_email_and_linkedin is on, a contact isn't counted as
+            # imported the moment it's created — it goes here first, gets
+            # revealed as a batch (see below), and only survives if the reveal
+            # actually fills in both email and linkedin_url. Apollo's People
+            # Search reports has_email for free, but NOT linkedin_url (that
+            # turned out to be reveal-gated too, despite looking free in the
+            # raw response shape) — so linkedin_url can only be checked after
+            # a real (credit-spending) reveal call, not from the search hit.
+            pending_reveal_check: list[Contact] = []
             for person in discovered_people:
                 if people_imported >= target:
                     break
                 if person.external_id:
                     seen_apollo_ids.add(person.external_id)
+
+                if require_email_and_linkedin and not person.has_email:
+                    # Free pre-filter: Apollo already told us this person has no
+                    # revealable email, so there's no point spending a reveal
+                    # call (or a Contact row) on them at all.
+                    incomplete_skipped += 1
+                    continue
 
                 company = get_or_create_company(
                     db, person.organization_name, linkedin_url=person.organization_linkedin_url
@@ -234,6 +275,7 @@ def run_discovery(
                     company,
                     person.linkedin_url,
                     campaign_id=campaign_id,
+                    principal_id=principal.id,
                 )
                 if existing is not None:
                     duplicates += 1
@@ -257,6 +299,7 @@ def run_discovery(
                     external_id=person.external_id,
                     source=run.provider,
                     discovery_run_id=run.id,
+                    principal_id=principal.id,
                     campaign_id=campaign_id,
                     has_email=bool(person.has_email),
                     confidence_score=70.0 if person.has_email else 45.0,
@@ -265,14 +308,30 @@ def run_discovery(
                     status=ProspectStatus.REVIEW,
                 )
                 db.add(contact)
-                people_imported += 1
-                imported_this_round += 1
+                if require_email_and_linkedin:
+                    pending_reveal_check.append(contact)
+                else:
+                    people_imported += 1
+                    imported_this_round += 1
+
+            if pending_reveal_check:
+                from app.services.contacts import reveal_contacts_bulk
+
+                db.flush()
+                reveal_contacts_bulk(db, pending_reveal_check)
+                for contact in pending_reveal_check:
+                    if people_imported < target and contact.email and contact.linkedin_url:
+                        people_imported += 1
+                        imported_this_round += 1
+                    else:
+                        db.delete(contact)
+                        incomplete_skipped += 1
 
             db.flush()
             logger.info(
                 "Discovery run %s round %s done: imported_this_round=%s "
-                "duplicates_total=%s round_elapsed=%.1fs",
-                run.id, round_num, imported_this_round, duplicates,
+                "duplicates_total=%s incomplete_skipped_total=%s round_elapsed=%.1fs",
+                run.id, round_num, imported_this_round, duplicates, incomplete_skipped,
                 time.monotonic() - round_started,
             )
 
@@ -302,8 +361,8 @@ def run_discovery(
 
         logger.info(
             "Discovery run %s import phase finished: rounds=%s people_found=%s "
-            "people_imported=%s duplicates=%s total_elapsed=%.1fs",
-            run.id, round_num, people_found, people_imported, duplicates,
+            "people_imported=%s duplicates=%s incomplete_skipped=%s total_elapsed=%.1fs",
+            run.id, round_num, people_found, people_imported, duplicates, incomplete_skipped,
             time.monotonic() - run_started,
         )
 
@@ -343,8 +402,21 @@ def run_discovery(
                 " Stub provider returns mock data only (max ~24 people). "
                 "Set DISCOVERY_PROVIDER=apollo in .env and restart the backend."
             )
-        elif duplicates:
-            shortfall_note += f" {duplicates} skipped as duplicates from prior runs."
+        else:
+            reasons = []
+            if previously_known:
+                reasons.append(
+                    f"{previously_known} people you already have were excluded "
+                    "before the search ran"
+                )
+            if duplicates:
+                reasons.append(f"{duplicates} skipped as duplicates from prior runs")
+            if incomplete_skipped:
+                reasons.append(
+                    f"{incomplete_skipped} skipped for missing email or LinkedIn"
+                )
+            if reasons:
+                shortfall_note += " " + "; ".join(reasons) + "."
         criteria_snapshot["shortfall_note"] = shortfall_note
         if summary:
             summary = f"{summary} {shortfall_note}"
@@ -420,11 +492,23 @@ def _find_contact(
     linkedin_url: Optional[str] = None,
     *,
     campaign_id: Optional[int] = None,
+    principal_id: Optional[int] = None,
 ) -> Optional[Contact]:
-    """Dedup within a campaign (or globally when campaign_id is unset)."""
+    """Dedup within a campaign when campaign_id is set; otherwise within a
+    principal's own prospect pool when principal_id is set; otherwise globally.
+
+    Campaign scoping wins when both are given — a campaign is a more specific,
+    pre-existing grouping and callers that pass one already rely on that exact
+    behaviour. Principal scoping is what lets the same real person be reused
+    across principals: someone Dalbir already discovered still counts as "new"
+    for Farah, since Farah hasn't found (or contacted) them yet — re-running a
+    full paid discovery just to swap the sending identity is unnecessary.
+    """
     def _scoped(q):
         if campaign_id is not None:
             return q.where(Contact.campaign_id == campaign_id)
+        if principal_id is not None:
+            return q.where(Contact.principal_id == principal_id)
         return q
 
     if external_id:

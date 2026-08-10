@@ -9,6 +9,7 @@ import {
   listDiscoveryRuns,
   listEmails,
   listMailboxes,
+  listPrincipals,
   listProspects,
   regenerateEmail,
   regenerateRunDrafts,
@@ -463,10 +464,23 @@ export default function Emails() {
   const [bulkNote, setBulkNote] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [manualPurpose, setManualPurpose] = useState("");
+  // Lets an operator draft THIS run's already-discovered prospects as a
+  // different principal than the one who found them — reuses a paid-for
+  // discovery instead of re-running Apollo search just to change the sender.
+  // Empty string = "use the run's own principal" (existing behaviour).
+  const [draftPrincipalId, setDraftPrincipalId] = usePersistedState<string>(
+    `drafts:${runId ?? "none"}:draftPrincipalId`,
+    ""
+  );
 
   const { data: runs } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listDiscoveryRuns({ limit: 25 }),
+  });
+
+  const { data: principals } = useQuery({
+    queryKey: ["principals", "active"],
+    queryFn: () => listPrincipals({ active: true }),
   });
 
   const { data: run } = useQuery({
@@ -481,6 +495,13 @@ export default function Emails() {
 
   const draftJobRunning =
     run?.job_kind === "draft_email" && run?.job_status === "running";
+
+  // The principal who will actually be used to draft/send — either the
+  // explicit override above, or (default) the run's own discovering
+  // principal, matching existing behaviour when nothing is selected.
+  const effectiveDraftPrincipalId = draftPrincipalId
+    ? Number(draftPrincipalId)
+    : run?.principal_id ?? undefined;
 
   const { data, isLoading } = useQuery({
     queryKey: ["emails", statusFilter, runId],
@@ -501,6 +522,22 @@ export default function Emails() {
       }),
   });
 
+  // Scoped to whichever principal is about to draft (see draftPrincipalId
+  // above) — "already has a draft" must be checked per-principal, since the
+  // whole point of reusing a run is that a DIFFERENT principal (who hasn't
+  // drafted these prospects yet) can draft them independently of who
+  // originally discovered them.
+  const { data: draftsForPrincipal } = useQuery({
+    queryKey: ["emails", "for-draft-principal", runId, effectiveDraftPrincipalId],
+    queryFn: () =>
+      listEmails({
+        limit: 1000,
+        discovery_run_id: runId!,
+        principal_id: effectiveDraftPrincipalId!,
+      }),
+    enabled: !!runId && !!effectiveDraftPrincipalId,
+  });
+
   const { data: approvedProspects } = useQuery({
     queryKey: ["prospects", "approved-for-drafts", runId],
     queryFn: () =>
@@ -519,31 +556,31 @@ export default function Emails() {
   const outreachPurpose =
     inferredPurpose || manualPurpose.trim() || null;
 
-  const approvedWithoutDraft = useMemo(() => {
-    const draftContactIds = new Set(
-      (allForScope?.items ?? [])
-        .filter((d) =>
-          ["draft", "approved", "scheduled"].includes(d.status)
-        )
-        .map((d) => d.contact_id)
-    );
-    return (approvedProspects?.items ?? []).filter(
-      (p) => !draftContactIds.has(p.id) && canDraftProspect(p)
-    );
-  }, [approvedProspects, allForScope]);
+  const draftedContactIdsForPrincipal = useMemo(
+    () =>
+      new Set(
+        (draftsForPrincipal?.items ?? [])
+          .filter((d) => ["draft", "approved", "scheduled"].includes(d.status))
+          .map((d) => d.contact_id)
+      ),
+    [draftsForPrincipal]
+  );
 
-  const approvedBlockedFromDraft = useMemo(() => {
-    const draftContactIds = new Set(
-      (allForScope?.items ?? [])
-        .filter((d) =>
-          ["draft", "approved", "scheduled"].includes(d.status)
-        )
-        .map((d) => d.contact_id)
-    );
-    return (approvedProspects?.items ?? []).filter(
-      (p) => !draftContactIds.has(p.id) && !canDraftProspect(p)
-    );
-  }, [approvedProspects, allForScope]);
+  const approvedWithoutDraft = useMemo(
+    () =>
+      (approvedProspects?.items ?? []).filter(
+        (p) => !draftedContactIdsForPrincipal.has(p.id) && canDraftProspect(p)
+      ),
+    [approvedProspects, draftedContactIdsForPrincipal]
+  );
+
+  const approvedBlockedFromDraft = useMemo(
+    () =>
+      (approvedProspects?.items ?? []).filter(
+        (p) => !draftedContactIdsForPrincipal.has(p.id) && !canDraftProspect(p)
+      ),
+    [approvedProspects, draftedContactIdsForPrincipal]
+  );
 
   const tabCounts = useMemo(() => {
     const counts: Record<string, number> = {
@@ -590,13 +627,23 @@ export default function Emails() {
       // timeout — inline drafting failed outright at ~169 prospects and lost
       // every email it had already written. The worker commits per batch and
       // reports progress on the run's job_* fields, polled below.
-      draftRunEmails(runId!, outreachPurpose ?? undefined),
+      //
+      // Passing effectiveDraftPrincipalId only when it differs from the run's
+      // own principal keeps the request identical to prior behaviour when no
+      // override is selected.
+      draftRunEmails(
+        runId!,
+        outreachPurpose ?? undefined,
+        draftPrincipalId ? effectiveDraftPrincipalId : undefined
+      ),
     onSuccess: () => {
       setBulkNote(
         "Drafting started in the background. Progress appears above — you can " +
           "leave this page and come back."
       );
-      qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
+      qc.invalidateQueries({ queryKey: ["discovery-run", runId] });
+      qc.invalidateQueries({ queryKey: ["emails", "for-draft-principal", runId] });
+      qc.invalidateQueries({ queryKey: ["emails", "tab-counts", runId] });
     },
     onError: () => setBulkNote("Could not start drafting — check backend logs."),
   });
@@ -769,6 +816,39 @@ export default function Emails() {
             : "Pick a discovery run to draft outreach for approved prospects, then send and track replies."
         }
       />
+
+      {runId && (
+        <Card className="mb-4 p-4">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Send outreach as
+          </label>
+          <p className="mt-1 text-xs text-slate-500">
+            Draft &amp; send this run&apos;s already-discovered prospects using a
+            different principal&apos;s mailbox and voice — reuses this run instead
+            of paying for a new discovery just to change the sender.
+          </p>
+          <select
+            className="mt-2 w-full max-w-xs rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            value={draftPrincipalId}
+            onChange={(e) => setDraftPrincipalId(e.target.value)}
+          >
+            <option value="">
+              Run&apos;s own principal
+              {(() => {
+                const own = principals?.items.find((p) => p.id === run?.principal_id);
+                return own ? ` (${own.name})` : "";
+              })()}
+            </option>
+            {(principals?.items ?? [])
+              .filter((p) => p.id !== run?.principal_id)
+              .map((p) => (
+                <option key={p.id} value={String(p.id)}>
+                  {p.name}
+                </option>
+              ))}
+          </select>
+        </Card>
+      )}
 
       {runId && (
         <Card className="mb-4 border-indigo-200 bg-indigo-50/60 p-4">

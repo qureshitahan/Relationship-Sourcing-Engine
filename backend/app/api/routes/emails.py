@@ -44,6 +44,7 @@ from app.services.email_providers import (
     provider_for_mailbox,
     resolve_mailbox,
 )
+from app.services.email_providers.base import EmailProvider
 from app.services.campaign_control import campaign_is_paused
 from app.services.email_html import plain_body_to_html
 from app.services.inbound_text import clean_inbound_reply, reply_snippet
@@ -1071,12 +1072,24 @@ def _html_with_pixel(body: str, pixel_url: Optional[str]) -> str:
     return plain_body_to_html(body, pixel_url=pixel_url)
 
 
-def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
+def perform_send(
+    db: Session,
+    draft: EmailDraft,
+    *,
+    provider_cache: Optional[dict[str, EmailProvider]] = None,
+) -> EmailDraft:
     """Send an approved/scheduled draft via the configured provider.
 
-    Shared by the manual /send endpoint and the background scheduler. Commits
-    the draft on success. Raises ``SendError`` on any validation/transport
-    failure (the caller decides how to surface it).
+    Shared by the manual /send endpoint, the background scheduler, and bulk
+    send loops. Commits the draft on success. Raises ``SendError`` on any
+    validation/transport failure (the caller decides how to surface it).
+
+    ``provider_cache`` lets a caller sending many drafts in a row (a bulk-send
+    loop) reuse the same provider instance — and, for providers that hold a
+    persistent connection open (Gmail SMTP), the same connection — across
+    every draft instead of reconnecting from scratch each time. Single-send
+    callers (the manual endpoint, the scheduler) omit it and get a fresh,
+    short-lived provider per call as before.
     """
     if draft.status not in (EmailStatus.APPROVED, EmailStatus.SCHEDULED):
         raise SendError("Email must be APPROVED before sending")
@@ -1112,7 +1125,13 @@ def perform_send(db: Session, draft: EmailDraft) -> EmailDraft:
             "OUTREACH_MAILBOXES before sending."
         )
 
-    provider = provider_for_mailbox(mailbox)
+    if provider_cache is not None:
+        provider = provider_cache.get(mailbox.id)
+        if provider is None:
+            provider = provider_for_mailbox(mailbox)
+            provider_cache[mailbox.id] = provider
+    else:
+        provider = provider_for_mailbox(mailbox)
     result = provider.send(
         to_email=contact.email,
         subject=draft.subject,

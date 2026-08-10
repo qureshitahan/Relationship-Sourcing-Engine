@@ -66,6 +66,17 @@ class EmailProvider(ABC):
         """Cancel a previously deferred message. Returns True on success."""
         return False
 
+    # --- Connection lifecycle (optional) ---
+    def close(self) -> None:
+        """Release any connection/session this provider is holding open.
+
+        Default no-op — most providers are stateless per call. A provider that
+        keeps a persistent connection open across several ``send()`` calls
+        (e.g. Gmail's SMTP session, reused across a bulk-send batch) overrides
+        this so the caller can release it once the batch is done.
+        """
+        return None
+
     # --- Reply tracking (optional; only real providers implement it) ---
     def supports_reply_tracking(self) -> bool:
         return False

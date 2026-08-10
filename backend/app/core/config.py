@@ -74,6 +74,21 @@ class Settings(BaseSettings):
     apollo_contacts_per_company: int = 10
     # People Search expands to similar job titles when enabled (broader net).
     apollo_include_similar_titles: bool = True
+    # How deep People Search may page before giving up on a target.
+    #
+    # This is a ceiling, not a quota: paging stops the moment the requested
+    # number of people is collected, so a search that fills on page 5 never
+    # touches page 6 regardless of this value. It only bites on repeat runs of
+    # the same search, where early pages are all people we already have — the
+    # old ceiling of 8 pages meant a second run could reach at most ~300 new
+    # people and a third run none at all.
+    #
+    # Search costs 0 Apollo credits (only enrichment/reveal does), so raising
+    # this spends rate limit and wall-clock, not money. Apollo allows 500 pages
+    # (50,000 records) but limits this endpoint to ~600 calls/hour, and a run
+    # can take up to 13 expansion rounds — 30 keeps the worst case near 390
+    # calls, comfortably inside that budget.
+    apollo_max_search_pages: int = 30
     # Reveal real emails/phones via People Enrichment (consumes credits).
     # Default OFF: discovery (search) is cheap; reveals are deliberate and gated
     # to high board-fit, human-approved prospects only (see board_fit_* below).
@@ -212,9 +227,18 @@ class Settings(BaseSettings):
     # flagged. A run-level bulk LinkedIn send stops once today's total reaches this.
     # LinkedIn realistically tolerates well under this; 50 is an aggressive max.
     linkedin_daily_send_cap: int = 50
-    # How many drafts to generate per LLM batch in a run-level bulk draft job
-    # (progress is reported per batch).
-    bulk_draft_batch_size: int = 10
+    # How many drafts to generate CONCURRENTLY in a run-level bulk draft job —
+    # each draft is one Claude call, and Claude calls are I/O-bound (network
+    # wait), so running several at once cuts wall-clock roughly linearly
+    # without extra Anthropic cost. Kept modest to stay well under Anthropic's
+    # per-account concurrent-request limits.
+    bulk_draft_batch_size: int = 8
+    # How many prospects to research+reveal+approve CONCURRENTLY in a
+    # run-level bulk approve job. Approval was previously driven one-request-
+    # at-a-time from the browser (2 in flight) with a full web-search Claude
+    # call inside every request — the single biggest reason bulk outreach on
+    # ~500 prospects took hours instead of minutes.
+    bulk_approve_workers: int = 8
 
     # --- Sending cadence (drip) ---
     # When the agent auto-sends, it sends in small batches with a pause between

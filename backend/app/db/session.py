@@ -132,6 +132,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "campaign_id": "INTEGER",
         "bulk_campaign_id": "INTEGER",
         "notes": "TEXT",
+        "principal_id": "INTEGER",
     },
     "relevance_insights": {
         "snapshot": "TEXT",
@@ -191,6 +192,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "job_status": "VARCHAR(20)",
         "job_total": "INTEGER",
         "job_done": "INTEGER",
+        "job_sent": "INTEGER",
         "job_error": "TEXT",
         "job_cancel_requested": "BOOLEAN DEFAULT 0",
     },
@@ -610,6 +612,9 @@ def _apply_lightweight_migrations() -> None:
         # a duplicate aborts the whole discovery run (MultipleResultsFound).
         _dedupe_companies,
         _backfill_contact_campaign_ids,
+        # Stamp principal_id on any contact created before that column existed,
+        # so per-principal duplicate detection (_find_contact) recognizes them.
+        _backfill_contact_principal_ids,
         # Runs after campaign ids are stamped, so a contact's campaign is known
         # before we use it to decide which principal owns its research.
         _backfill_insight_principal,
@@ -827,6 +832,37 @@ def _backfill_contact_campaign_ids() -> None:
                     LIMIT 1
                 )
                 WHERE campaign_id IS NULL AND discovery_run_id IS NOT NULL
+                """
+            )
+        )
+
+
+def _backfill_contact_principal_ids() -> None:
+    """Stamp principal_id on existing contacts from their discovery run.
+
+    contacts.principal_id is additive (see _ADDITIVE_COLUMNS) so it starts
+    NULL on every row that already existed before this migration. Without
+    this backfill, per-principal duplicate detection (_find_contact) would
+    treat every pre-existing contact as ownerless and never match them,
+    letting the same person be re-imported for the principal who already
+    has them. Idempotent: only touches rows where principal_id is still NULL.
+    """
+    inspector = inspect(engine)
+    if "contacts" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("contacts")}
+    if "principal_id" not in cols or "discovery_runs" not in inspector.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE contacts
+                SET principal_id = (
+                    SELECT dr.principal_id FROM discovery_runs dr
+                    WHERE dr.id = contacts.discovery_run_id
+                )
+                WHERE principal_id IS NULL AND discovery_run_id IS NOT NULL
                 """
             )
         )

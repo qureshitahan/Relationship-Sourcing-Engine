@@ -441,7 +441,9 @@ export interface DiscoveryRun {
   job_status?: string | null;
   job_total?: number | null;
   job_done?: number | null;
+  job_sent?: number | null;
   job_error?: string | null;
+  job_cancel_requested?: boolean | null;
 }
 
 export interface AgentRun {

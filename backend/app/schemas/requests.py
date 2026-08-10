@@ -122,6 +122,10 @@ class DiscoveryRunRequest(BaseModel):
     requested_by: Optional[str] = "user"
     # Plain-language goal from AI-assisted setup (stored on the run for research).
     search_goal: Optional[str] = None
+    # Skip importing anyone missing an email or LinkedIn URL (Apollo's People
+    # Search already reports both for free, no reveal credits spent) — keeps
+    # pulling more pages/rounds until enough COMPLETE prospects are found.
+    require_email_and_linkedin: bool = False
 
 
 class EnrichRequest(BaseModel):
