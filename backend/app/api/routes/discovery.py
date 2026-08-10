@@ -26,6 +26,7 @@ from app.services.discovery_jobs import (
     launch_run_approve,
     launch_run_draft,
     launch_run_email_send,
+    launch_run_linkedin_draft,
     launch_run_linkedin_send,
     launch_run_pipeline,
     launch_run_reveal,
@@ -334,6 +335,30 @@ def draft_run_emails(
     elif run.principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
     launch_run_draft(run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id)
+    db.refresh(run)
+    return _discovery_run_out(run)
+
+
+@router.post("/runs/{run_id}/draft-linkedin", response_model=DiscoveryRunOut, status_code=202)
+def draft_run_linkedin(
+    run_id: int,
+    outreach_goal: Optional[str] = Body(default=None, embed=True),
+    principal_id: Optional[int] = Body(default=None, embed=True),
+    db: Session = Depends(get_db),
+):
+    """Draft LinkedIn messages for every approved prospect in the run (background).
+
+    Returns 202 immediately; progress lands on the run's ``job_*`` columns. Like
+    email drafting, this is one LLM call per prospect — done inline it outlived
+    both the browser's timeout and the worker's, and the old route's single
+    end-of-loop commit meant a killed request saved nothing at all.
+    """
+    run = _run_for_job(db, run_id)
+    if run.principal_id is None and principal_id is None:
+        raise HTTPException(status_code=400, detail="Run has no principal")
+    launch_run_linkedin_draft(
+        run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id
+    )
     db.refresh(run)
     return _discovery_run_out(run)
 
