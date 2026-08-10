@@ -90,6 +90,26 @@ def _apply_org_fields(company: Company, org, criteria: DiscoveryCriteria, run_id
         company.discovery_run_id = run_id
 
 
+def _known_external_ids(db: Session, campaign_id: Optional[int]) -> set[str]:
+    """Apollo ids of people we already hold, so the provider can skip them.
+
+    This set previously started empty on every run, which made a repeat of the
+    same search re-collect the people we already had, hand them back, and only
+    then discard them one by one against the database. Round two would rediscover
+    round one's results before it could reach anything new — and with a page
+    ceiling in the way, often never reached it at all.
+
+    Seeding from the database instead means the very first page already yields
+    only new people. Scoped exactly like ``_find_contact`` below: within the
+    campaign when there is one, globally otherwise, so the provider never skips
+    someone this run is entitled to import.
+    """
+    query = select(Contact.external_id).where(Contact.external_id.isnot(None))
+    if campaign_id is not None:
+        query = query.where(Contact.campaign_id == campaign_id)
+    return {eid for (eid,) in db.execute(query) if eid}
+
+
 def run_discovery(
     db: Session,
     principal: Principal,
@@ -135,7 +155,10 @@ def run_discovery(
     incomplete_skipped = 0
     insights_generated = 0
     target = max(1, min(criteria.people_limit or 25, settings.discovery_max_people_limit))
-    seen_apollo_ids: set[str] = set()
+    seen_apollo_ids: set[str] = _known_external_ids(db, campaign_id)
+    # Pre-excluded people never reach the duplicate counter below, so remember
+    # how many there were — otherwise a short run reports no reason at all.
+    previously_known = len(seen_apollo_ids)
     expansion_state = ExpansionState()
 
     try:
@@ -381,6 +404,11 @@ def run_discovery(
             )
         else:
             reasons = []
+            if previously_known:
+                reasons.append(
+                    f"{previously_known} people you already have were excluded "
+                    "before the search ran"
+                )
             if duplicates:
                 reasons.append(f"{duplicates} skipped as duplicates from prior runs")
             if incomplete_skipped:

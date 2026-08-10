@@ -19,6 +19,7 @@ import {
 } from "../api/client";
 import { MultiSelectDropdown } from "../components/MultiSelectDropdown";
 import {
+  CONTACT_EMAIL_STATUS_OPTIONS,
   DEFAULT_GEOGRAPHIES,
   GEOGRAPHY_OPTIONS,
   GEOGRAPHY_SUGGESTIONS,
@@ -135,6 +136,13 @@ export default function Discover() {
     "discover:seniorities",
     []
   );
+  // Apollo filters this server-side during the search itself, for free — unlike
+  // require_email_and_linkedin below, which only learns the answer by spending a
+  // reveal credit per person. Defaults to unset (the widest net).
+  const [emailStatus, setEmailStatus] = usePersistedState<string[]>(
+    "discover:emailStatus",
+    []
+  );
   const [peopleLimit, setPeopleLimit] = usePersistedState("discover:peopleLimit", "100");
   const [requireEmailAndLinkedin, setRequireEmailAndLinkedin] = usePersistedState(
     "discover:requireEmailAndLinkedin",
@@ -204,6 +212,7 @@ export default function Discover() {
         industries,
         geographies,
         seniorities,
+        contact_email_status: emailStatus.length ? emailStatus : undefined,
         people_limit: peopleLimit.trim() ? Number(peopleLimit) : 100,
         people_first: true,
         auto_expand_to_target: true,
@@ -427,6 +436,15 @@ export default function Discover() {
                     options={GEOGRAPHY_OPTIONS}
                     suggestions={GEOGRAPHY_SUGGESTIONS}
                     placeholder="Search locations or type custom…"
+                  />
+                  <MultiSelectDropdown
+                    label="Email availability"
+                    hint="Apollo filters this during the search, at no credit cost — pick Verified to get back only people who have a reachable email. Leave empty for the broadest search."
+                    selected={emailStatus}
+                    onChange={setEmailStatus}
+                    options={CONTACT_EMAIL_STATUS_OPTIONS}
+                    allowCustom={false}
+                    placeholder="Any email status…"
                   />
                   <label className="block">
                     <span className="text-xs font-medium text-slate-600">

@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 APOLLO_BASE_URL = "https://api.apollo.io/api/v1"
 REQUEST_TIMEOUT = 40.0
+#: Apollo's own hard ceiling on People Search: 100 records/page, 500 pages
+#: (50,000 records). Asking past it returns nothing, so never spend the call.
+_APOLLO_MAX_PAGE = 500
 
 
 class ApolloAPIError(Exception):
@@ -297,8 +300,17 @@ class ApolloEnrichmentProvider(EnrichmentProvider):
         collected: List[DiscoveredPerson] = []
         exclude = exclude_external_ids or set()
         page = 1
-        # Fetch extra pages when many rows are skipped (already seen in prior runs).
-        max_pages = max(5, (target + per_page - 1) // per_page + 3)
+        # Ceiling, not a quota — the loop below stops as soon as ``target`` is
+        # collected, so a search that fills on page 5 never requests page 6.
+        # It only matters when early pages are all excluded (a repeat run of the
+        # same search), where the previous ceiling of 8 left the second run able
+        # to reach ~300 new people and the third none. Apollo caps this endpoint
+        # at 500 pages / 50,000 records, so never ask beyond that.
+        pages_for_target = (target + per_page - 1) // per_page + 3
+        max_pages = min(
+            _APOLLO_MAX_PAGE,
+            max(settings.apollo_max_search_pages, pages_for_target),
+        )
 
         while len(collected) < target and page <= max_pages:
             payload = self._build_people_search_payload(
