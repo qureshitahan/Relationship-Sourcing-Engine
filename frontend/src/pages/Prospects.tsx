@@ -614,7 +614,7 @@ export default function Prospects() {
             <Button
               variant="danger"
               onClick={() => cancelJob.mutate()}
-              disabled={cancelJob.isPending || run.job_cancel_requested}
+              disabled={cancelJob.isPending || !!run.job_cancel_requested}
             >
               Stop
             </Button>
