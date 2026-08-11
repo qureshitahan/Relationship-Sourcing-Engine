@@ -121,6 +121,12 @@ def create_campaign(payload: CampaignCreateRequest, db: Session = Depends(get_db
     else:
         config.discover_target = 50
     _sync_playbook_people_limit(playbook, config.discover_target)
+    if payload.qualify_min is not None:
+        config.qualify_min = float(payload.qualify_min)
+    if payload.auto_reject_below is not None:
+        config.auto_reject_below = float(payload.auto_reject_below)
+    if payload.require_email_and_linkedin is not None:
+        config.require_email_and_linkedin = bool(payload.require_email_and_linkedin)
     if payload.auto_send is not None:
         config.auto_send = bool(payload.auto_send)
     if payload.auto_schedule is not None:
@@ -245,6 +251,7 @@ def update_campaign(
         "discover_target",
         "qualify_min",
         "auto_reject_below",
+        "require_email_and_linkedin",
         "auto_send",
         "auto_schedule",
         "followup_enabled",

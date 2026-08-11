@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { isAxiosError } from "axios";
 
 import { createCampaign, listPrincipals, planAgentSearch } from "../api/client";
 import { ChipSelect } from "../components/ChipSelect";
@@ -13,33 +12,13 @@ import {
   TITLE_OPTIONS,
 } from "../constants/discoveryOptions";
 import { Badge, Button, Card, Loading } from "../components/ui";
+import { apiErrorMessage } from "../utils/apiError";
 import type { AgentPlan } from "../types";
 
 const inputCls =
   "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100";
 
 const STEPS = ["Principal", "Goal", "Questions", "Audience", "Settings", "Launch"] as const;
-
-/** Human-readable reason from an API error, so failures name the actual problem
- *  (missing prerequisite, validation issue, server fault) instead of a generic line. */
-function apiErrorMessage(e: unknown, fallback: string): string {
-  if (isAxiosError(e)) {
-    if (!e.response) return "Cannot reach the server — check your connection and try again.";
-    const detail: unknown = e.response.data?.detail;
-    if (typeof detail === "string" && detail.trim()) return detail;
-    if (Array.isArray(detail) && detail.length) {
-      // FastAPI validation errors: [{loc: ["body", "field"], msg: "..."}]
-      const first = detail[0] as { loc?: unknown[]; msg?: string };
-      const field = Array.isArray(first.loc)
-        ? first.loc.filter((p) => p !== "body").join(".")
-        : "";
-      if (first.msg) return field ? `${field}: ${first.msg}` : first.msg;
-    }
-    if (e.response.status >= 500)
-      return `${fallback} The server hit an internal error (${e.response.status}) — the campaign may still have been created; check All campaigns before retrying.`;
-  }
-  return fallback;
-}
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -91,6 +70,8 @@ export default function CampaignWizard() {
     50
   );
   const [mailboxCap, setMailboxCap, clearMailboxCap] = usePersistedState("campaign-wizard:mailboxCap", 50);
+  const [requireEmailAndLinkedin, setRequireEmailAndLinkedin, clearRequireEmailAndLinkedin] =
+    usePersistedState("campaign-wizard:requireEmailAndLinkedin", false);
   // Default new campaigns to review-before-send so the first runs are safe to inspect.
   const [autoSend, setAutoSend, clearAutoSend] = usePersistedState("campaign-wizard:autoSend", false);
   const [autoSchedule, setAutoSchedule, clearAutoSchedule] = usePersistedState(
@@ -127,6 +108,7 @@ export default function CampaignWizard() {
     clearCompanyTypes();
     clearPeoplePerDay();
     clearMailboxCap();
+    clearRequireEmailAndLinkedin();
     clearAutoSend();
     clearAutoSchedule();
     clearFollowupEnabled();
@@ -206,6 +188,7 @@ export default function CampaignWizard() {
         },
         discover_target: peoplePerDay,
         mailbox_daily_cap: mailboxCap,
+        require_email_and_linkedin: requireEmailAndLinkedin,
         auto_send: autoSend,
         auto_schedule: autoSchedule,
         followup_enabled: followupEnabled,
@@ -472,6 +455,23 @@ export default function CampaignWizard() {
               valid email and some are filtered out by the AI research step, so finding 50 usually
               means fewer than 50 sends.
             </p>
+
+            <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 rounded border-slate-300"
+                checked={requireEmailAndLinkedin}
+                onChange={(e) => setRequireEmailAndLinkedin(e.target.checked)}
+              />
+              <span className="text-sm text-slate-800">
+                <span className="font-medium">Only find people with both email + LinkedIn</span>
+                <span className="block text-xs text-slate-500">
+                  Discards anyone missing either during discovery, so fewer get rejected later
+                  for having no reachable email — helps the found count end up closer to the
+                  qualified/sent count.
+                </span>
+              </span>
+            </label>
 
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <Field label="Daily report inboxes" hint="optional">

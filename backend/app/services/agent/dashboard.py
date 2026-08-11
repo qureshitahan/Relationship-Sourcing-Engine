@@ -601,6 +601,11 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         if principal
         else 50,
         "discover_target": int(config.discover_target or 0),
+        "qualify_min": float(config.qualify_min if config.qualify_min is not None else 0.0),
+        "auto_reject_below": float(
+            config.auto_reject_below if config.auto_reject_below is not None else 0.0
+        ),
+        "require_email_and_linkedin": bool(getattr(config, "require_email_and_linkedin", False)),
         "auto_send": bool(config.auto_send),
         "auto_schedule": bool(getattr(config, "auto_schedule", True)),
         "pending_drafts": pending_drafts,
@@ -632,7 +637,10 @@ def _campaign_contact_count(db: Session, campaign_id: int) -> int:
 
 
 def _campaign_qualified_count(db: Session, campaign_id: int, config: AgentConfig) -> int:
-    floor = float(config.qualify_min or 40)
+    # ``or`` would read a deliberate 0 (no relevance filtering) as "unset" and
+    # count against 40 instead, so the campaign's qualified total disagreed with
+    # what the run actually qualified.
+    floor = float(config.qualify_min if config.qualify_min is not None else 0.0)
     return int(
         _campaign_filter(
             db,

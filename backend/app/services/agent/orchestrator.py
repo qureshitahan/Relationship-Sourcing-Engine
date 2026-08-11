@@ -297,6 +297,28 @@ def _abort_if_cancelled(db: Session, run: AgentRun, errors: list[str]) -> bool:
 # shared across threads.
 
 
+def _commit_with_retry(db: Session, *, attempts: int = 5, base_delay: float = 0.3) -> None:
+    """Commit, retrying briefly on SQLite lock contention from concurrent workers.
+
+    Several qualify/draft workers each write via their own SessionLocal() at
+    once; SQLite serializes writers, and one occasionally loses that race even
+    inside its own busy_timeout window under heavy fan-out (bulk_approve_workers
+    researching in parallel). A short local retry with backoff clears the
+    transient lock instead of failing that prospect's research outright.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    for attempt in range(attempts):
+        try:
+            db.commit()
+            return
+        except OperationalError as exc:
+            db.rollback()
+            if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(base_delay * (2**attempt))
+
+
 def _qualify_one(
     contact_id: int, principal_id: int, outreach_goal: Optional[str]
 ) -> tuple[int, Optional[float], Optional[str]]:
@@ -317,7 +339,7 @@ def _qualify_one(
             allow_reuse=True,
         )
         score = insight.relevance_score or 0.0
-        db.commit()
+        _commit_with_retry(db)
         return contact_id, score, None
     except Exception as exc:  # noqa: BLE001 - one prospect must not stop the run
         db.rollback()
@@ -447,6 +469,7 @@ def execute_run(run_id: int) -> None:
                 people_first=True,
                 search_goal=playbook.objective_prompt,
                 campaign_id=config.id,
+                require_email_and_linkedin=bool(config.require_email_and_linkedin),
             )
             run.discovery_run_id = discovery_run.id
             run.discovered = discovery_run.people_imported or 0
@@ -1012,7 +1035,7 @@ def _reveal_email(db: Session, contact: Contact, errors: list[str]) -> None:
 
     try:
         reveal_contact(db, contact)
-        db.commit()
+        _commit_with_retry(db)
     except RevealNotAllowed as exc:
         db.rollback()
         errors.append(f"Reveal {contact.name}: {exc}")

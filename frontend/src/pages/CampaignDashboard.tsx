@@ -20,6 +20,7 @@ import {
 } from "../api/client";
 import { Badge, Button, Card, Loading, ScoreBar } from "../components/ui";
 import { usePersistedState } from "../hooks/usePersistedState";
+import { apiErrorMessage } from "../utils/apiError";
 import { relativeTime } from "../utils/time";
 import type { CampaignDetail, CampaignProspect, CampaignRunSnapshot, EmailDraft } from "../types";
 
@@ -342,6 +343,10 @@ function EditPanel({
   const [objective, setObjective] = useState(campaign.objective ?? "");
   const [discoverTarget, setDiscoverTarget] = useState(campaign.discover_target || 50);
   const [mailboxCap, setMailboxCap] = useState(campaign.mailbox_daily_cap || 50);
+  const [qualifyMin, setQualifyMin] = useState(campaign.qualify_min ?? 0);
+  const [requireEmailAndLinkedin, setRequireEmailAndLinkedin] = useState(
+    campaign.require_email_and_linkedin ?? false
+  );
   const [autoSend, setAutoSend] = useState(campaign.auto_send);
   const [autoSchedule, setAutoSchedule] = useState(campaign.auto_schedule);
 
@@ -352,6 +357,8 @@ function EditPanel({
         objective_prompt: objective.trim() || undefined,
         discover_target: discoverTarget,
         mailbox_daily_cap: mailboxCap,
+        qualify_min: qualifyMin,
+        require_email_and_linkedin: requireEmailAndLinkedin,
         auto_send: autoSend,
         auto_schedule: autoSchedule,
       }),
@@ -404,6 +411,38 @@ function EditPanel({
             </span>
           </label>
         </div>
+        <label className="block">
+          <span className="text-xs font-medium text-slate-600">
+            Minimum relevance score to qualify (0-100)
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            className={`${inputCls} mt-1.5`}
+            value={qualifyMin}
+            onChange={(e) => setQualifyMin(Number(e.target.value))}
+          />
+          <span className="mt-1 block text-[11px] text-slate-400">
+            Lower this to qualify more of the people found each run (fewer get rejected), at
+            the cost of some being a weaker fit.
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
+          <input
+            type="checkbox"
+            className="mt-0.5 rounded border-slate-300"
+            checked={requireEmailAndLinkedin}
+            onChange={(e) => setRequireEmailAndLinkedin(e.target.checked)}
+          />
+          <span className="text-sm text-slate-800">
+            <span className="font-medium">Only find people with both email + LinkedIn</span>
+            <span className="block text-xs text-slate-500">
+              Discards anyone missing either during discovery, so fewer get rejected later for
+              having no reachable email.
+            </span>
+          </span>
+        </label>
         <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
           <input
             type="checkbox"
@@ -433,6 +472,11 @@ function EditPanel({
           </span>
         </label>
       </div>
+      {save.isError && (
+        <div className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {apiErrorMessage(save.error, "Could not save changes. Please try again.")}
+        </div>
+      )}
       <div className="mt-5 flex gap-2">
         <Button onClick={() => save.mutate()} disabled={save.isPending}>
           {save.isPending ? "Saving…" : "Save changes"}
