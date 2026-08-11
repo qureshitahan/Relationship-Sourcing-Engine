@@ -631,9 +631,14 @@ def execute_run(run_id: int) -> None:
         try:
             principal_mailbox_id = mailbox_for_principal(principal).id
         except MailboxUnassignedError as exc:
+            # Finish the run rather than returning from the middle of it. A bare
+            # return left status at "running" forever: the dashboard showed
+            # "Running now" indefinitely, and the in-flight guard then blocked
+            # every later run of this campaign, manual or scheduled.
             errors.append(str(exc))
             _stage(run, "draft", drafted=0, note=str(exc))
             db.commit()
+            _finalize_run(db, principal, config, run, errors)
             return
 
         drafted_ids: list[int] = []
