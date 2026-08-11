@@ -1323,7 +1323,7 @@ def _linkedin_send_worker(run_id: int) -> None:
     from datetime import datetime
 
     from app.api.routes.linkedin import SendError, perform_linkedin_send
-    from app.models.suppression import OutreachHistory
+    from app.services.linkedin_budget import active_send_account_id, linkedin_sent_today
 
     db = SessionLocal()
     try:
@@ -1345,19 +1345,13 @@ def _linkedin_send_worker(run_id: int) -> None:
         )
 
         # Daily-cap guard: never exceed linkedin_daily_send_cap sends (invites +
-        # DMs) per day so the LinkedIn account is not flagged. Today's total is
-        # counted from OutreachHistory (written on every LinkedIn send/invite),
-        # so ALL send paths — bulk, scheduler, manual — count toward one budget.
-        now = datetime.utcnow()
-        today_start = datetime(now.year, now.month, now.day)
-        sent_today = db.execute(
-            select(func.count())
-            .select_from(OutreachHistory)
-            .where(
-                OutreachHistory.channel == "linkedin",
-                OutreachHistory.created_at >= today_start,
-            )
-        ).scalar_one()
+        # DMs) per day so the LinkedIn account is not flagged. The budget belongs
+        # to the ACCOUNT doing the sending, because that is the level LinkedIn
+        # itself limits — counting every account against one shared budget meant
+        # sends from other accounts left this one with nothing. All send paths
+        # still share that account's budget.
+        sending_account = active_send_account_id()
+        sent_today = linkedin_sent_today(db, sending_account)
         cap = max(0, int(settings.linkedin_daily_send_cap))
         remaining = max(0, cap - sent_today)
         held = 0
