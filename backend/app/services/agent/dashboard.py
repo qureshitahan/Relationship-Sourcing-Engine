@@ -706,21 +706,28 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
     if not contact_ids:
         return {"campaign_id": campaign_id, "items": [], "total": 0}
 
-    # Latest per-person pipeline status from the most recent agent run.
-    latest_run = _run_history(
+    # Per-person pipeline status, newest run first.
+    #
+    # This used to read only the MOST RECENT run, so anyone surfaced by an
+    # earlier run had no status at all and the page showed them as "not
+    # contacted" — including people that run had explicitly rejected. Walk the
+    # runs newest-first instead, and keep the first status found for each person.
+    runs = _run_history(
         db,
-        lambda: db.execute(
-            select(AgentRun)
-            .where(AgentRun.campaign_id == campaign_id)
-            .order_by(AgentRun.created_at.desc())
-        ).scalars().first(),
-        None,
+        lambda: list(
+            db.execute(
+                select(AgentRun)
+                .where(AgentRun.campaign_id == campaign_id)
+                .order_by(AgentRun.created_at.desc())
+            ).scalars().all()
+        ),
+        [],
     )
     pipeline_status: dict[int, str] = {}
-    if latest_run and latest_run.summary:
-        for p in latest_run.summary.get("people") or []:
+    for run_row in runs:
+        for p in (run_row.summary or {}).get("people") or []:
             pid = p.get("id")
-            if pid is not None:
+            if pid is not None and int(pid) not in pipeline_status:
                 pipeline_status[int(pid)] = str(p.get("status") or "discovered")
 
     company_ids = {c.company_id for c in contacts if c.company_id}
@@ -760,7 +767,10 @@ def campaign_prospects(db: Session, campaign_id: int) -> dict[str, Any]:
                 "email": contact.email,
                 "location": contact.location,
                 "status": contact.status,
-                "pipeline_status": pipeline_status.get(contact.id),
+                # Runs before the summary-persistence fix recorded nothing, so
+                # fall back to the prospect's own stored status, which the
+                # orchestrator has always written.
+                "pipeline_status": pipeline_status.get(contact.id) or contact.status,
                 "relevance_score": contact.relevance_score,
                 "email_status": d.status if d else None,
                 "email_subject": d.subject if d else None,
