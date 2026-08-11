@@ -1,8 +1,16 @@
 """Stagger campaign sends inside a local business-hours window."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
+
+# Aliased: staggered_send_times_utc() takes a parameter named "timezone", which
+# would otherwise shadow the datetime one inside that function.
+UTC = dt_timezone.utc
 
 # A/B time-of-day buckets (local hour, minute) the agent rotates between so we
 # learn which send time earns more replies. Both are inside business hours.
@@ -50,6 +58,28 @@ _CITY_TZ: dict[str, str] = {
 }
 
 
+def _zone(name: str):
+    """Resolve an IANA zone, falling back to UTC if the host has no tz database.
+
+    ``ZoneInfo`` reads the operating system's zoneinfo files, which Linux ships
+    and Windows does not — there the ``tzdata`` package supplies them. When
+    neither is present this raises, and because it is called per recipient inside
+    the send stage, one missing package took down the whole autopilot run and the
+    campaign reported a crash with nothing sent.
+
+    Send timing is a nicety; sending at all is not. Degrade to UTC and log it.
+    """
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - any tz database problem, not just missing
+        logger.warning(
+            "Timezone %r unavailable (install the 'tzdata' package for local send "
+            "timing); scheduling in UTC instead",
+            name,
+        )
+        return UTC
+
+
 def timezone_for_location(location: str | None, default: str = _EASTERN) -> str:
     """Best-effort IANA timezone from a free-text US location (city/state)."""
     if not location:
@@ -89,7 +119,7 @@ def personalized_send_time_utc(
     - Stagger is clamped so the slot stays before 6pm local on the intended day.
     - If today's slot has already passed, it rolls to the next day.
     """
-    tz = ZoneInfo(timezone_for_location(location, default_tz))
+    tz = _zone(timezone_for_location(location, default_tz))
     bucket = AB_SEND_BUCKETS[ab_index % len(AB_SEND_BUCKETS)]
     gap = max(1, int(gap_minutes))
     now_local = datetime.now(tz)
@@ -112,7 +142,7 @@ def personalized_send_time_utc(
         target = (now_local + timedelta(days=1)).replace(
             hour=bucket[0], minute=bucket[1], second=0, microsecond=0
         ) + timedelta(minutes=stagger)
-    return target.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return target.astimezone(UTC).replace(tzinfo=None)
 
 
 def staggered_send_times_utc(
@@ -131,7 +161,7 @@ def staggered_send_times_utc(
     if count <= 0:
         return []
 
-    tz = ZoneInfo(timezone or "America/New_York")
+    tz = _zone(timezone or "America/New_York")
     start_hour = max(0, min(23, int(start_hour)))
     end_hour = max(start_hour + 1, min(24, int(end_hour)))
     gap = max(1, int(gap_minutes))
@@ -167,7 +197,7 @@ def staggered_send_times_utc(
                 day_offset += 1
                 index_in_day = 0
                 continue
-        out.append(candidate.astimezone(ZoneInfo("UTC")).replace(tzinfo=None))
+        out.append(candidate.astimezone(UTC).replace(tzinfo=None))
         index_in_day += 1
 
     return out

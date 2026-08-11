@@ -491,17 +491,30 @@ function PendingApproval({
     if (!window.confirm(`Approve and send all ${drafts.items.length} drafts now?`)) return;
     setSendingAll(true);
     let ok = 0;
+    // Reasons, not just a count. This used to swallow every failure, so a run
+    // that sent 5 of 50 said exactly that and nothing about the other 45 — the
+    // same drafts then sat there with no way to tell why they had not gone.
+    const failures: string[] = [];
     for (const d of drafts.items) {
       try {
         await setEmailStatus(d.id, "approved");
         await sendEmail(d.id);
         ok += 1;
-      } catch {
-        /* keep going; failures stay as drafts */
+      } catch (e) {
+        const detail =
+          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        failures.push(`${d.contact_name ?? `#${d.id}`}: ${detail ?? "send failed"}`);
       }
     }
     setSendingAll(false);
-    onChanged(`Sent ${ok} of ${drafts.items.length} drafts.`);
+    const total = drafts.items.length;
+    onChanged(
+      failures.length
+        ? `Sent ${ok} of ${total}. ${failures.length} failed — ${failures
+            .slice(0, 3)
+            .join("; ")}${failures.length > 3 ? `; and ${failures.length - 3} more` : ""}`
+        : `Sent all ${total} drafts.`
+    );
     refresh();
   };
 
