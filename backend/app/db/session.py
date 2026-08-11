@@ -22,7 +22,25 @@ if settings.database_url.startswith("sqlite"):
         os.makedirs(db_dir, exist_ok=True)
 
 _engine_kwargs: dict = {"connect_args": connect_args, "future": True}
-if not settings.database_url.startswith("sqlite"):
+if settings.database_url.startswith("sqlite"):
+    # SQLite needs pool headroom for the same reason Postgres does (below), and
+    # it was missing here: the default QueuePool is 5 connections + 10 overflow,
+    # while ONE campaign run fans out to `bulk_approve_workers` threads that each
+    # hold a session for the whole of a slow model call (see _qualify_one /
+    # _draft_one). A couple of concurrent runs therefore owned every connection,
+    # and each UI request sat for pool_timeout and then 500'd with "QueuePool
+    # limit of size 5 overflow 10 reached, connection timed out" — the whole app
+    # looked stuck on "Loading...". A local SQLite connection is just a file
+    # handle, so sizing off the real per-run fan-out costs nothing.
+    _fan_out = max(
+        int(settings.bulk_approve_workers), int(settings.bulk_draft_batch_size), 1
+    )
+    _engine_kwargs.update(
+        pool_size=max(20, _fan_out * 2),
+        max_overflow=max(40, _fan_out * 6),
+        pool_timeout=30,
+    )
+else:
     # Postgres (Azure): give the pool headroom + recycle so concurrent background
     # jobs (agent runs, LinkedIn worker, bulk reveals) don't starve web requests
     # with "QueuePool limit ... connection timed out", and stale/broken
@@ -181,6 +199,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "send_window_start_local": "INTEGER DEFAULT 9",
         "send_window_end_local": "INTEGER DEFAULT 17",
         "digest_recipients": "JSON",
+        "require_email_and_linkedin": "BOOLEAN DEFAULT 0",
     },
     "agent_runs": {
         "playbook_id": "INTEGER",

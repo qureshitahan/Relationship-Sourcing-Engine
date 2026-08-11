@@ -236,13 +236,16 @@ def _normalize_questions(questions: Any) -> List[dict]:
         if isinstance(q, dict):
             qid = str(q.get("id") or f"q{i}")
             if qid in skip_ids:
+                logger.info("planner: dropped question %r (volume id)", qid)
                 continue
             prompt = (q.get("prompt") or q.get("question") or "").strip()
             if not prompt:
+                logger.info("planner: dropped question %r (empty prompt)", qid)
                 continue
             # Drop volume questions even when the model omits a stable id.
             lower = prompt.lower()
             if "how many" in lower and ("people" in lower or "prospect" in lower or "surface" in lower):
+                logger.info("planner: dropped question %r (volume wording): %s", qid, prompt)
                 continue
             out.append(
                 {
@@ -253,6 +256,10 @@ def _normalize_questions(questions: Any) -> List[dict]:
             )
         elif isinstance(q, str) and q.strip():
             out.append({"id": f"q{i}", "prompt": q.strip(), "suggested": None})
+    logger.info(
+        "planner: %s question(s) from the model, %s kept after filtering",
+        len(questions or []), len(out),
+    )
     return out
 
 
@@ -549,6 +556,13 @@ def plan_agent_search(
                 b.text for b in resp.content if getattr(b, "type", None) == "text"
             )
             parsed = _parse_json(text)
+            logger.info(
+                "planner: objective=%r clarifying_answers=%s parsed=%s raw_questions=%s",
+                objective_prompt.strip()[:120],
+                len(clarifying_answers or {}),
+                bool(parsed and "criteria" in parsed),
+                len((parsed or {}).get("questions") or []),
+            )
             if parsed and "criteria" in parsed:
                 parsed["questions"] = _normalize_questions(parsed.get("questions"))
                 crit = parsed.get("criteria") or {}

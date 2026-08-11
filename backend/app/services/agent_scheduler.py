@@ -10,10 +10,11 @@ import logging
 import threading
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db.session import SessionLocal
 from app.models.agent_config import AgentConfig
+from app.models.agent_run import AgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,23 @@ def _tick_once() -> None:
             if getattr(config, "weekdays_only", False) and now.weekday() >= 5:
                 continue
             if config.last_run_at and config.last_run_at.date() == now.date():
+                continue
+            # ``last_run_at`` is only stamped when a run FINISHES, and a run takes
+            # far longer than one poll interval. Without this check the scheduler
+            # re-launched the same campaign every 5 minutes for the whole duration
+            # of the run already in progress — six concurrent runs of one campaign
+            # was the observed result, at six times the Apollo and Anthropic cost.
+            # Same guard the manual "Run now" endpoint applies.
+            in_flight = db.execute(
+                select(func.count())
+                .select_from(AgentRun)
+                .where(AgentRun.campaign_id == config.id, AgentRun.status == "running")
+            ).scalar_one()
+            if in_flight:
+                logger.info(
+                    "Agent scheduler skipping campaign %s — a run is already in progress",
+                    config.id,
+                )
                 continue
             if not config.playbook_id:
                 logger.info(

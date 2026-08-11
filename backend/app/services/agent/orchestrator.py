@@ -15,16 +15,19 @@ Everything is wrapped so a failure in one prospect never aborts the run.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -145,6 +148,29 @@ def _resolve_playbook(
     ).scalars().first()
 
 
+def _set_summary(run: AgentRun, **changes) -> None:
+    """Write keys into ``run.summary`` so the change is actually persisted.
+
+    ``summary`` is a plain JSON column, so SQLAlchemy decides whether to write it
+    by comparing the new value against the loaded one. Helpers here used to build
+    that new value from the loaded structure and edit it in place — a shallow
+    copy shares its inner dicts, and ``.get("stages", [])`` shares the list
+    itself — which mutated the comparison baseline at the same time. The two
+    then matched, no change was detected, and the write was skipped.
+
+    That is why run 15 finished with qualified=41 while its summary still showed
+    every person as "discovered" with no score, carried only the discovery stage,
+    and reported no errors even though the draft loop had recorded 40 of them.
+
+    Deep-copy the base, apply the change to the copy, and flag the attribute
+    dirty explicitly so a write happens whatever the comparison concludes.
+    """
+    base = copy.deepcopy(dict(run.summary or {}))
+    base.update(changes)
+    run.summary = base
+    flag_modified(run, "summary")
+
+
 def _track_person(
     run: AgentRun,
     contact: Contact,
@@ -164,15 +190,19 @@ def _track_person(
             "status": status,
         }
     )
-    run.summary = {**(run.summary or {}), "people": people}
+    _set_summary(run, people=people)
 
 
-def _update_person_status(run: AgentRun, contact_id: int, status: str) -> None:
-    people = list((run.summary or {}).get("people") or [])
+def _update_person_status(
+    run: AgentRun, contact_id: int, status: str, *, score: Optional[float] = None
+) -> None:
+    people = copy.deepcopy(list((run.summary or {}).get("people") or []))
     for p in people:
         if p.get("id") == contact_id:
             p["status"] = status
-    run.summary = {**(run.summary or {}), "people": people}
+            if score is not None:
+                p["score"] = score
+    _set_summary(run, people=people)
 
 
 # --- Run lifecycle ----------------------------------------------------------
@@ -234,9 +264,9 @@ def launch_run(
 
 
 def _stage(run: AgentRun, name: str, **data) -> None:
-    stages = (run.summary or {}).get("stages", [])
+    stages = copy.deepcopy(list((run.summary or {}).get("stages") or []))
     stages.append({"stage": name, **data})
-    run.summary = {**(run.summary or {}), "stages": stages}
+    _set_summary(run, stages=stages)
 
 
 def _is_cancelled(db: Session, run: AgentRun) -> bool:
@@ -249,9 +279,120 @@ def _abort_if_cancelled(db: Session, run: AgentRun, errors: list[str]) -> bool:
         return False
     run.status = "cancelled"
     run.finished_at = datetime.utcnow()
-    run.summary = {**(run.summary or {}), "errors": errors[:50]}
+    _set_summary(run, errors=errors[:50])
     db.commit()
     return True
+
+
+# --- Per-prospect workers (run concurrently; see the qualify/draft stages) ---
+#
+# Both stages were a plain for-loop: one Claude call per prospect, one after the
+# next. A 50-person run spent ~28 minutes almost entirely waiting on the network,
+# which is why campaigns felt slow while the Discovery flow — which has used a
+# thread pool since bulk drafting landed — felt fast.
+#
+# These mirror discovery_jobs.py exactly: the worker owns a private session, does
+# the slow I/O, and returns plain data. Every run-level write (counters, summary,
+# draft rows) stays on the main thread, so no ORM object or session is ever
+# shared across threads.
+
+
+def _commit_with_retry(db: Session, *, attempts: int = 5, base_delay: float = 0.3) -> None:
+    """Commit, retrying briefly on SQLite lock contention from concurrent workers.
+
+    Several qualify/draft workers each write via their own SessionLocal() at
+    once; SQLite serializes writers, and one occasionally loses that race even
+    inside its own busy_timeout window under heavy fan-out (bulk_approve_workers
+    researching in parallel). A short local retry with backoff clears the
+    transient lock instead of failing that prospect's research outright.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    for attempt in range(attempts):
+        try:
+            db.commit()
+            return
+        except OperationalError as exc:
+            db.rollback()
+            if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                raise
+            time.sleep(base_delay * (2**attempt))
+
+
+def _qualify_one(
+    contact_id: int, principal_id: int, outreach_goal: Optional[str]
+) -> tuple[int, Optional[float], Optional[str]]:
+    """Research one prospect. Returns (contact_id, score, error)."""
+    db = SessionLocal()
+    try:
+        contact = db.get(Contact, contact_id)
+        principal = db.get(Principal, principal_id)
+        if contact is None or principal is None:
+            return contact_id, None, "prospect or principal not found"
+        company = db.get(Company, contact.company_id) if contact.company_id else None
+        insight = generate_insight(
+            db,
+            principal,
+            contact=contact,
+            company=company,
+            outreach_goal=outreach_goal,
+            allow_reuse=True,
+        )
+        score = insight.relevance_score or 0.0
+        _commit_with_retry(db)
+        return contact_id, score, None
+    except Exception as exc:  # noqa: BLE001 - one prospect must not stop the run
+        db.rollback()
+        logger.warning("Agent qualify failed for contact %s: %s", contact_id, exc)
+        return contact_id, None, str(exc)
+    finally:
+        db.close()
+
+
+def _draft_one(
+    contact_id: int,
+    principal_id: int,
+    outreach_goal: Optional[str],
+    style: Optional[dict],
+) -> tuple[int, Any, Optional[int], list[str]]:
+    """Reveal + write one outreach email.
+
+    Returns (contact_id, OutreachResult-or-None, insight_id, blockers). The caller
+    creates the EmailDraft row; nothing here writes to it.
+    """
+    db = SessionLocal()
+    try:
+        contact = db.get(Contact, contact_id)
+        principal = db.get(Principal, principal_id)
+        if contact is None or principal is None:
+            return contact_id, None, None, ["prospect or principal not found"]
+
+        # Reveal before checking blockers: Apollo search never returns emails, so
+        # "email not revealed" is expected until bulk_match has run.
+        reveal_errors: list[str] = []
+        if not (contact.email or "").strip():
+            _reveal_email(db, contact, reveal_errors)
+            db.refresh(contact)
+
+        blockers = outreach_draft_blockers(
+            db, principal_id=principal.id, contact=contact
+        )
+        if blockers:
+            return contact_id, None, None, blockers
+
+        company = db.get(Company, contact.company_id) if contact.company_id else None
+        insight = _latest_insight(db, principal.id, contact.id)
+        content = generate_outreach(
+            db, principal, contact, company, insight,
+            outreach_goal=outreach_goal, style=style,
+        )
+        return contact_id, content, (insight.id if insight else None), []
+    except Exception as exc:  # noqa: BLE001 - one prospect must not stop the run
+        db.rollback()
+        logger.warning("Agent draft failed for contact %s: %s", contact_id, exc)
+        return contact_id, None, None, [str(exc)]
+    finally:
+        db.close()
 
 
 def execute_run(run_id: int) -> None:
@@ -309,13 +450,13 @@ def execute_run(run_id: int) -> None:
             or 50
         )
         criteria = _criteria_from_dict(variant_criteria, people_limit)
-        run.summary = {
-            **(run.summary or {}),
-            "playbook_name": playbook.name,
-            "objective": playbook.objective_prompt,
-            "criteria": variant_criteria,
-            "variant_label": variant.label if variant else None,
-        }
+        _set_summary(
+            run,
+            playbook_name=playbook.name,
+            objective=playbook.objective_prompt,
+            criteria=variant_criteria,
+            variant_label=variant.label if variant else None,
+        )
 
         new_contact_ids: list[int] = []
         try:
@@ -328,6 +469,7 @@ def execute_run(run_id: int) -> None:
                 people_first=True,
                 search_goal=playbook.objective_prompt,
                 campaign_id=config.id,
+                require_email_and_linkedin=bool(config.require_email_and_linkedin),
             )
             run.discovery_run_id = discovery_run.id
             run.discovered = discovery_run.people_imported or 0
@@ -395,12 +537,13 @@ def execute_run(run_id: int) -> None:
             return
 
         # 2) QUALIFY (per-person research for every new import) --------------
+        # The free rejections happen first, on this thread — they are pure DB
+        # writes and must not occupy a worker. Only the prospects that actually
+        # need a Claude call go to the pool.
         qualified_ids: list[int] = []
         gate_min = optimization.current_state().research_gate_min
+        to_research: list[int] = []
         for cid in new_contact_ids:
-            if _is_cancelled(db, run):
-                _abort_if_cancelled(db, run, errors)
-                return
             contact = db.get(Contact, cid)
             if not contact:
                 continue
@@ -412,7 +555,6 @@ def execute_run(run_id: int) -> None:
                 contact.status = ProspectStatus.REJECTED
                 run.rejected += 1
                 _update_person_status(run, cid, "skipped (no reachable email)")
-                db.commit()
                 continue
             # Optimized pipeline only: don't buy research for a title the free
             # rule-based fit score already rates too low to survive qualifying.
@@ -427,36 +569,65 @@ def execute_run(run_id: int) -> None:
                 contact.status = ProspectStatus.REJECTED
                 run.rejected += 1
                 _update_person_status(run, cid, f"skipped (low fit {fit:.0f})")
-                db.commit()
                 continue
-            company = db.get(Company, contact.company_id) if contact.company_id else None
-            try:
-                insight = generate_insight(
-                    db,
-                    principal,
-                    contact=contact,
-                    company=company,
-                    outreach_goal=playbook.objective_prompt,
-                    allow_reuse=True,
-                )
-                score = insight.relevance_score or 0.0
-                if score < config.auto_reject_below:
-                    contact.status = ProspectStatus.REJECTED
-                    run.rejected += 1
-                    _update_person_status(run, cid, "rejected")
-                elif score >= config.qualify_min:
-                    qualified_ids.append(cid)
-                    run.qualified += 1
-                    _update_person_status(run, cid, f"qualified ({score:.0f})")
-                else:
-                    contact.status = ProspectStatus.REJECTED
-                    run.rejected += 1
-                    _update_person_status(run, cid, f"below {config.qualify_min:.0f}")
-                db.commit()
-            except Exception as exc:  # noqa: BLE001
-                db.rollback()
-                logger.warning("Agent qualify failed for contact %s: %s", cid, exc)
-                errors.append(f"Qualify #{cid}: {exc}")
+            to_research.append(cid)
+        db.commit()
+
+        workers = max(1, int(settings.bulk_approve_workers))
+        logger.info(
+            "Agent run %s qualify: %s to research, %s pre-rejected, %s workers",
+            run_id, len(to_research), run.rejected, workers,
+        )
+        qualify_started = time.monotonic()
+        if to_research:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        _qualify_one, cid, principal.id, playbook.objective_prompt
+                    ): cid
+                    for cid in to_research
+                }
+                for future in as_completed(futures):
+                    if _is_cancelled(db, run):
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        _abort_if_cancelled(db, run, errors)
+                        return
+                    cid, score, error = future.result()
+                    if error is not None:
+                        # Say so on the person too, not just in the error list.
+                        # Leaving them at "discovered" makes a prospect whose
+                        # research was paid for and failed look untouched, and
+                        # indistinguishable from one a cancelled run never
+                        # reached.
+                        errors.append(f"Qualify #{cid}: {error}")
+                        _update_person_status(run, cid, "research failed")
+                        db.commit()
+                        continue
+                    contact = db.get(Contact, cid)
+                    if contact is None:
+                        continue
+                    score = score or 0.0
+                    if score < config.auto_reject_below:
+                        contact.status = ProspectStatus.REJECTED
+                        run.rejected += 1
+                        _update_person_status(run, cid, "rejected", score=score)
+                    elif score >= config.qualify_min:
+                        qualified_ids.append(cid)
+                        run.qualified += 1
+                        _update_person_status(
+                            run, cid, f"qualified ({score:.0f})", score=score
+                        )
+                    else:
+                        contact.status = ProspectStatus.REJECTED
+                        run.rejected += 1
+                        _update_person_status(
+                            run, cid, f"below {config.qualify_min:.0f}", score=score
+                        )
+                    db.commit()
+        logger.info(
+            "Agent run %s qualify done in %.1fs: %s qualified, %s rejected",
+            run_id, time.monotonic() - qualify_started, run.qualified, run.rejected,
+        )
         _stage(run, "qualify", qualified=run.qualified, rejected=run.rejected)
         db.commit()
 
@@ -483,108 +654,141 @@ def execute_run(run_id: int) -> None:
         try:
             principal_mailbox_id = mailbox_for_principal(principal).id
         except MailboxUnassignedError as exc:
+            # Finish the run rather than returning from the middle of it. A bare
+            # return left status at "running" forever: the dashboard showed
+            # "Running now" indefinitely, and the in-flight guard then blocked
+            # every later run of this campaign, manual or scheduled.
             errors.append(str(exc))
             _stage(run, "draft", drafted=0, note=str(exc))
             db.commit()
+            _finalize_run(db, principal, config, run, errors)
             return
 
         drafted_ids: list[int] = []
         drafted_people: list[str] = []
+
+        # Approve up front, on this thread, in one pass. Idempotency is resolved
+        # here too: a prospect this campaign has already drafted must not occupy a
+        # worker only to be discarded. Both are pure DB work.
+        already_drafted = set(
+            db.execute(
+                select(EmailDraft.contact_id).where(
+                    EmailDraft.campaign_id == config.id,
+                    EmailDraft.status.in_(
+                        [EmailStatus.DRAFT, EmailStatus.APPROVED, EmailStatus.SCHEDULED]
+                    ),
+                )
+            ).scalars().all()
+        )
+        to_draft: list[int] = []
         for cid in qualified_ids:
-            if _is_cancelled(db, run):
-                _abort_if_cancelled(db, run, errors)
-                return
             contact = db.get(Contact, cid)
             if not contact or contact.do_not_contact:
                 continue
-            try:
-                contact.approved_for_outreach = True
-                contact.status = ProspectStatus.APPROVED
-                db.commit()
+            contact.approved_for_outreach = True
+            contact.status = ProspectStatus.APPROVED
+            # Other campaigns of the same principal may still draft to this
+            # person; campaigns are independent for prospects.
+            if contact.id in already_drafted:
+                continue
+            to_draft.append(cid)
+        db.commit()
 
-                # Reveal before blockers: Apollo search never returns emails; we must
-                # bulk_match first, then check whether drafting is possible.
-                if not (contact.email or "").strip():
-                    _reveal_email(db, contact, errors)
-                    db.refresh(contact)
+        # Pick each prospect's A/B copy variant here — the worker needs the style
+        # before it can write, and variant selection touches the shared session.
+        variant_by_contact: dict[int, Any] = {}
+        if copy_variants:
+            for cid in to_draft:
+                variant_by_contact[cid] = select_copy_variant(db, copy_variants)
 
-                blockers = outreach_draft_blockers(
-                    db, principal_id=principal.id, contact=contact
-                )
-                if blockers:
-                    errors.append(
-                        f"Skip draft {contact.name or cid}: {', '.join(blockers)}"
-                    )
-                    continue
-
-                # Idempotency: skip if a draft already exists for this pair IN
-                # THIS campaign. Other campaigns of the same principal may still
-                # draft to this person (campaigns are independent for prospects).
-                existing = db.execute(
-                    select(EmailDraft).where(
-                        EmailDraft.contact_id == contact.id,
-                        EmailDraft.campaign_id == config.id,
-                        EmailDraft.status.in_(
-                            [EmailStatus.DRAFT, EmailStatus.APPROVED, EmailStatus.SCHEDULED]
+        workers = max(1, int(settings.bulk_draft_batch_size))
+        logger.info(
+            "Agent run %s draft: %s to draft (%s already had one), %s workers",
+            run_id, len(to_draft), len(qualified_ids) - len(to_draft), workers,
+        )
+        draft_started = time.monotonic()
+        if to_draft:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        _draft_one,
+                        cid,
+                        principal.id,
+                        playbook.objective_prompt,
+                        (
+                            variant_by_contact[cid].style
+                            if variant_by_contact.get(cid) is not None
+                            else None
+                        ),
+                    ): cid
+                    for cid in to_draft
+                }
+                for future in as_completed(futures):
+                    if _is_cancelled(db, run):
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        _abort_if_cancelled(db, run, errors)
+                        return
+                    cid, content, insight_id, blockers = future.result()
+                    contact = db.get(Contact, cid)
+                    if contact is None:
+                        continue
+                    if content is None:
+                        errors.append(
+                            f"Skip draft {contact.name or cid}: {', '.join(blockers)}"
+                        )
+                        _update_person_status(
+                            run, cid, f"not drafted ({', '.join(blockers)})"
+                        )
+                        db.commit()
+                        continue
+                    copy_variant = variant_by_contact.get(cid)
+                    # Auto-send mode pre-approves the draft so it's ready to send.
+                    draft = EmailDraft(
+                        principal_id=principal.id,
+                        campaign_id=config.id,
+                        company_id=contact.company_id,
+                        contact_id=contact.id,
+                        insight_id=insight_id,
+                        copy_variant_id=copy_variant.id if copy_variant else None,
+                        subject=content.subject,
+                        body=content.body,
+                        # Stamp the principal's own mailbox so the sender is
+                        # explicit in the review UI, not a global default
+                        # resolved at send time.
+                        from_mailbox=principal_mailbox_id,
+                        status=(
+                            EmailStatus.APPROVED if config.auto_send else EmailStatus.DRAFT
                         ),
                     )
-                ).scalars().first()
-                if existing:
-                    continue
-
-                company = (
-                    db.get(Company, contact.company_id) if contact.company_id else None
-                )
-                insight = _latest_insight(db, principal.id, contact.id)
-                copy_variant = (
-                    select_copy_variant(db, copy_variants) if copy_variants else None
-                )
-                content = generate_outreach(
-                    db,
-                    principal,
-                    contact,
-                    company,
-                    insight,
-                    outreach_goal=playbook.objective_prompt,
-                    style=copy_variant.style if copy_variant else None,
-                )
-                # Auto-send mode pre-approves the draft so it's ready to send.
-                draft = EmailDraft(
-                    principal_id=principal.id,
-                    campaign_id=config.id,
-                    company_id=contact.company_id,
-                    contact_id=contact.id,
-                    insight_id=insight.id if insight else None,
-                    copy_variant_id=copy_variant.id if copy_variant else None,
-                    subject=content.subject,
-                    body=content.body,
-                    # Stamp the principal's own mailbox so the sender is explicit
-                    # in the review UI, not a global default resolved at send time.
-                    from_mailbox=principal_mailbox_id,
-                    status=EmailStatus.APPROVED if config.auto_send else EmailStatus.DRAFT,
-                )
-                if copy_variant is not None:
-                    copy_variant.drafted = (copy_variant.drafted or 0) + 1
-                if config.auto_send:
-                    draft.approved_by = "agent"
-                    draft.approved_at = datetime.utcnow()
-                db.add(draft)
-                log_action(
-                    db,
-                    AuditAction.EMAIL_DRAFT,
-                    entity_type="email_draft",
-                    summary=f"Agent drafted outreach for prospect {contact.id}",
-                )
-                db.commit()
-                db.refresh(draft)
-                run.drafted += 1
-                drafted_ids.append(draft.id)
-                drafted_people.append(contact.name)
-                _update_person_status(run, cid, "drafted")
-            except Exception as exc:  # noqa: BLE001
-                db.rollback()
-                logger.warning("Agent draft failed for contact %s: %s", cid, exc)
-                errors.append(f"Draft #{cid}: {exc}")
+                    if copy_variant is not None:
+                        copy_variant.drafted = (copy_variant.drafted or 0) + 1
+                    if config.auto_send:
+                        draft.approved_by = "agent"
+                        draft.approved_at = datetime.utcnow()
+                    db.add(draft)
+                    log_action(
+                        db,
+                        AuditAction.EMAIL_DRAFT,
+                        entity_type="email_draft",
+                        summary=f"Agent drafted outreach for prospect {contact.id}",
+                    )
+                    # Count the draft BEFORE committing. This used to increment
+                    # after the commit, leaving the change pending — and the next
+                    # iteration opened with _is_cancelled(), whose db.refresh(run)
+                    # discards anything still pending. Every run therefore
+                    # reported drafted=1 (whatever the last iteration set) no
+                    # matter how many it wrote: 41 qualified, 41 drafts on disk,
+                    # "1" shown on the dashboard.
+                    run.drafted += 1
+                    _update_person_status(run, cid, "drafted")
+                    db.commit()
+                    db.refresh(draft)
+                    drafted_ids.append(draft.id)
+                    drafted_people.append(contact.name)
+        logger.info(
+            "Agent run %s draft done in %.1fs: %s drafted",
+            run_id, time.monotonic() - draft_started, run.drafted,
+        )
         _stage(run, "draft", drafted=run.drafted, people=drafted_people[:50])
         db.commit()
 
@@ -664,7 +868,7 @@ def _finalize_run(
             run.error_message = errors[0]
     else:
         run.status = "completed"
-    run.summary = {**(run.summary or {}), "errors": errors[:50]}
+    _set_summary(run, errors=errors[:50])
     run.finished_at = datetime.utcnow()
     config.last_run_at = datetime.utcnow()
     db.commit()
@@ -678,7 +882,7 @@ def _finalize_run(
             db, principal=principal, playbook=playbook
         )
         if adaptation.get("adaptations") or adaptation.get("analyzed"):
-            run.summary = {**(run.summary or {}), "reply_adaptation": adaptation}
+            _set_summary(run, reply_adaptation=adaptation)
             db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Reply adaptation failed: %s", exc)
@@ -831,7 +1035,7 @@ def _reveal_email(db: Session, contact: Contact, errors: list[str]) -> None:
 
     try:
         reveal_contact(db, contact)
-        db.commit()
+        _commit_with_retry(db)
     except RevealNotAllowed as exc:
         db.rollback()
         errors.append(f"Reveal {contact.name}: {exc}")

@@ -27,6 +27,10 @@ class LinkedInProfile:
     is_premium: bool = False
     is_open_profile: bool = False
     error: Optional[str] = None
+    # True when `error` is a transport/connectivity failure (provider
+    # unreachable) rather than "not found" — callers use this to stop hammering
+    # a dead endpoint instead of retrying every remaining message.
+    network_error: bool = False
 
     @property
     def is_connected(self) -> bool:
@@ -62,6 +66,7 @@ class ReplyResult:
     body: Optional[str] = None
     from_name: Optional[str] = None
     error: Optional[str] = None
+    network_error: bool = False
 
 
 class LinkedInProvider(ABC):

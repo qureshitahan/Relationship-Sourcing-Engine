@@ -95,7 +95,7 @@ class UnipileLinkedInProvider(LinkedInProvider):
                 )
         except httpx.HTTPError as exc:
             logger.warning("Unipile resolve_profile network error: %s", exc)
-            return LinkedInProfile(found=False, error=str(exc))
+            return LinkedInProfile(found=False, error=str(exc), network_error=True)
         if resp.status_code == 404:
             return LinkedInProfile(found=False, error="LinkedIn profile not found.")
         if resp.status_code >= 400:
@@ -308,7 +308,8 @@ class UnipileLinkedInProvider(LinkedInProvider):
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
                 resp = client.get(url, headers=self._headers(), params={"limit": 20})
         except httpx.HTTPError as exc:
-            return ReplyResult(found=False, error=str(exc))
+            logger.warning("Unipile check_reply network error: %s", exc)
+            return ReplyResult(found=False, error=str(exc), network_error=True)
         if resp.status_code >= 400:
             return ReplyResult(
                 found=False, error=f"Unipile {resp.status_code}: {resp.text[:200]}"

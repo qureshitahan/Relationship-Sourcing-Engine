@@ -25,3 +25,9 @@ httpx==0.27.0
 
 # AI insight + personalization engine
 anthropic==0.39.0
+
+# IANA timezone database. Campaign send timing resolves each recipient's zone
+# via zoneinfo, which reads the OS tz files — present on Linux, absent on
+# Windows. Without this a dev machine raises inside the send stage and takes the
+# whole autopilot run down with it.
+tzdata==2024.1

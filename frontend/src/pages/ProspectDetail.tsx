@@ -563,13 +563,23 @@ export default function ProspectDetail() {
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <Link
-          to={campaignId ? `/campaigns/${campaignId}` : `/prospects${querySuffix}`}
-          className="text-sm font-medium text-slate-500 hover:text-slate-800"
-        >
-          ← Back to {campaignId ? "campaign" : "prospects"}
-          {runId && !campaignId ? ` (run #${runId})` : ""}
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            to={campaignId ? `/campaigns/${campaignId}` : `/prospects${querySuffix}`}
+            className="text-sm font-medium text-slate-500 hover:text-slate-800"
+          >
+            ← Back to {campaignId ? "campaign" : "prospects"}
+            {runId && !campaignId ? ` (run #${runId})` : ""}
+          </Link>
+          {campaignId && (
+            <Link
+              to="/prospects"
+              className="text-xs text-slate-400 hover:text-slate-700 hover:underline"
+            >
+              All prospects
+            </Link>
+          )}
+        </div>
         {siblingItems.length > 1 && (
           <div className="flex items-center gap-2">
             {currentIndex >= 0 && (

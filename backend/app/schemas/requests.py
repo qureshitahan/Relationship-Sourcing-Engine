@@ -327,6 +327,9 @@ class CampaignCreateRequest(BaseModel):
     send_window_start_local: Optional[int] = None
     send_window_end_local: Optional[int] = None
     digest_recipients: Optional[List[str]] = None
+    qualify_min: Optional[float] = None
+    auto_reject_below: Optional[float] = None
+    require_email_and_linkedin: Optional[bool] = None
 
     enabled: bool = False        # turn on the daily auto-run
     run_now: bool = False        # kick off a run immediately after creation
@@ -354,6 +357,7 @@ class CampaignUpdateRequest(BaseModel):
     mailbox_daily_cap: Optional[int] = None
     qualify_min: Optional[float] = None
     auto_reject_below: Optional[float] = None
+    require_email_and_linkedin: Optional[bool] = None
     auto_send: Optional[bool] = None
     auto_schedule: Optional[bool] = None
     followup_enabled: Optional[bool] = None

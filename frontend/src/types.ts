@@ -648,6 +648,9 @@ export interface CampaignDetail {
   criteria: Record<string, unknown>;
   mailbox_daily_cap: number;
   discover_target: number;
+  qualify_min: number;
+  auto_reject_below: number;
+  require_email_and_linkedin: boolean;
   auto_send: boolean;
   auto_schedule: boolean;
   pending_drafts: number;
@@ -728,6 +731,9 @@ export interface CampaignCreatePayload {
   criteria?: Record<string, unknown>;
   discover_target?: number;
   mailbox_daily_cap?: number;
+  qualify_min?: number;
+  auto_reject_below?: number;
+  require_email_and_linkedin?: boolean;
   auto_send?: boolean;
   auto_schedule?: boolean;
   followup_enabled?: boolean;
@@ -751,6 +757,7 @@ export interface CampaignUpdatePayload {
   mailbox_daily_cap?: number;
   qualify_min?: number;
   auto_reject_below?: number;
+  require_email_and_linkedin?: boolean;
   auto_send?: boolean;
   auto_schedule?: boolean;
   followup_enabled?: boolean;

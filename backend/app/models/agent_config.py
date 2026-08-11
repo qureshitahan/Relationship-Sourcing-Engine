@@ -66,8 +66,20 @@ class AgentConfig(Base, TimestampMixin):
     discover_target: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
 
     # Qualification thresholds (0-100 relevance score) for per-person research.
-    qualify_min: Mapped[float] = mapped_column(Float, default=40.0, nullable=False)
-    auto_reject_below: Mapped[float] = mapped_column(Float, default=35.0, nullable=False)
+    # Both default to 0 = no relevance filtering: everyone researched is qualified
+    # and nobody is auto-rejected on score. Raise either to start filtering.
+    # These two must move together. ``auto_reject_below`` is checked FIRST in the
+    # qualify stage, so leaving it at a non-zero value silently rejects people
+    # below it no matter how low ``qualify_min`` is set — which made setting the
+    # relevance minimum to 0 in the UI look like it did nothing.
+    qualify_min: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    auto_reject_below: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+
+    # When on, discovery only keeps people who have both a revealable email and a
+    # LinkedIn URL (same filter as the Discover page's "Only complete prospects").
+    require_email_and_linkedin: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     # Sending behaviour. Auto-send drips in small batches (see settings) up to the
     # daily cap; anything over the cap stays ready and goes out on the next run.

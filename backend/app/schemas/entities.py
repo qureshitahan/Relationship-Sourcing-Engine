@@ -437,6 +437,9 @@ class CampaignDetailOut(BaseModel):
     criteria: dict = {}
     mailbox_daily_cap: int = 50
     discover_target: int = 0
+    qualify_min: float = 0.0
+    auto_reject_below: float = 0.0
+    require_email_and_linkedin: bool = False
     auto_send: bool = False
     auto_schedule: bool = True
     pending_drafts: int = 0

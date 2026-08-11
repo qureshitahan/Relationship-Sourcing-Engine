@@ -675,6 +675,14 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
     now = datetime.utcnow()
     accepted = 0
     replied = 0
+    # Accounts whose provider call just failed to connect (not merely "not
+    # found") — skip their remaining messages this pass instead of hammering an
+    # unreachable endpoint once per message, which previously flooded the log
+    # and delayed the scan by one failed network round-trip per message.
+    unreachable_accounts: set[str] = set()
+
+    def _account_key(msg) -> str:
+        return (getattr(msg, "from_account", None) or "default").strip() or "default"
 
     pending = db.execute(
         select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.INVITE_SENT)
@@ -692,11 +700,24 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
 
     # 1) Invitations awaiting acceptance -> auto-send the queued message.
     for msg in pending:
+        account_key = _account_key(msg)
+        if account_key in unreachable_accounts:
+            done += 1
+            continue
         provider = provider_for(msg)
         msg.last_status_check_at = now
         identifier = msg.public_identifier or msg.linkedin_provider_id
         if identifier:
             profile = provider.resolve_profile(identifier)
+            if profile.network_error:
+                logger.warning(
+                    "LinkedIn account %r unreachable, skipping its remaining "
+                    "messages this pass: %s",
+                    account_key, profile.error,
+                )
+                unreachable_accounts.add(account_key)
+                done += 1
+                continue
             if profile.found:
                 msg.network_distance = profile.network_distance
                 if profile.is_connected:
@@ -730,6 +751,10 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
 
     # 2) Sent messages -> detect a reply.
     for msg in sent:
+        account_key = _account_key(msg)
+        if account_key in unreachable_accounts:
+            done += 1
+            continue
         provider = provider_for(msg)
         msg.last_reply_check_at = now
         result = provider.check_reply(
@@ -737,6 +762,15 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
             provider_id=msg.linkedin_provider_id or "",
             since=msg.sent_at or msg.created_at,
         )
+        if result.network_error:
+            logger.warning(
+                "LinkedIn account %r unreachable, skipping its remaining "
+                "messages this pass: %s",
+                account_key, result.error,
+            )
+            unreachable_accounts.add(account_key)
+            done += 1
+            continue
         if result.found:
             msg.status = LinkedInStatus.REPLIED
             msg.replied_at = result.received_at or now
