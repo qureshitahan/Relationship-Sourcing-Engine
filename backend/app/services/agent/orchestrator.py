@@ -571,7 +571,14 @@ def execute_run(run_id: int) -> None:
                         return
                     cid, score, error = future.result()
                     if error is not None:
+                        # Say so on the person too, not just in the error list.
+                        # Leaving them at "discovered" makes a prospect whose
+                        # research was paid for and failed look untouched, and
+                        # indistinguishable from one a cancelled run never
+                        # reached.
                         errors.append(f"Qualify #{cid}: {error}")
+                        _update_person_status(run, cid, "research failed")
+                        db.commit()
                         continue
                     contact = db.get(Contact, cid)
                     if contact is None:
