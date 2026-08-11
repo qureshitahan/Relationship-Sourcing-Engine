@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Generator
 
 from sqlalchemy import create_engine, event, inspect, text
@@ -273,18 +274,57 @@ def _drop_agent_configs_principal_unique() -> None:
         conn.exec_driver_sql("DROP TABLE agent_configs_old")
 
 
+def _portable_ddl(ddl_type: str) -> str:
+    """Translate the SQLite-flavoured DDL above for the live dialect.
+
+    ``_ADDITIVE_COLUMNS`` is written in SQLite types, but this migration step runs
+    on Postgres too, where two of those spellings are hard errors:
+
+    * ``DATETIME`` does not exist — Postgres wants ``TIMESTAMP``.
+    * ``BOOLEAN DEFAULT 0`` fails with "column ... is of type boolean but default
+      expression is of type integer"; Postgres will not cast 0/1 to boolean.
+
+    Both are silent until the day a *new* column of that shape is added, because
+    columns already present are skipped. That day is what took every campaign
+    endpoint down in production with "column agent_configs.
+    require_email_and_linkedin does not exist".
+    """
+    if engine.dialect.name != "postgresql":
+        return ddl_type
+    ddl = re.sub(r"^DATETIME\b", "TIMESTAMP", ddl_type, flags=re.IGNORECASE)
+    ddl = re.sub(
+        r"^(BOOLEAN\s+DEFAULT\s+)0\b", r"\1FALSE", ddl, flags=re.IGNORECASE
+    )
+    return re.sub(r"^(BOOLEAN\s+DEFAULT\s+)1\b", r"\1TRUE", ddl, flags=re.IGNORECASE)
+
+
 def _add_missing_columns() -> None:
-    """Add any missing additive columns to existing tables (idempotent)."""
+    """Add any missing additive columns to existing tables (idempotent).
+
+    One ALTER per transaction, each guarded on its own. They used to share a
+    single transaction, so one unsupported DDL rolled back the whole batch — and
+    on Postgres every later statement in an aborted transaction fails too, so NO
+    column was added, the caller's step guard logged one line, and boot carried
+    on looking healthy while the app 500'd on every query of the affected table.
+    A column that genuinely cannot be added is now logged by name and skipped,
+    leaving the rest to succeed.
+    """
+    log = logging.getLogger(__name__)
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
-    with engine.begin() as conn:
-        for table, columns in _ADDITIVE_COLUMNS.items():
-            if table not in existing_tables:
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        if table not in existing_tables:
+            continue
+        present = {col["name"] for col in inspector.get_columns(table)}
+        for column, ddl_type in columns.items():
+            if column in present:
                 continue
-            present = {col["name"] for col in inspector.get_columns(table)}
-            for column, ddl_type in columns.items():
-                if column not in present:
-                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl_type}'))
+            ddl = _portable_ddl(ddl_type)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            except Exception as exc:  # noqa: BLE001 - one column must not block the rest
+                log.error("Could not add column %s.%s (%s): %s", table, column, ddl, exc)
 
 
 # Single-column indexes added to a model after a deployment already has data.
