@@ -531,14 +531,13 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
     One click instead of approving each message by hand. Optional
     ``discovery_run_id`` scopes to a single run; omitted = every run. Sends from
     the currently-active account, paced (``bulk_linkedin_send_delay_seconds``) to
-    protect the account, and never exceeds today's ``linkedin_daily_send_cap`` —
-    the overflow is reported as ``held`` and can be sent tomorrow. Returns the
-    counts immediately; poll the message list to watch them move.
+    protect the account, and never exceeds that account's ``linkedin_daily_send_cap``
+    for today — the overflow is reported as ``held`` and can be sent tomorrow.
+    ``sent_today`` is likewise that account's own total. Returns the counts
+    immediately; poll the message list to watch them move.
     """
-    from datetime import datetime
-
-    from app.models.suppression import OutreachHistory
     from app.services.discovery_jobs import launch_linkedin_message_send
+    from app.services.linkedin_budget import active_send_account_id, linkedin_sent_today
 
     query = select(LinkedInMessage).where(
         LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED])
@@ -550,18 +549,12 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
     messages = list(db.execute(query.order_by(LinkedInMessage.id)).scalars().all())
     matched = len(messages)
 
-    # Daily-cap guard (invites + DMs), counted from OutreachHistory so ALL send
-    # paths share one budget. Only the ids that fit today are queued.
-    now = datetime.utcnow()
-    today_start = datetime(now.year, now.month, now.day)
-    sent_today = db.execute(
-        select(func.count())
-        .select_from(OutreachHistory)
-        .where(
-            OutreachHistory.channel == "linkedin",
-            OutreachHistory.created_at >= today_start,
-        )
-    ).scalar_one()
+    # Daily-cap guard (invites + DMs) for the account that will do the sending —
+    # LinkedIn limits per account, so a shared global budget let sends from one
+    # account block every other one. All send paths still share that account's
+    # budget. Only the ids that fit today are queued.
+    sending_account = active_send_account_id()
+    sent_today = linkedin_sent_today(db, sending_account)
     cap = max(0, int(settings.linkedin_daily_send_cap))
     remaining = max(0, cap - sent_today)
     will_send = [m.id for m in messages][:remaining]
