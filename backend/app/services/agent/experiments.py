@@ -126,10 +126,47 @@ def _heuristic_variant_specs(base_criteria: dict, n: int) -> list[dict]:
     return specs[:n]
 
 
+#: Fields that define WHO a search targets. A change to any of them means the
+#: existing variants are aimed at a different audience.
+_ICP_FIELDS = (
+    "titles", "seniorities", "industries", "company_types",
+    "healthcare_sectors", "geographies", "keywords", "themes",
+    "employee_min", "employee_max", "organization_domains",
+    "organization_job_titles",
+)
+
+
+def _icp_fingerprint(criteria: dict) -> str:
+    """Stable signature of who a criteria set targets (order-insensitive)."""
+    parts = []
+    for field in _ICP_FIELDS:
+        val = (criteria or {}).get(field)
+        if isinstance(val, list):
+            val = sorted(str(v).strip().lower() for v in val if v)
+        parts.append((field, val))
+    return json.dumps(parts, sort_keys=True, default=str)
+
+
 def ensure_variants(
     db: Session, principal: Principal, playbook
 ) -> list[AgentVariant]:
-    """Return the active variants for a playbook, seeding them on first use."""
+    """Return the active variants for a playbook, reseeding when the ICP changes.
+
+    Variants used to be seeded once and then returned forever. Because
+    ``execute_run`` searches with the SELECTED VARIANT's criteria rather than the
+    playbook's, editing a campaign had no effect on what it actually searched
+    for: a playbook moved from fintech to pharmaceuticals kept running the
+    original fintech variants — including the one labelled "Base search" — so
+    every run returned fintech CEOs, every one scored below 40 against a pharma
+    objective, and the campaign looked broken while the edit sat there ignored.
+
+    So compare what the variants target against what the playbook now says. If
+    the ICP has moved, retire the old set (their reply-rate stats describe a
+    different audience and must not steer selection) and seed a fresh one.
+    """
+    base_criteria = criteria_from_dict(playbook.criteria or {})
+    want = _icp_fingerprint(base_criteria)
+
     existing = db.execute(
         select(AgentVariant)
         .where(
@@ -140,9 +177,16 @@ def ensure_variants(
         .order_by(AgentVariant.id.asc())
     ).scalars().all()
     if existing:
-        return existing
-
-    base_criteria = criteria_from_dict(playbook.criteria or {})
+        base = next((v for v in existing if v.axis == "base"), existing[0])
+        if _icp_fingerprint(base.criteria or {}) == want:
+            return existing
+        logger.info(
+            "Playbook %s ICP changed; retiring %s stale variant(s) and reseeding",
+            playbook.id, len(existing),
+        )
+        for v in existing:
+            v.is_active = False
+        db.commit()
     base = AgentVariant(
         principal_id=principal.id,
         playbook_id=playbook.id,
