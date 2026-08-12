@@ -244,6 +244,22 @@ function RunProgress({
           <span className="text-xs text-slate-500">
             Run #{run.id}
             {run.started_at ? ` · started ${relativeTime(run.started_at)}` : ""}
+            {/* The LinkedIn and Prospects pages pick runs by DiscoveryRun id,
+                which is a different number from this run's id — #332 here is
+                #463 there. Naming it and linking straight to it saves matching
+                the two by prospect count and guesswork. */}
+            {run.discovery_run_id ? (
+              <>
+                {" · "}
+                <Link
+                  to={`/linkedin?run=${run.discovery_run_id}`}
+                  className="text-violet-700 hover:underline"
+                  title="Open this run's prospects on the LinkedIn page"
+                >
+                  discovery run #{run.discovery_run_id}
+                </Link>
+              </>
+            ) : null}
           </span>
         </div>
         {live && currentStage && (
@@ -471,6 +487,7 @@ function EditPanel({
   );
   const [autoSend, setAutoSend] = useState(campaign.auto_send);
   const [autoSchedule, setAutoSchedule] = useState(campaign.auto_schedule);
+  const [enabled, setEnabled] = useState(campaign.enabled);
 
   const save = useMutation({
     mutationFn: () =>
@@ -483,6 +500,7 @@ function EditPanel({
         require_email_and_linkedin: requireEmailAndLinkedin,
         auto_send: autoSend,
         auto_schedule: autoSchedule,
+        enabled,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["campaign", campaign.id] });
@@ -548,6 +566,21 @@ function EditPanel({
           <span className="mt-1 block text-[11px] text-slate-400">
             Lower this to qualify more of the people found each run (fewer get rejected), at
             the cost of some being a weaker fit.
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
+          <input
+            type="checkbox"
+            className="mt-0.5 rounded border-slate-300"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          <span className="text-sm text-slate-800">
+            <span className="font-medium">Run automatically every day</span>
+            <span className="block text-xs text-slate-500">
+              Off = the "Runs daily" badge switches to "Paused" and this campaign only finds new
+              people when you press Run now.
+            </span>
           </span>
         </label>
         <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 bg-slate-50/50 px-4 py-3">
@@ -1091,6 +1124,17 @@ export default function CampaignDashboard() {
     (lastRun.status === "failed" || (lastRunErrors.length > 0 && lastRunDidNothing))
       ? lastRun
       : null;
+  // The DiscoveryRun the newest run imported into. This is the number the
+  // Prospects and LinkedIn run pickers list, and it is unrelated to the agent
+  // run's own id — without showing it, matching a campaign's prospects to a run
+  // in those pickers meant guessing by prospect count.
+  //
+  // Prefer the in-flight run, then the last one. Either can legitimately be
+  // null: the id is only stamped once the discovery stage completes, and a
+  // "Continue without new prospects" run skips discovery entirely and never gets
+  // one. Both cases render nothing rather than a link that goes nowhere.
+  const latestDiscoveryRunId =
+    campaign.current_run?.discovery_run_id ?? campaign.last_run?.discovery_run_id ?? null;
   const canContinue =
     !running &&
     !paused &&
@@ -1145,6 +1189,28 @@ export default function CampaignDashboard() {
               {campaign.discover_target} people/run · shares a {campaign.mailbox_daily_cap}/day
               mailbox cap · {campaign.auto_schedule ? "AI-timed sends" : "fixed send window"}
             </p>
+            {latestDiscoveryRunId ? (
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Discovery run
+                </span>
+                <Link
+                  to={`/prospects?run=${latestDiscoveryRunId}`}
+                  className="inline-flex items-center gap-1 rounded-lg bg-violet-50 px-2 py-1 text-xs font-semibold text-violet-700 ring-1 ring-inset ring-violet-200 hover:bg-violet-100"
+                  title="See the prospects this run brought in"
+                >
+                  #{latestDiscoveryRunId}
+                  <span className="font-normal text-violet-600">· see prospects</span>
+                </Link>
+                <Link
+                  to={`/linkedin?run=${latestDiscoveryRunId}`}
+                  className="text-xs text-violet-700 hover:underline"
+                  title="Open this run on the LinkedIn page"
+                >
+                  on LinkedIn
+                </Link>
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-col items-end gap-1.5">
             <Badge

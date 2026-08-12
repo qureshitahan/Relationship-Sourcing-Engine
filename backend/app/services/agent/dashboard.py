@@ -504,6 +504,12 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
             "id": run.id,
             "status": run.status,
             "trigger": run.trigger,
+            # The DiscoveryRun this run imported into. Two different things are
+            # both labelled "Run #" in the UI — an AgentRun on the campaign page,
+            # a DiscoveryRun in the LinkedIn/Prospects run pickers — and their ids
+            # are unrelated. Without this the two cannot be matched up from the
+            # UI at all: an agent run shown as #332 is #463 in those pickers.
+            "discovery_run_id": run.discovery_run_id,
             "started_at": run.started_at.isoformat() if run.started_at else None,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "discovered": run.discovered,
