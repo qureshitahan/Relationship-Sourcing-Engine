@@ -38,6 +38,7 @@ from app.services.agent.dashboard import (
 )
 from app.services.agent.planner import criteria_from_dict
 from app.services.audit import log_action
+from app.services import campaign_bulk_send
 from app.services.campaign_control import (
     UnscheduleResult,
     request_run_cancel,
@@ -287,6 +288,13 @@ def update_campaign(
 def run_campaign(
     campaign_id: int,
     resume: bool = Query(False, description="Continue prior run: re-process undrafted people"),
+    skip_discovery: bool = Query(
+        False,
+        description=(
+            "Resume-only: skip finding new people and only finish the existing "
+            "backlog from earlier runs. Ignored unless resume=true."
+        ),
+    ),
     db: Session = Depends(get_db),
 ):
     """Kick off a run for this campaign now (executes in the background)."""
@@ -317,6 +325,7 @@ def run_campaign(
         playbook_id=config.playbook_id,
         campaign_id=config.id,
         resume=resume,
+        skip_discovery=skip_discovery and resume,
     )
     return campaign_detail(db, campaign_id)
 
@@ -450,6 +459,66 @@ def schedule_approved_emails(campaign_id: int, db: Session = Depends(get_db)):
     )
     db.commit()
     return campaign_detail(db, campaign_id)
+
+
+@router.post("/{campaign_id}/send-drafts", status_code=202)
+def send_all_drafts(campaign_id: int, db: Session = Depends(get_db)):
+    """Approve + send every draft waiting in this campaign, in the background.
+
+    The panel's "Approve & send all" used to drive this loop from the browser, two
+    requests per draft, which stopped partway whenever the tab closed. This returns
+    as soon as the job is spawned; poll the GET below for progress.
+    """
+    config = _get_campaign(db, campaign_id)
+    if config.paused:
+        raise HTTPException(
+            status_code=409,
+            detail="This campaign is paused. Resume it before sending.",
+        )
+    try:
+        state = campaign_bulk_send.start(db, campaign_id)
+    except campaign_bulk_send.BulkSendError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary=f"Started bulk approve+send of {state['total']} draft(s)",
+    )
+    db.commit()
+    return state
+
+
+@router.get("/{campaign_id}/send-drafts")
+def send_all_drafts_progress(campaign_id: int, db: Session = Depends(get_db)):
+    """Progress of this campaign's bulk send, or ``null`` if it has never run.
+
+    ``status`` is running | done | cancelled | interrupted. "interrupted" means a
+    restart killed the worker; the emails that had not gone out are still drafts,
+    so POSTing again continues from where it stopped.
+    """
+    _get_campaign(db, campaign_id)
+    return campaign_bulk_send.state_for(campaign_id)
+
+
+@router.post("/{campaign_id}/send-drafts/cancel")
+def cancel_send_all_drafts(campaign_id: int, db: Session = Depends(get_db)):
+    """Stop a running bulk send after the draft it is currently on."""
+    _get_campaign(db, campaign_id)
+    if not campaign_bulk_send.request_cancel(campaign_id):
+        raise HTTPException(
+            status_code=409, detail="No bulk send is running for this campaign."
+        )
+    log_action(
+        db,
+        AuditAction.CAMPAIGN,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        summary="Requested stop of bulk approve+send",
+    )
+    db.commit()
+    return campaign_bulk_send.state_for(campaign_id)
 
 
 @router.delete("/{campaign_id}", status_code=204)

@@ -40,3 +40,7 @@ deploy/artifacts/
 
 # Uploaded files (resumes, imports)
 backend/uploads/
+
+# Local-only working files (kept on disk, deliberately not shared)
+context.md
+dev.ps1

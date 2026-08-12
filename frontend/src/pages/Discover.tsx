@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
@@ -25,6 +25,7 @@ import {
   GEOGRAPHY_SUGGESTIONS,
   INDUSTRY_OPTIONS,
   SENIORITY_OPTIONS,
+  splitSeniorityFilters,
 } from "../constants/discoveryOptions";
 import WorkflowSteps from "../components/WorkflowSteps";
 import { usePersistedState } from "../hooks/usePersistedState";
@@ -73,6 +74,9 @@ export default function Discover() {
   const { data: runs, isLoading } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listDiscoveryRuns({ limit: 10 }),
+    // Entering this page (refresh or navigation) always re-reads the server
+    // rather than rendering whatever the cache still holds from last visit.
+    refetchOnMount: "always",
     // Keep the list live while any run is discovering or running a bulk job.
     refetchInterval: (query) => {
       const items = query.state.data?.items ?? [];
@@ -87,9 +91,9 @@ export default function Discover() {
   });
 
   // Persisted (sessionStorage) rather than plain useState: navigating to
-  // another module and back should not wipe a filter set, an in-progress AI
-  // plan, or the run being watched — React Router unmounts this component
-  // on route change, which would otherwise reset all of it.
+  // another module and back should not wipe a filter set or an in-progress AI
+  // plan — React Router unmounts this component on route change, which would
+  // otherwise reset all of it. Results are NOT persisted; see below.
   const [principalId, setPrincipalId] = usePersistedState<number | "">(
     "discover:principalId",
     ""
@@ -100,19 +104,23 @@ export default function Discover() {
     "discover:planAnswers",
     {}
   );
-  const [planNote, setPlanNote] = usePersistedState<string | null>(
-    "discover:planNote",
-    null
-  );
+  // These two are deliberately NOT persisted, unlike the filters above. They
+  // describe the run last watched, and re-entering Discover — by nav click or
+  // by refresh — must show the latest run on the server rather than replay a
+  // status note and a run panel from earlier in the session.
+  const [planNote, setPlanNote] = useState<string | null>(null);
   // Id of the run kicked off by the "Run discovery" button, polled until done.
-  const [activeRunId, setActiveRunId] = usePersistedState<number | null>(
-    "discover:activeRunId",
-    null
-  );
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
+  // Which run the result panel shows: the one started in this visit, else the
+  // newest run on the server. Since `activeRunId` resets on every mount, both
+  // entering the page and refreshing it land on the latest run — never on a
+  // stale one. /discovery/runs is ordered created_at DESC, so items[0] is it.
+  const watchedRunId = activeRunId ?? runs?.items?.[0]?.id ?? null;
   const activeRun = useQuery({
-    queryKey: ["discovery-run", activeRunId],
-    queryFn: () => getDiscoveryRun(activeRunId as number),
-    enabled: activeRunId != null,
+    queryKey: ["discovery-run", watchedRunId],
+    queryFn: () => getDiscoveryRun(watchedRunId as number),
+    enabled: watchedRunId != null,
+    refetchOnMount: "always",
     refetchInterval: (query) => {
       const s = query.state.data?.status;
       const js = query.state.data?.job_status;
@@ -144,9 +152,15 @@ export default function Discover() {
     []
   );
   const [peopleLimit, setPeopleLimit] = usePersistedState("discover:peopleLimit", "100");
+  // On by default: a prospect missing either an email or a LinkedIn URL cannot be
+  // reached on any channel, so keeping them only inflates the found count. Still
+  // unticked manually for a deliberately wider net.
+  // Key is versioned (:v2) because the default flipped false -> true. A stored
+  // value always wins over the default, so a tab that already had this unticked
+  // would otherwise keep it unticked on every visit that isn't a refresh.
   const [requireEmailAndLinkedin, setRequireEmailAndLinkedin] = usePersistedState(
-    "discover:requireEmailAndLinkedin",
-    false
+    "discover:requireEmailAndLinkedin:v2",
+    true
   );
 
   const { data: agentConfig } = useQuery({
@@ -207,11 +221,16 @@ export default function Discover() {
       // (geographies), Max prospects. Every other Apollo filter is left unset
       // on purpose so discovery casts the widest net (see applyPlanCriteria
       // above for why omitting is safe rather than restrictive).
+      // "CEO" sits in the seniority dropdown but is a title in Apollo, so it is
+      // split back out here — sending it as a seniority would be silently ignored.
+      const { seniorities: apolloSeniorities, titles } =
+        splitSeniorityFilters(seniorities);
       const payload: DiscoveryRunPayload = {
         principal_id: Number(principalId),
         industries,
         geographies,
-        seniorities,
+        seniorities: apolloSeniorities,
+        titles: titles.length ? titles : undefined,
         contact_email_status: emailStatus.length ? emailStatus : undefined,
         people_limit: peopleLimit.trim() ? Number(peopleLimit) : 100,
         people_first: true,
@@ -303,6 +322,18 @@ export default function Discover() {
   });
 
   const hasPrincipals = principals && principals.items.length > 0;
+
+  // Derived from the runs list, not just the watched run: re-entering the page
+  // resets `activeRunId`, but a run already in flight must still block a second
+  // one and keep showing progress.
+  const discovering =
+    activeRun.data?.status === "pending" ||
+    activeRun.data?.status === "running" ||
+    (runs?.items ?? []).some(
+      (r) =>
+        (r.status === "pending" || r.status === "running") &&
+        (principalId === "" || r.principal_id === Number(principalId))
+    );
 
   return (
     <div>
@@ -421,7 +452,7 @@ export default function Discover() {
                   />
                   <MultiSelectDropdown
                     label="Seniorities"
-                    hint="All 11 Apollo seniority levels. Optional — leave empty for the broadest search."
+                    hint="All 11 Apollo seniority levels, plus CEO (matched by job title). Optional — leave empty for the broadest search."
                     selected={seniorities}
                     onChange={setSeniorities}
                     options={SENIORITY_OPTIONS}
@@ -482,18 +513,9 @@ export default function Discover() {
             <div className="mt-4 flex items-center gap-3">
               <Button
                 onClick={() => run.mutate()}
-                disabled={
-                  !principalId ||
-                  run.isPending ||
-                  activeRun.data?.status === "pending" ||
-                  activeRun.data?.status === "running"
-                }
+                disabled={!principalId || run.isPending || discovering}
               >
-                {run.isPending ||
-                activeRun.data?.status === "pending" ||
-                activeRun.data?.status === "running"
-                  ? "Discovering…"
-                  : "Run discovery"}
+                {run.isPending || discovering ? "Discovering…" : "Run discovery"}
               </Button>
               <span className="text-xs text-slate-400">
                 {industries.length} industry filter(s)
@@ -522,8 +544,7 @@ export default function Discover() {
                 </p>
               </div>
             )}
-            {(activeRun.data?.status === "pending" ||
-              activeRun.data?.status === "running") && (
+            {discovering && (
               <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
                 <div className="font-medium">
                   Discovering prospects in the background…

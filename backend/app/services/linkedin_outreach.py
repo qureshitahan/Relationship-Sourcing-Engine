@@ -16,7 +16,7 @@ from app.models.company import Company
 from app.models.contact import Contact
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
-from app.services.insights.engine import generate_outreach
+from app.services.insights.engine import generate_connection_note, generate_outreach
 
 # Sign-offs we strip from the email body so a LinkedIn DM reads natively.
 _CLOSERS = {
@@ -96,16 +96,30 @@ def generate_linkedin_content(
     )
     body = _strip_signature(result.body, principal).strip()
 
-    first_name = ""
-    if contact and contact.name:
-        first_name = contact.name.strip().split()[0]
+    # Connection note: its own short, complete punch-line grounded in the same
+    # insight/message — not a truncation of the DM body (LinkedIn's limit is
+    # too tight for that to ever read as a finished thought).
+    note = generate_connection_note(
+        db,
+        principal,
+        contact,
+        company,
+        insight,
+        message_body=body,
+        outreach_goal=outreach_goal,
+        limit=INVITE_NOTE_LIMIT,
+    ).strip()
 
-    # Connection note: a warm one/two-line intro derived from the message.
-    core = _first_sentences(body, INVITE_NOTE_LIMIT - (len(first_name) + 8))
-    if first_name and not core.lower().startswith(("hi ", "hello ", "hey ")):
-        note = f"Hi {first_name}, {core}"
-    else:
-        note = core
-    note = note[:INVITE_NOTE_LIMIT].strip()
+    if not note:
+        # Last-resort fallback if the provider returned nothing at all.
+        first_name = ""
+        if contact and contact.name:
+            first_name = contact.name.strip().split()[0]
+        core = _first_sentences(body, INVITE_NOTE_LIMIT - (len(first_name) + 8))
+        if first_name and not core.lower().startswith(("hi ", "hello ", "hey ")):
+            note = f"Hi {first_name}, {core}"
+        else:
+            note = core
+        note = note[:INVITE_NOTE_LIMIT].strip()
 
     return LinkedInContent(body=body, invitation_note=note)

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -28,7 +28,7 @@ from app.models.linkedin_message import LinkedInMessage
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
 from app.models.suppression import OutreachHistory
-from app.schemas.entities import LinkedInMessageOut, Page
+from app.schemas.entities import LinkedInInviteStats, LinkedInMessageOut, Page
 from app.schemas.requests import (
     LinkedInConnectRequest,
     LinkedInGenerateRequest,
@@ -229,6 +229,50 @@ def list_messages(
     total = db.execute(count_query).scalar_one()
     return Page[LinkedInMessageOut](
         items=[_msg_out(db, m) for m in items], total=total, limit=limit, offset=offset
+    )
+
+
+@router.get("/stats", response_model=LinkedInInviteStats)
+def invite_stats(
+    db: Session = Depends(get_db),
+    contact_id: Optional[int] = None,
+    principal_id: Optional[int] = None,
+    campaign_id: Optional[int] = None,
+    discovery_run_id: Optional[int] = None,
+):
+    """How many connection invitations went out, and how many were accepted.
+
+    Acceptance has no flag of its own. An accepted invite is one whose queued
+    message was delivered afterwards (``sent_at``), plus the case where the
+    profile came back 1st-degree but the auto-DM itself failed (``connected``).
+    Requiring ``invitation_sent_at`` keeps direct DMs to existing connections —
+    which never needed an invitation — out of both numbers.
+    """
+    invited = LinkedInMessage.invitation_sent_at.is_not(None)
+    accepted = and_(
+        invited,
+        or_(LinkedInMessage.sent_at.is_not(None), LinkedInMessage.connected.is_(True)),
+    )
+
+    base = select(func.count()).select_from(LinkedInMessage)
+    if discovery_run_id is not None:
+        base = base.join(Contact, LinkedInMessage.contact_id == Contact.id).where(
+            Contact.discovery_run_id == discovery_run_id
+        )
+    if contact_id is not None:
+        base = base.where(LinkedInMessage.contact_id == contact_id)
+    if principal_id is not None:
+        base = base.where(LinkedInMessage.principal_id == principal_id)
+    if campaign_id is not None:
+        base = base.where(LinkedInMessage.campaign_id == campaign_id)
+
+    sent = db.execute(base.where(invited)).scalar_one()
+    approved = db.execute(base.where(accepted)).scalar_one()
+    return LinkedInInviteStats(
+        invites_sent=sent,
+        invites_accepted=approved,
+        invites_pending=max(0, sent - approved),
+        acceptance_rate=round(approved / sent * 100, 1) if sent else 0.0,
     )
 
 
@@ -567,6 +611,41 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
         "held": held,
         "cap": cap,
         "sent_today": sent_today,
+    }
+
+
+@router.get("/send-progress")
+def send_progress():
+    """Live state of the bulk approve+send job, so the UI can show progress and
+    offer Stop while it is running."""
+    from app.services import linkedin_send_progress as progress
+
+    return progress.read_progress()
+
+
+@router.post("/stop-send")
+def stop_send(db: Session = Depends(get_db)):
+    """Halt the running bulk approve+send.
+
+    The worker checks between messages, so the one already in flight completes
+    and everything after it is left untouched — nothing is half-sent. Messages
+    that never went out keep their draft/approved status and can be sent later.
+    """
+    from app.services import linkedin_send_progress as progress
+
+    if not progress.request_stop():
+        return {"stopped": False, "message": "No LinkedIn send is running."}
+    log_action(
+        db,
+        AuditAction.LINKEDIN_SEND,
+        entity_type="linkedin_bulk_send",
+        actor="human",
+        summary="Stopped the bulk LinkedIn send",
+        commit=True,
+    )
+    return {
+        "stopped": True,
+        "message": "Stopping — the message in flight finishes, then sending halts.",
     }
 
 

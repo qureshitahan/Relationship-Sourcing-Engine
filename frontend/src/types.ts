@@ -7,6 +7,22 @@ export interface Page<T> {
   offset: number;
 }
 
+/** Progress of a campaign's server-side "Approve & send all".
+ *  "interrupted" = a restart killed the worker; unsent drafts are still drafts,
+ *  so starting again continues from where it stopped. */
+export interface CampaignBulkSend {
+  status: "running" | "done" | "cancelled" | "interrupted";
+  total: number;
+  done: number;
+  sent: number;
+  failed: number;
+  errors: string[];
+  cancel_requested: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 export interface Principal {
   id: number;
   name: string;
@@ -387,6 +403,25 @@ export interface LinkedInAccountsResponse {
   active_account_id?: string | null;
   default_account_id?: string | null;
   accounts: LinkedInConnectedAccount[];
+}
+
+/** Live state of the LinkedIn bulk approve+send job (drives the Stop button). */
+export interface LinkedInSendProgress {
+  status: "idle" | "running" | "done" | "stopped";
+  total: number;
+  done: number;
+  sent: number;
+  failed: number;
+  stop_requested: boolean;
+}
+
+/** Connection-invitation funnel shown above the LinkedIn message list. */
+export interface LinkedInInviteStats {
+  invites_sent: number;
+  invites_accepted: number;
+  invites_pending: number;
+  /** Accepted / sent as a percentage (0-100). */
+  acceptance_rate: number;
 }
 
 export interface Call {

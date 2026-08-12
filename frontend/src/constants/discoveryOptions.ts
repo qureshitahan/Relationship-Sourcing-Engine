@@ -18,10 +18,35 @@ export {
   TITLE_OPTIONS,
 } from "./discoveryTitles";
 
-/** Apollo person_seniorities[] — complete 11-value enum (no others accepted by API). */
+/** CEO is a TITLE in Apollo, not a seniority — ``person_seniorities`` accepts only
+ *  the 11 values below, and "ceo" is not one of them, so sending it would leave a
+ *  filter that looks applied and does nothing. It still belongs in the seniority
+ *  dropdown because that is where people look for it, so it lives there as a
+ *  pseudo-value and ``splitSeniorityFilters`` turns it into a title filter on the
+ *  way out. ``c_suite`` is the nearest real seniority but it also returns CFO/COO/
+ *  CTO, which is not what picking "CEO" means. */
+export const CEO_SENIORITY_VALUE = "ceo";
+export const CEO_TITLES = ["CEO", "Chief Executive Officer"];
+
+/** Split a seniority selection into what Apollo accepts and the titles that its
+ *  pseudo-values stand for. Anything not a pseudo-value passes through untouched,
+ *  so the existing 11 seniorities behave exactly as before. */
+export function splitSeniorityFilters(selected: string[]): {
+  seniorities: string[];
+  titles: string[];
+} {
+  return {
+    seniorities: selected.filter((value) => value !== CEO_SENIORITY_VALUE),
+    titles: selected.includes(CEO_SENIORITY_VALUE) ? [...CEO_TITLES] : [],
+  };
+}
+
+/** Apollo person_seniorities[] — complete 11-value enum (no others accepted by
+ *  API) — plus "CEO", which is a title and is translated out before sending. */
 export const SENIORITY_OPTIONS: SelectOption[] = [
   { value: "owner", label: "Owner" },
   { value: "founder", label: "Founder" },
+  { value: CEO_SENIORITY_VALUE, label: "CEO" },
   { value: "c_suite", label: "C-Suite" },
   { value: "partner", label: "Partner" },
   { value: "vp", label: "VP" },

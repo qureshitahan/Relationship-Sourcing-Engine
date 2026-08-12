@@ -453,6 +453,32 @@ function DraftCard({
   );
 }
 
+/** Progress bar for the background drafting job.
+ *
+ *  The counts were already here as text; the bar makes "how much is left" legible
+ *  at a glance on a job that writes one email at a time and runs for minutes.
+ *  Same markup as the other progress bars in the app (role + aria values), so a
+ *  screen reader reads it rather than seeing a pair of empty divs. */
+function DraftJobBar({ done, total }: { done: number; total: number }) {
+  if (total <= 0) return null;
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  return (
+    <div
+      className="mt-2 h-2 w-full overflow-hidden rounded-full bg-violet-200"
+      role="progressbar"
+      aria-label="Draft generation progress"
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-valuenow={done}
+    >
+      <div
+        className="h-full rounded-full bg-violet-600 transition-all"
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
 export default function Emails() {
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -912,12 +938,13 @@ export default function Emails() {
       {runId && draftJobRunning && (
         <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm text-violet-900">
           <strong>
-            Writing emails… {run?.job_done ?? 0}/{run?.job_total ?? 0}
+            Writing emails… {run?.job_done ?? 0}/{run?.job_total ?? 0} drafts
           </strong>
           <span className="ml-2 text-violet-800">
             Each email is written individually, so this takes a few minutes. Safe
             to leave this page — drafts are saved as they are written.
           </span>
+          <DraftJobBar done={run?.job_done ?? 0} total={run?.job_total ?? 0} />
         </div>
       )}
 

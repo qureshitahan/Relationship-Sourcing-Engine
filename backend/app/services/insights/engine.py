@@ -491,6 +491,50 @@ def generate_outreach(
     return result
 
 
+def generate_connection_note(
+    db: Session,
+    principal: Principal,
+    contact: Optional[Contact],
+    company: Optional[Company],
+    insight: Optional[RelevanceInsight],
+    *,
+    message_body: str,
+    outreach_goal: Optional[str] = None,
+    limit: int = 220,
+) -> str:
+    """Write a short, complete, personalized LinkedIn connection note.
+
+    Grounded in the same principal/prospect/insight context as ``generate_outreach``,
+    but composed as its own short punch-line rather than a truncation of
+    ``message_body``.
+    """
+    insight_ctx = None
+    if insight is not None:
+        facts = [_fact_text(f) for f in (insight.key_facts or []) if _fact_text(f)]
+        insight_ctx = {
+            "snapshot": insight.snapshot,
+            "key_facts": facts,
+            "why_relevant": insight.why_relevant,
+            "talking_points": insight.talking_points,
+            "opportunity_type": insight.opportunity_type,
+        }
+
+    provider = get_insight_provider()
+    p_ctx = principal_context(principal, outreach_goal=outreach_goal)
+    p_ctx["credential_summary"] = credential_summary(principal)
+    p_ctx.pop("proof_points_from_documents", None)
+
+    note = provider.generate_connection_note(
+        principal=p_ctx,
+        person=person_context(contact),
+        organization=organization_context(company),
+        insight=insight_ctx,
+        message_body=message_body,
+        limit=limit,
+    )
+    return (note or "").strip()[:limit]
+
+
 def generate_outreach_batch(
     db: Session,
     principal: Principal,

@@ -70,8 +70,15 @@ export default function CampaignWizard() {
     50
   );
   const [mailboxCap, setMailboxCap, clearMailboxCap] = usePersistedState("campaign-wizard:mailboxCap", 50);
+  // On by default: a prospect missing either an email or a LinkedIn URL cannot be
+  // reached on any channel, so keeping them only inflates the found count. Still
+  // unticked manually for a deliberately wider net.
+  //
+  // Key is versioned (:v2) because the default flipped false -> true. A stored
+  // value always wins over the default, so without a new key anyone who had
+  // already opened this wizard would keep the old unticked box forever.
   const [requireEmailAndLinkedin, setRequireEmailAndLinkedin, clearRequireEmailAndLinkedin] =
-    usePersistedState("campaign-wizard:requireEmailAndLinkedin", false);
+    usePersistedState("campaign-wizard:requireEmailAndLinkedin:v2", true);
   // Default new campaigns to review-before-send so the first runs are safe to inspect.
   const [autoSend, setAutoSend, clearAutoSend] = usePersistedState("campaign-wizard:autoSend", false);
   const [autoSchedule, setAutoSchedule, clearAutoSchedule] = usePersistedState(

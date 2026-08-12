@@ -215,6 +215,7 @@ def create_run(
     playbook_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
     resume: bool = False,
+    skip_discovery: bool = False,
 ) -> AgentRun:
     run = AgentRun(
         principal_id=principal_id,
@@ -223,7 +224,14 @@ def create_run(
         status="running",
         trigger=trigger,
         started_at=datetime.utcnow(),
-        summary={"stages": [], "people": [], "resume": bool(resume)},
+        summary={
+            "stages": [],
+            "people": [],
+            "resume": bool(resume),
+            # Resume-only: pick up the existing backlog without a fresh Discover
+            # step. Meaningless (and ignored) unless resume is also set.
+            "skip_discovery": bool(skip_discovery) and bool(resume),
+        },
     )
     db.add(run)
     db.commit()
@@ -238,6 +246,7 @@ def launch_run(
     playbook_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
     resume: bool = False,
+    skip_discovery: bool = False,
 ) -> AgentRun:
     """Create a run row and execute it on a background daemon thread."""
     db = SessionLocal()
@@ -249,6 +258,7 @@ def launch_run(
             playbook_id=playbook_id,
             campaign_id=campaign_id,
             resume=resume,
+            skip_discovery=skip_discovery,
         )
         run_id = run.id
     finally:
@@ -459,42 +469,49 @@ def execute_run(run_id: int) -> None:
         )
 
         new_contact_ids: list[int] = []
-        try:
-            discovery_run = run_discovery(
-                db,
-                principal,
-                criteria,
-                requested_by="agent",
-                generate_insights=False,
-                people_first=True,
-                search_goal=playbook.objective_prompt,
-                campaign_id=config.id,
-                require_email_and_linkedin=bool(config.require_email_and_linkedin),
-            )
-            run.discovery_run_id = discovery_run.id
-            run.discovered = discovery_run.people_imported or 0
-            run.duplicates = discovery_run.duplicates or 0
-            new_contacts = db.execute(
-                select(Contact).where(Contact.discovery_run_id == discovery_run.id)
-            ).scalars().all()
-            new_contact_ids = [c.id for c in new_contacts]
-            for c in new_contacts:
-                # Attribute each discovered person to the A/B variant that found them.
-                if variant is not None:
-                    c.variant_id = variant.id
-                c.campaign_id = config.id
-                company = db.get(Company, c.company_id) if c.company_id else None
-                _track_person(run, c, company, status="discovered")
-            _stage(
-                run,
-                "discovery",
-                imported=run.discovered,
-                duplicates=run.duplicates,
-                search=playbook.name,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Agent discovery failed")
-            errors.append(f"Discovery: {exc}")
+        # Resume + skip_discovery: the point is to finish the existing backlog
+        # without spending on a fresh Discover step. Everything else below is
+        # unchanged — the resume pickup right after this still runs the same
+        # way whether discovery ran or was skipped.
+        if bool((run.summary or {}).get("skip_discovery")):
+            _stage(run, "discovery", imported=0, duplicates=0, skipped=True)
+        else:
+            try:
+                discovery_run = run_discovery(
+                    db,
+                    principal,
+                    criteria,
+                    requested_by="agent",
+                    generate_insights=False,
+                    people_first=True,
+                    search_goal=playbook.objective_prompt,
+                    campaign_id=config.id,
+                    require_email_and_linkedin=bool(config.require_email_and_linkedin),
+                )
+                run.discovery_run_id = discovery_run.id
+                run.discovered = discovery_run.people_imported or 0
+                run.duplicates = discovery_run.duplicates or 0
+                new_contacts = db.execute(
+                    select(Contact).where(Contact.discovery_run_id == discovery_run.id)
+                ).scalars().all()
+                new_contact_ids = [c.id for c in new_contacts]
+                for c in new_contacts:
+                    # Attribute each discovered person to the A/B variant that found them.
+                    if variant is not None:
+                        c.variant_id = variant.id
+                    c.campaign_id = config.id
+                    company = db.get(Company, c.company_id) if c.company_id else None
+                    _track_person(run, c, company, status="discovered")
+                _stage(
+                    run,
+                    "discovery",
+                    imported=run.discovered,
+                    duplicates=run.duplicates,
+                    search=playbook.name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Agent discovery failed")
+                errors.append(f"Discovery: {exc}")
         db.commit()
 
         if _abort_if_cancelled(db, run, errors):
