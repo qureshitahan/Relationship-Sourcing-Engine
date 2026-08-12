@@ -415,6 +415,83 @@ export interface LinkedInSendProgress {
   stop_requested: boolean;
 }
 
+// --- Followers LinkedIn ---
+
+/** One follower of a connected account, joined to its state for one message. */
+export interface FollowerRow {
+  id: number;
+  account_id: string;
+  provider_id: string;
+  name?: string | null;
+  headline?: string | null;
+  profile_url?: string | null;
+  picture_url?: string | null;
+  /** Null until a DM has been drafted for this outreach goal. */
+  message_id?: number | null;
+  message_status?: string | null;
+  body?: string | null;
+  /** Checkpoint state: claimed | sent | failed | skipped. */
+  send_status?: string | null;
+  /** How it was delivered: connected | open_profile | inmail. */
+  reach?: string | null;
+  sent_at?: string | null;
+  error?: string | null;
+  replied_at?: string | null;
+  reply_snippet?: string | null;
+}
+
+/** DB-derived counts for one follower campaign — never reset by a refresh. */
+export interface FollowerStats {
+  followers_total: number;
+  /** Followers with no draft yet for this message. */
+  eligible: number;
+  all: number;
+  draft: number;
+  approved: number;
+  sent: number;
+  replied: number;
+  /** Checkpoint truth: how many were ever successfully DM'd for this message. */
+  contacted_ever: number;
+  /** Neither connected, nor an open profile, nor InMail-able. */
+  not_reachable: number;
+  /** Claims left by a worker that died mid-send; never auto-retried. */
+  needs_review: number;
+  cap: number;
+  sent_today: number;
+  remaining_today: number;
+}
+
+export interface FollowersStatus {
+  provider: string;
+  configured: boolean;
+  supports_followers: boolean;
+  active_account_id?: string | null;
+  active_account_name?: string | null;
+  active_account_status?: string | null;
+  default_account_id?: string | null;
+  accounts: LinkedInConnectedAccount[];
+  followers_total?: number;
+  campaign_key?: string | null;
+  stats?: FollowerStats | null;
+}
+
+/** Live state of the running sync / draft / send job. */
+export interface FollowersProgress {
+  job: "sync" | "draft" | "send" | null;
+  status: "idle" | "running" | "done" | "stopped" | "failed";
+  total: number;
+  done: number;
+  drafted: number;
+  approved: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  imported: number;
+  stop_requested: boolean;
+  message?: string | null;
+  campaign_key?: string | null;
+}
+
 /** Connection-invitation funnel shown above the LinkedIn message list. */
 export interface LinkedInInviteStats {
   invites_sent: number;
@@ -713,6 +790,9 @@ export interface CampaignRunSnapshot {
   id: number;
   status: string;
   trigger: string;
+  /** The DiscoveryRun this run imported into. Its id is unrelated to `id` above,
+   *  and it is the number the LinkedIn and Prospects run pickers show. */
+  discovery_run_id?: number | null;
   started_at?: string | null;
   finished_at?: string | null;
   discovered: number;

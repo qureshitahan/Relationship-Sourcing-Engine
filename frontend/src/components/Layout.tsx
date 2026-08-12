@@ -50,6 +50,11 @@ const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
         label: "LinkedIn Responses",
         hint: "Replies from your DMs",
       },
+      {
+        to: "/followers-linkedin",
+        label: "Followers LinkedIn",
+        hint: "DM your account's followers",
+      },
       { to: "/outreach", label: "5. Conversations", hint: "Replies & follow-ups" },
     ],
   },

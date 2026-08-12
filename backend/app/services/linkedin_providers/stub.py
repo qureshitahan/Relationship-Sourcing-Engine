@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Optional
 
 from app.services.linkedin_providers.base import (
+    FollowerPage,
+    FollowerRecord,
     InviteResult,
     LinkedInProfile,
     LinkedInProvider,
@@ -16,6 +18,17 @@ from app.services.linkedin_providers.base import (
     SendResult,
     public_identifier_from_url,
 )
+
+# Deterministic fake followers, so the Followers workflow (sync -> draft ->
+# approve -> send -> checkpoint) can be exercised with no Unipile account.
+_STUB_FOLLOWERS = [
+    ("Ayesha Khan", "VP Clinical Operations at Novara Bio"),
+    ("Daniel Okafor", "Founder & CEO, Helix Diagnostics"),
+    ("Priya Raman", "Head of Regulatory Affairs | Biotech"),
+    ("Marcus Feld", "Partner at Grantham Life Sciences"),
+    ("Lena Vasquez", "Chief Medical Officer at Corvid Therapeutics"),
+    ("Tom Baird", "Board Director | Former CEO, Ardent Pharma"),
+]
 
 
 class StubLinkedInProvider(LinkedInProvider):
@@ -32,13 +45,37 @@ class StubLinkedInProvider(LinkedInProvider):
             network_distance="SECOND_DEGREE",
         )
 
-    def send_message(self, *, provider_id: str, text: str) -> SendResult:
+    def send_message(
+        self, *, provider_id: str, text: str, inmail: bool = False
+    ) -> SendResult:
         return SendResult(
             sent=True,
             provider=self.name,
             chat_id=f"stub-chat-{uuid.uuid4().hex[:8]}",
             message_id=f"stub-msg-{uuid.uuid4().hex[:8]}",
         )
+
+    def supports_followers(self) -> bool:
+        return True
+
+    def list_followers(
+        self, *, cursor: Optional[str] = None, limit: int = 100
+    ) -> FollowerPage:
+        """A single fixed page of fake followers (stable ids across calls, so
+        re-syncing updates the same rows instead of inventing new people)."""
+        if cursor:
+            return FollowerPage(followers=[], cursor=None)
+        followers = [
+            FollowerRecord(
+                provider_id=f"stub-follower-{index}",
+                urn=f"urn:li:person:stub-{index}",
+                name=name,
+                headline=headline,
+                profile_url=f"https://www.linkedin.com/in/stub-follower-{index}/",
+            )
+            for index, (name, headline) in enumerate(_STUB_FOLLOWERS[:limit], start=1)
+        ]
+        return FollowerPage(followers=followers, cursor=None)
 
     def send_invitation(self, *, provider_id: str, note: str) -> InviteResult:
         return InviteResult(

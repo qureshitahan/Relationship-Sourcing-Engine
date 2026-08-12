@@ -54,6 +54,18 @@ class LinkedInMessage(Base, TimestampMixin):
     # (exactly today's single-account behaviour).
     from_account: Mapped[Optional[str]] = mapped_column(String(64))
 
+    # --- Followers module ---
+    # Set only for DMs to a follower of a connected account (see
+    # models/linkedin_follower.py). NULL on every prospect-driven message, which
+    # is how the existing LinkedIn module keeps its lists and counts unchanged:
+    # its queries filter follower_id IS NULL.
+    follower_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("linkedin_followers.id"), index=True
+    )
+    # Which outreach goal this follower DM belongs to, so the follower tabs can
+    # scope to one campaign without touching prospect messages.
+    follower_campaign_key: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+
     # Unipile ids captured on send, used to match replies.
     provider_chat_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255))

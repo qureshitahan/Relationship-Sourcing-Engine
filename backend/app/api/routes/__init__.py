@@ -11,6 +11,7 @@ from app.api.routes import (
     emails,
     insights,
     linkedin,
+    linkedin_followers,
     optimization,
     organizations,
     principals,
@@ -33,6 +34,7 @@ api_router.include_router(insights.router)
 api_router.include_router(emails.router)
 api_router.include_router(bulk_emails.router)
 api_router.include_router(linkedin.router)
+api_router.include_router(linkedin_followers.router)
 api_router.include_router(calls.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(optimization.router)

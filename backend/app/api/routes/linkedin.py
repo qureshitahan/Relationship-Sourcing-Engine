@@ -201,8 +201,15 @@ def list_messages(
     limit: int = Query(50, le=1000),
     offset: int = 0,
 ):
-    query = select(LinkedInMessage)
-    count_query = select(func.count()).select_from(LinkedInMessage)
+    # Prospect-driven messages only. Follower DMs live in the same table but are
+    # owned by the Followers module and have their own page, tabs and counts —
+    # excluding them here is what keeps this list byte-for-byte what it was.
+    query = select(LinkedInMessage).where(LinkedInMessage.follower_id.is_(None))
+    count_query = (
+        select(func.count())
+        .select_from(LinkedInMessage)
+        .where(LinkedInMessage.follower_id.is_(None))
+    )
     if discovery_run_id is not None:
         run_filter = Contact.discovery_run_id == discovery_run_id
         query = query.join(Contact, LinkedInMessage.contact_id == Contact.id).where(run_filter)
@@ -584,7 +591,11 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
     from app.services.linkedin_budget import active_send_account_id, linkedin_sent_today
 
     query = select(LinkedInMessage).where(
-        LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED])
+        LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]),
+        # Never pick up follower DMs. They are sent by the Followers module, which
+        # DMs only and checkpoints every send; routing one through here would send
+        # a connection invitation instead and bypass that checkpoint entirely.
+        LinkedInMessage.follower_id.is_(None),
     )
     if payload.discovery_run_id is not None:
         query = query.join(Contact, LinkedInMessage.contact_id == Contact.id).where(

@@ -13,6 +13,11 @@ from app.models.company import Company
 from app.models.contact import Contact
 from app.models.discovery_run import DiscoveryRun
 from app.models.email_draft import EmailDraft
+from app.models.linkedin_follower import (
+    FollowerSendStatus,
+    LinkedInFollower,
+    LinkedInFollowerSend,
+)
 from app.models.linkedin_message import LinkedInMessage
 from app.models.principal import Principal
 from app.models.principal_document import PrincipalDocument
@@ -37,6 +42,9 @@ __all__ = [
     "Contact",
     "DiscoveryRun",
     "EmailDraft",
+    "FollowerSendStatus",
+    "LinkedInFollower",
+    "LinkedInFollowerSend",
     "LinkedInMessage",
     "Principal",
     "PrincipalDocument",

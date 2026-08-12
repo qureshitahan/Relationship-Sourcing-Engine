@@ -8,6 +8,8 @@ from typing import Optional
 
 from app.core.config import settings
 from app.services.linkedin_providers.base import (
+    FollowerPage,
+    FollowerRecord,
     InviteResult,
     LinkedInProfile,
     LinkedInProvider,
@@ -55,6 +57,9 @@ __all__ = [
     "SendResult",
     "InviteResult",
     "ReplyResult",
+    "FollowerPage",
+    "FollowerRecord",
+    "ACTIVE_ACCOUNT_SETTING",
     "get_linkedin_provider",
     "public_identifier_from_url",
 ]

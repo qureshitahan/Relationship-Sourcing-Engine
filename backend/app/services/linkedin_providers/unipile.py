@@ -19,6 +19,7 @@ Docs: https://developer.unipile.com/docs/getting-started
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -27,6 +28,8 @@ import httpx
 
 from app.core.config import settings
 from app.services.linkedin_providers.base import (
+    FollowerPage,
+    FollowerRecord,
     InviteResult,
     LinkedInProfile,
     LinkedInProvider,
@@ -38,6 +41,25 @@ from app.services.linkedin_providers.base import (
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 30.0
+
+# Largest followers page Unipile actually accepts. The API reference says 100 for
+# your own profile, but anything above 50 is rejected outright with
+# 400 errors/limit_too_high (measured against api28: 60/80/90/100 all fail, 50
+# succeeds). Sending 100 made every sync fail with zero followers imported.
+FOLLOWERS_PAGE_LIMIT = 50
+
+
+def _is_unreachable(status_code: int, body: str) -> bool:
+    """True when LinkedIn refused the message because the person can't be reached.
+
+    Unipile answers 422 ``user_unreachable`` when the recipient is neither a
+    connection nor an open profile and no InMail is available. That is a clean
+    "skip this person", not a failure worth retrying — every other error is.
+    """
+    if status_code != 422:
+        return False
+    low = (body or "").lower()
+    return "unreachable" in low or "cannot_resend" in low or "insufficient" in low
 
 
 class UnipileLinkedInProvider(LinkedInProvider):
@@ -124,7 +146,9 @@ class UnipileLinkedInProvider(LinkedInProvider):
 
     # --- sending ---
 
-    def send_message(self, *, provider_id: str, text: str) -> SendResult:
+    def send_message(
+        self, *, provider_id: str, text: str, inmail: bool = False
+    ) -> SendResult:
         if not self._configured():
             return SendResult(sent=False, provider=self.name, error="Unipile not configured.")
         # /chats requires multipart/form-data; (None, value) tuples send plain
@@ -134,6 +158,12 @@ class UnipileLinkedInProvider(LinkedInProvider):
             ("attendees_ids", (None, provider_id)),
             ("text", (None, text)),
         ]
+        if inmail:
+            # Nested options travel as a JSON-encoded form field. Only sent when
+            # asked for, so the default request body is byte-for-byte unchanged.
+            files.append(
+                ("linkedin", (None, json.dumps({"api": "classic", "inmail": True})))
+            )
         url = f"{self.base_url}/chats"
         try:
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
@@ -148,6 +178,7 @@ class UnipileLinkedInProvider(LinkedInProvider):
             return SendResult(
                 sent=False, provider=self.name,
                 error=f"Unipile {resp.status_code}: {resp.text[:200]}",
+                unreachable=_is_unreachable(resp.status_code, resp.text),
             )
         d = resp.json() or {}
         return SendResult(
@@ -206,6 +237,65 @@ class UnipileLinkedInProvider(LinkedInProvider):
             sent=False, provider=self.name,
             error=f"Unipile {resp.status_code}: {body[:200]}",
         )
+
+    # --- followers ---
+
+    def supports_followers(self) -> bool:
+        return self._configured()
+
+    def list_followers(
+        self, *, cursor: Optional[str] = None, limit: int = FOLLOWERS_PAGE_LIMIT
+    ) -> FollowerPage:
+        """One page of the connected account's OWN followers.
+
+        No ``user_id`` is sent, which is what makes this the account's own
+        follower list rather than some other profile's. Pagination is by
+        ``cursor``; the last page comes back without one.
+        """
+        if not self._configured():
+            return FollowerPage(supported=False, error="Unipile not configured.")
+        params: dict = {
+            "account_id": self.account_id,
+            "limit": max(1, min(int(limit), FOLLOWERS_PAGE_LIMIT)),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
+                resp = client.get(
+                    f"{self.base_url}/users/followers", headers=self._headers(), params=params
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Unipile list_followers network error: %s", exc)
+            return FollowerPage(error=str(exc), network_error=True)
+        if resp.status_code >= 400:
+            logger.warning(
+                "Unipile list_followers failed (%s): %s", resp.status_code, resp.text[:300]
+            )
+            return FollowerPage(
+                error=f"Unipile {resp.status_code}: {resp.text[:200]}"
+            )
+        data = resp.json() or {}
+        items = data.get("items") or data.get("data") or []
+        followers: list[FollowerRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            provider_id = (item.get("id") or item.get("provider_id") or "").strip()
+            if not provider_id:
+                # Without a member id there is nobody to address the DM to.
+                continue
+            followers.append(
+                FollowerRecord(
+                    provider_id=provider_id,
+                    urn=item.get("urn"),
+                    name=(item.get("name") or "").strip() or None,
+                    headline=(item.get("headline") or "").strip() or None,
+                    profile_url=item.get("profile_url") or item.get("public_profile_url"),
+                    picture_url=item.get("profile_picture_url"),
+                )
+            )
+        return FollowerPage(followers=followers, cursor=data.get("cursor") or None)
 
     # --- account management (connect / list) ---
 

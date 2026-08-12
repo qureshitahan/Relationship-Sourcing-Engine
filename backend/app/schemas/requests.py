@@ -255,6 +255,43 @@ class LinkedInSendOpenRequest(BaseModel):
     discovery_run_id: Optional[int] = None
 
 
+class FollowerSyncRequest(BaseModel):
+    """Refresh the follower roster of a connected LinkedIn account.
+
+    ``account_id`` omitted = the currently selected account.
+    """
+
+    account_id: Optional[str] = None
+
+
+class FollowerDraftRequest(BaseModel):
+    """Draft DMs for the eligible followers of the selected account.
+
+    ``message`` is the exact text to send — it is used verbatim, with only
+    ``Hi <first name>,`` prepended per follower. No model rewrites it. It also
+    does double duty: hashed, it is the campaign half of the duplicate-prevention
+    key, so editing the message starts a new campaign.
+    """
+
+    message: str
+    principal_id: int
+    account_id: Optional[str] = None
+    # Draft at most this many. Each draft is a model call while only
+    # ``linkedin_daily_send_cap`` can go out per day, so drafting the whole
+    # follower list at once would spend a lot to produce drafts that sit unsent.
+    # Omitted = every eligible follower (the original behaviour).
+    limit: Optional[int] = None
+
+
+class FollowerActionRequest(BaseModel):
+    """Approve / send all follower DMs for one message campaign."""
+
+    message: str
+    account_id: Optional[str] = None
+    # False approves nothing and sends only what is already approved.
+    approve_first: bool = True
+
+
 class AgentRunRequest(BaseModel):
     """Trigger an autonomous agent run now for a principal."""
 

@@ -220,6 +220,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # Which connected LinkedIn account (Unipile account_id) sent this, so
         # reply/invite tracking polls with the right account when several are used.
         "from_account": "VARCHAR(64)",
+        # Followers module. NULL on every prospect-driven message; the existing
+        # LinkedIn queries filter on that to stay unchanged.
+        "follower_id": "INTEGER",
+        "follower_campaign_key": "VARCHAR(64)",
     },
 }
 
