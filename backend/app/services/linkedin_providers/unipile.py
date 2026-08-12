@@ -19,7 +19,6 @@ Docs: https://developer.unipile.com/docs/getting-started
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -159,11 +158,14 @@ class UnipileLinkedInProvider(LinkedInProvider):
             ("text", (None, text)),
         ]
         if inmail:
-            # Nested options travel as a JSON-encoded form field. Only sent when
-            # asked for, so the default request body is byte-for-byte unchanged.
-            files.append(
-                ("linkedin", (None, json.dumps({"api": "classic", "inmail": True})))
-            )
+            # Nested options travel as BRACKETED form fields, not a JSON blob.
+            # Sending {"api":"classic","inmail":true} as one `linkedin` field is
+            # rejected with 400 errors/invalid_parameters ("Extra fields for
+            # Linkedin products"), which silently failed every InMail send;
+            # `linkedin[api]` + `linkedin[inmail]` passes schema validation.
+            # Only added when asked for, so an ordinary DM's body is unchanged.
+            files.append(("linkedin[api]", (None, "classic")))
+            files.append(("linkedin[inmail]", (None, "true")))
         url = f"{self.base_url}/chats"
         try:
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:

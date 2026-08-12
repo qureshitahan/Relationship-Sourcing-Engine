@@ -373,10 +373,14 @@ def pause_campaign(
     Always stops any in-flight run and turns off daily automation. By default
     also cancels queued emails; pass ``keep_scheduled=true`` to let the existing
     send queue finish.
+
+    Only ``paused`` is set here, not ``enabled`` — the scheduler already skips
+    any campaign where either is true, so ``paused`` alone fully blocks daily
+    automation. Leaving ``enabled`` untouched means resume can restore it
+    exactly as it was instead of guessing it should always come back on.
     """
     config = _get_campaign(db, campaign_id)
     config.paused = True
-    config.enabled = False
     request_run_cancel(db, campaign_id)
     if keep_scheduled:
         result = UnscheduleResult()
@@ -407,14 +411,18 @@ def resume_campaign(
     ),
     db: Session = Depends(get_db),
 ):
-    """Lift a pause, turn daily automation back on, and re-queue cancelled mail.
+    """Lift a pause and re-queue cancelled mail.
+
+    Only clears ``paused``. ``enabled`` (the "run automatically every day"
+    setting) is left exactly as the operator set it — a campaign that was
+    created or edited with daily automation off stays off after a pause/resume
+    cycle instead of silently being turned back on.
 
     Emails pulled back by a full pause are scheduled again with the same
     per-recipient timing the agent uses.
     """
     config = _get_campaign(db, campaign_id)
     config.paused = False
-    config.enabled = True
     db.flush()
     scheduled = reschedule_campaign_emails(db, campaign_id) if reschedule else 0
     log_action(

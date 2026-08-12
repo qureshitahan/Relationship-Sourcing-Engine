@@ -737,6 +737,10 @@ def send_one(
         return "skipped"
 
     claim.status = FollowerSendStatus.FAILED
+    # Record which path was attempted even on failure. Without this a failed send
+    # was indistinguishable from one that never got past the profile lookup, which
+    # made a broken InMail request look like a resolve problem.
+    claim.reach = reach
     claim.error = result.error or "LinkedIn send failed"
     msg.error = claim.error
     db.commit()
