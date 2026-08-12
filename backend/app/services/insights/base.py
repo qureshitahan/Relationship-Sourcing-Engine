@@ -14,6 +14,28 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 
+def fit_complete_sentences(text: str, limit: int) -> str:
+    """Whole sentences up to ``limit`` chars; a hard word-boundary cut (with an
+    ellipsis) only as a last resort, so a short note never ends mid-word.
+
+    Used as a safety net around connection-note generation — the primary path
+    is a model/template that writes directly to the limit, but this keeps any
+    overshoot from ending on an incomplete thought.
+    """
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    out = ""
+    for chunk in flat.replace("? ", "?|").replace("! ", "!|").replace(". ", ".|").split("|"):
+        candidate = (out + " " + chunk).strip() if out else chunk
+        if len(candidate) > limit:
+            break
+        out = candidate
+    if not out:
+        out = flat[: max(0, limit - 1)].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
+    return out.strip()
+
+
 @dataclass
 class InsightResult:
     relevance_score: float
@@ -140,6 +162,47 @@ class InsightProvider(ABC):
         return OutreachResult(
             subject="", body=body, generated_by=f"{self.name} (template followup)"
         )
+
+    def generate_connection_note(
+        self,
+        *,
+        principal: dict,
+        person: Optional[dict] = None,
+        organization: Optional[dict] = None,
+        insight: Optional[dict] = None,
+        message_body: Optional[str] = None,
+        limit: int = 220,
+    ) -> str:
+        """Write a short, complete LinkedIn connection-invitation note.
+
+        This is NOT a truncation of ``message_body`` — it is composed as its
+        own short punch-line: a specific hook plus one line of relevance,
+        fitted to ``limit`` as a complete thought. Default is a deterministic
+        template so the pipeline works without an API key; the Anthropic
+        provider overrides this with a personalized, model-written note.
+        """
+        name = ((person or {}).get("name") or "").strip()
+        first = name.split()[0] if name else ""
+        org = ((organization or {}).get("name") or "").strip()
+        insight = insight or {}
+        hook = None
+        for source in (insight.get("talking_points"), insight.get("key_facts")):
+            if source:
+                hook = str(source[0]).strip()
+                break
+        if not hook:
+            title = ((person or {}).get("title") or "").strip()
+            if title and org:
+                hook = f"Your work as {title} at {org} caught my eye."
+            elif org:
+                hook = f"{org}'s work caught my eye."
+            else:
+                hook = "Your background caught my eye."
+        if hook and hook[-1] not in ".!?":
+            hook = f"{hook}."
+        greeting = f"Hi {first}, " if first else ""
+        note = f"{greeting}{hook} Would love to connect."
+        return fit_complete_sentences(note, limit)
 
     def generate_reply(
         self,

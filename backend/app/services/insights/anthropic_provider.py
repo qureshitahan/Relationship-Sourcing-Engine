@@ -20,6 +20,7 @@ from app.services.insights.base import (
     InsightProvider,
     InsightResult,
     OutreachResult,
+    fit_complete_sentences,
 )
 from app.services.insights.outreach_prompts import OUTREACH_SINGLE_SYSTEM
 from app.services.insights.stub import StubInsightProvider
@@ -106,6 +107,28 @@ _FOLLOWUP_SYSTEM = (
     "- Do NOT add a sign-off, name, or signature. End on the question.\n"
     "- NEVER use em or en dashes. No links. One ask only. Do not invent facts.\n"
     "Respond with ONLY JSON: {\"body\": \"...\"}."
+)
+
+_CONNECTION_NOTE_SYSTEM = (
+    "You write a SHORT LinkedIn connection-invitation note on behalf of the "
+    "PRINCIPAL, addressed to PERSON. This note is NOT a shortened copy of the "
+    "full outreach message you're given for context — it is its own short "
+    "punch-line: a specific, attention-grabbing hook about THIS person or "
+    "company, plus one line on why connecting would be relevant to them, "
+    "drawn from the single strongest idea in that message.\n\n"
+    "VOICE: You ARE the principal, writing in the FIRST PERSON ('I', 'my'). "
+    "Sound human, warm, and specific — never generic or templated.\n\n"
+    "HARD RULES:\n"
+    "- The note MUST fit within the given character limit (including spaces "
+    "and punctuation). Count carefully before answering.\n"
+    "- It MUST read as a complete thought. Never end mid-sentence or mid-word, "
+    "and never rely on the limit to cut it off for you.\n"
+    "- Prioritize the single most important insight/value from the message; "
+    "do not try to cram in everything.\n"
+    "- No hashtags, no links, no 'I hope this finds you well' filler, no "
+    "generic 'I'd love to connect' with nothing specific before it.\n"
+    "- No em or en dashes.\n\n"
+    "Respond with ONLY JSON: {\"note\": \"...\"}."
 )
 
 _REPLY_SYSTEM = (
@@ -465,6 +488,56 @@ class AnthropicInsightProvider(InsightProvider):
             body=_clean_outreach_body(data["body"]),
             generated_by=f"{self.name}:{model}",
         )
+
+    def generate_connection_note(
+        self,
+        *,
+        principal: dict,
+        person: Optional[dict] = None,
+        organization: Optional[dict] = None,
+        insight: Optional[dict] = None,
+        message_body: Optional[str] = None,
+        limit: int = 220,
+    ) -> str:
+        if not self.api_key:
+            return self._fallback.generate_connection_note(
+                principal=principal, person=person, organization=organization,
+                insight=insight, message_body=message_body, limit=limit,
+            )
+
+        user = (
+            "PRINCIPAL:\n"
+            + json.dumps(principal, indent=2, default=str)
+            + "\n\nPERSON (recipient):\n"
+            + json.dumps(person or {}, indent=2, default=str)
+            + "\n\nORGANIZATION:\n"
+            + json.dumps(organization or {}, indent=2, default=str)
+            + "\n\nSTRATEGIC INSIGHT:\n"
+            + json.dumps(insight or {}, indent=2, default=str)
+            + "\n\nFULL OUTREACH MESSAGE (context only — do not quote or shorten "
+            "this verbatim; pull out its single strongest idea):\n"
+            + (message_body or "")
+            + f"\n\nCharacter limit for the note: {limit} (hard maximum, including "
+            "spaces and punctuation)."
+            + '\n\nReturn JSON: {"note": "..."}.'
+        )
+        model = optimization.draft_model()
+        data = self._complete_json(_CONNECTION_NOTE_SYSTEM, user, model=model)
+        note = ((data or {}).get("note") or "").strip()
+        if not note:
+            result = self._fallback.generate_connection_note(
+                principal=principal, person=person, organization=organization,
+                insight=insight, message_body=message_body, limit=limit,
+            )
+            mark_using_stub(
+                "anthropic", reason="Anthropic connection-note draft failed; using stub template"
+            )
+            return result
+        if len(note) > limit:
+            # Model overshot the hard limit — trim on a sentence/word boundary
+            # rather than risk LinkedIn rejecting (or us hard-cutting) mid-word.
+            note = fit_complete_sentences(note, limit)
+        return note
 
     def generate_followup(
         self,

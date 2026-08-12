@@ -246,6 +246,16 @@ class LinkedInMessageOut(ORMModel):
     discovery_run_id: Optional[int] = None
 
 
+class LinkedInInviteStats(BaseModel):
+    """Connection-invitation funnel, derived from the stored message rows."""
+
+    invites_sent: int
+    invites_accepted: int
+    invites_pending: int
+    # Accepted / sent as a percentage (0-100), for the progress bar.
+    acceptance_rate: float
+
+
 class CallOut(ORMModel):
     id: int
     principal_id: Optional[int] = None

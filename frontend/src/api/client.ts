@@ -11,6 +11,7 @@ import type {
   BulkLookup,
   BulkRecipient,
   CampaignCreatePayload,
+  CampaignBulkSend,
   CampaignDashboard,
   CampaignDetail,
   CampaignList,
@@ -26,7 +27,9 @@ import type {
   IndexFileResult,
   LinkedInAccount,
   LinkedInAccountsResponse,
+  LinkedInInviteStats,
   LinkedInMessage,
+  LinkedInSendProgress,
   Mailbox,
   OptimizationState,
   OptimizationUpdate,
@@ -532,6 +535,11 @@ export const selectLinkedInAccount = (accountId: string) =>
     .then((r) => r.data);
 export const listLinkedInMessages = (params: LinkedInFilters = {}) =>
   api.get<Page<LinkedInMessage>>("/api/linkedin", { params }).then((r) => r.data);
+/** Invitation funnel (sent vs accepted). Deliberately ignores the status tab —
+ * these are totals for the whole (optionally run-scoped) set. */
+export const getLinkedInStats = (
+  params: Omit<LinkedInFilters, "status" | "limit" | "offset"> = {}
+) => api.get<LinkedInInviteStats>("/api/linkedin/stats", { params }).then((r) => r.data);
 export const generateLinkedIn = (payload: {
   principal_id: number;
   contact_id: number;
@@ -593,6 +601,14 @@ export const sendOpenLinkedIn = (discoveryRunId?: number) =>
       { discovery_run_id: discoveryRunId },
       { timeout: 60000 }
     )
+    .then((r) => r.data);
+/** Live progress of the bulk send, so the UI can offer Stop while it runs. */
+export const getLinkedInSendProgress = () =>
+  api.get<LinkedInSendProgress>("/api/linkedin/send-progress").then((r) => r.data);
+/** Halt the running bulk send after the message currently in flight. */
+export const stopLinkedInSend = () =>
+  api
+    .post<{ stopped: boolean; message: string }>("/api/linkedin/stop-send")
     .then((r) => r.data);
 export const checkLinkedInUpdates = () =>
   api
@@ -739,10 +755,12 @@ export const createCampaign = (payload: CampaignCreatePayload) =>
     .then((r) => r.data);
 export const updateCampaign = (id: number, payload: CampaignUpdatePayload) =>
   api.put<CampaignDetail>(`/api/campaigns/${id}`, payload).then((r) => r.data);
-export const runCampaign = (id: number, resume = false) =>
+export const runCampaign = (id: number, resume = false, skipDiscovery = false) =>
   api
     .post<CampaignDetail>(`/api/campaigns/${id}/run`, null, {
-      params: resume ? { resume: true } : {},
+      params: resume
+        ? { resume: true, ...(skipDiscovery ? { skip_discovery: true } : {}) }
+        : {},
     })
     .then((r) => r.data);
 export const cancelCampaignRun = (id: number) =>
@@ -761,6 +779,20 @@ export const scheduleApprovedEmails = (id: number) =>
     .then((r) => r.data);
 export const deleteCampaign = (id: number) =>
   api.delete(`/api/campaigns/${id}`).then(() => undefined);
+// Bulk "Approve & send all" for a campaign. The loop runs on the server, so it
+// keeps going once started — poll `getCampaignDraftSend` for progress.
+export const startCampaignDraftSend = (id: number) =>
+  api
+    .post<CampaignBulkSend>(`/api/campaigns/${id}/send-drafts`)
+    .then((r) => r.data);
+export const getCampaignDraftSend = (id: number) =>
+  api
+    .get<CampaignBulkSend | null>(`/api/campaigns/${id}/send-drafts`)
+    .then((r) => r.data);
+export const cancelCampaignDraftSend = (id: number) =>
+  api
+    .post<CampaignBulkSend>(`/api/campaigns/${id}/send-drafts/cancel`)
+    .then((r) => r.data);
 export const listAgentVariants = (principalId?: number) =>
   api
     .get<AgentVariantsResponse>("/api/agent/variants", {

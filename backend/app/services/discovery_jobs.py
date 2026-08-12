@@ -815,6 +815,7 @@ def _linkedin_draft_worker(
         by_id = {c.id: c for c in to_draft}
         done = 0
         generated = 0
+        cancelled = False
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(_linkedin_draft_one, c.id, principal.id, goal): c.id
@@ -822,6 +823,7 @@ def _linkedin_draft_worker(
             }
             for future in as_completed(futures):
                 if _cancelled(db, run):
+                    cancelled = True
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
                 contact_id, content, insight_id = future.result()
@@ -862,13 +864,16 @@ def _linkedin_draft_worker(
             )
             db.commit()
         skipped = len(approved) - len(to_draft)
-        _finish_job(
-            db,
-            run,
-            JOB_DONE,
-            f"{skipped} approved prospect(s) skipped — no personal LinkedIn profile, "
-            "or a message already exists." if skipped else None,
-        )
+        # A stopped run must never read as a completed one.
+        notes = []
+        if cancelled:
+            notes.append("Stopped early — the remaining prospects were not drafted.")
+        if skipped:
+            notes.append(
+                f"{skipped} approved prospect(s) skipped — no personal LinkedIn "
+                "profile, or a message already exists."
+            )
+        _finish_job(db, run, JOB_DONE, " ".join(notes) if notes else None)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Bulk LinkedIn draft worker failed for run %s", run_id)
         _fail(db, run_id, str(exc))
@@ -1446,13 +1451,21 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
     from datetime import datetime
 
     from app.api.routes.linkedin import SendError, perform_linkedin_send
+    from app.services import linkedin_send_progress as progress
 
     db = SessionLocal()
+    stopped = False
     try:
         delay = max(0.0, float(settings.bulk_linkedin_send_delay_seconds))
         sent = 0
         failed = 0
+        done = 0
+        progress.start(len(message_ids))
         for index, mid in enumerate(message_ids):
+            # Checked before each send, so Stop never leaves a message half-sent.
+            if progress.stop_requested():
+                stopped = True
+                break
             msg = db.get(LinkedInMessage, mid)
             if msg is None or msg.status not in (
                 LinkedInStatus.DRAFT,
@@ -1477,15 +1490,24 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
                 db.rollback()
                 failed += 1
                 logger.exception("Bulk approve+send crashed for message %s", mid)
+            done += 1
+            progress.write_progress(done=done, sent=sent, failed=failed)
             if delay and index < len(message_ids) - 1:
-                time.sleep(delay)
+                if progress.sleep_unless_stopped(delay):
+                    stopped = True
+                    break
         logger.info(
-            "LinkedIn bulk approve+send: %s sent, %s failed of %s",
-            sent, failed, len(message_ids),
+            "LinkedIn bulk approve+send: %s sent, %s failed of %s%s",
+            sent, failed, len(message_ids), " (stopped early)" if stopped else "",
         )
     except Exception:  # noqa: BLE001 - never let the worker die silently
         logger.exception("LinkedIn bulk message-send worker failed")
     finally:
+        # Always clear "running", or the UI would offer Stop on a dead job.
+        try:
+            progress.finish(stopped=stopped)
+        except Exception:  # noqa: BLE001 - progress is reporting, not the job
+            logger.exception("Failed to close LinkedIn bulk-send progress record")
         db.close()
 
 

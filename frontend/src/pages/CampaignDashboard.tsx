@@ -3,12 +3,14 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  cancelCampaignDraftSend,
   cancelCampaignRun,
   pauseCampaign,
   resumeCampaign,
   scheduleApprovedEmails,
   deleteCampaign,
   getCampaign,
+  getCampaignDraftSend,
   getCampaignProspects,
   listAgentCopyVariants,
   listAgentVariants,
@@ -16,13 +18,20 @@ import {
   runCampaign,
   sendEmail,
   setEmailStatus,
+  startCampaignDraftSend,
   updateCampaign,
 } from "../api/client";
 import { Badge, Button, Card, Loading, ScoreBar } from "../components/ui";
 import { usePersistedState } from "../hooks/usePersistedState";
 import { apiErrorMessage } from "../utils/apiError";
 import { relativeTime } from "../utils/time";
-import type { CampaignDetail, CampaignProspect, CampaignRunSnapshot, EmailDraft } from "../types";
+import type {
+  CampaignBulkSend,
+  CampaignDetail,
+  CampaignProspect,
+  CampaignRunSnapshot,
+  EmailDraft,
+} from "../types";
 
 type Tone = "green" | "blue" | "amber" | "slate" | "purple";
 
@@ -85,6 +94,117 @@ function pipelineTone(status?: string | null): Tone {
   return "slate";
 }
 
+/** Label, counts and a bar — one row of the run panel's stage progress. */
+function ProgressRow({
+  label,
+  done,
+  total,
+  unit,
+  sub,
+  tone = "sky",
+}: {
+  label: string;
+  done: number;
+  total: number;
+  unit: string;
+  sub?: string;
+  tone?: "sky" | "violet";
+}) {
+  // Floor, not round: 199 of 200 must not read as 100% complete when one was
+  // skipped. Only an actually-finished stage shows 100.
+  const pct = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
+  return (
+    <div className="mt-2 max-w-sm">
+      <div className="flex items-center justify-between text-[11px] text-slate-600">
+        <span className="font-medium">{label}</span>
+        <span className="tabular-nums">
+          {done}/{total} {unit} · {pct}%
+        </span>
+      </div>
+      <div
+        className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-200"
+        role="progressbar"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={done}
+      >
+        <div
+          className={`h-full rounded-full transition-all ${
+            tone === "violet" ? "bg-violet-500" : "bg-sky-500"
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {sub ? (
+        <p className="mt-1 text-[11px] text-slate-500 tabular-nums">{sub}</p>
+      ) : null}
+    </div>
+  );
+}
+
+/** How far relevance research has got through the people this run found.
+ *
+ *  "Scored" is qualified + rejected, not qualified alone: a prospect rejected for
+ *  a low score was still researched, so counting only the qualified ones
+ *  understates the work — and on a run where most fall below the threshold it
+ *  would read as almost no progress while every one of them had been scored.
+ *
+ *  Rendered for finished runs too, where it is the final split rather than
+ *  progress: a run that was cancelled or interrupted part-way shows exactly how
+ *  much of its research actually happened. */
+function RelevanceProgress({ run }: { run: CampaignRunSnapshot }) {
+  const found = run.discovered ?? 0;
+  if (found <= 0) return null;
+  const qualified = run.qualified ?? 0;
+  const rejected = run.rejected ?? 0;
+  const scored = Math.min(found, qualified + rejected);
+  return (
+    <ProgressRow
+      label="Relevance research"
+      done={scored}
+      total={found}
+      unit="scored"
+      sub={
+        rejected > 0
+          ? `${qualified} qualified · ${rejected} below the threshold`
+          : undefined
+      }
+    />
+  );
+}
+
+/** How many emails have been written for the prospects this run qualified.
+ *
+ *  Qualified is the denominator because that is the draft stage's work list — it
+ *  writes one email per qualified prospect (``orchestrator`` drafts from
+ *  ``qualified_ids``). Discovered would be wrong: nobody drafts for a prospect
+ *  the research rejected.
+ *
+ *  Once the run is finished any shortfall is a skip, not pending work, so it is
+ *  named as such — a prospect whose email could not be revealed never gets a
+ *  draft, and that is otherwise only visible in the run's error list. */
+function DraftProgress({ run, live }: { run: CampaignRunSnapshot; live?: boolean }) {
+  const qualified = run.qualified ?? 0;
+  if (qualified <= 0) return null;
+  const drafted = Math.min(qualified, run.drafted ?? 0);
+  const missing = qualified - drafted;
+  return (
+    <ProgressRow
+      label="Drafts written"
+      done={drafted}
+      total={qualified}
+      unit="drafts"
+      tone="violet"
+      sub={
+        !live && missing > 0
+          ? `${missing} skipped — see the issues above`
+          : undefined
+      }
+    />
+  );
+}
+
 function RunProgress({
   run,
   live,
@@ -134,6 +254,8 @@ function RunProgress({
             {run.drafted ? ` · ${run.drafted} drafted` : ""}
           </p>
         )}
+        <RelevanceProgress run={run} />
+        <DraftProgress run={run} live={live} />
       </div>
 
       {stages.length > 0 && (
@@ -489,6 +611,77 @@ function EditPanel({
   );
 }
 
+/** Slim progress bar — same markup as the LinkedIn page's acceptance bar.
+ *
+ *  Tracks ``done`` (drafts attempted) rather than ``sent``, so the bar keeps
+ *  moving through a draft that failed instead of appearing to stall on it. */
+function BulkSendBar({
+  done,
+  total,
+  tone = "amber",
+}: {
+  done: number;
+  total: number;
+  tone?: "amber" | "rose";
+}) {
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return (
+    <div
+      className="mt-1.5 h-2 w-full max-w-sm overflow-hidden rounded-full bg-amber-200/70"
+      role="progressbar"
+      aria-label="Approve and send all progress"
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-valuenow={done}
+    >
+      <div
+        className={`h-full rounded-full transition-all ${
+          tone === "rose" ? "bg-rose-500" : "bg-amber-600"
+        }`}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+/** Outcome of the last server-side bulk send, in the panel header.
+ *
+ *  Shown rather than announced through a toast so it survives a page refresh —
+ *  the whole point of moving the loop server-side is that the browser no longer
+ *  has to be present for it. */
+function BulkSendStatus({ bulk }: { bulk: CampaignBulkSend }) {
+  if (bulk.status === "running") {
+    return (
+      <div>
+        <p className="mt-1 text-xs font-medium text-amber-900">
+          Sending on the server — {bulk.done} of {bulk.total} done
+          {bulk.failed > 0 ? `, ${bulk.failed} failed` : ""}.
+          {bulk.cancel_requested ? " Stopping…" : " You can close this page."}
+        </p>
+        <BulkSendBar done={bulk.done} total={bulk.total} />
+      </div>
+    );
+  }
+  if (bulk.status === "interrupted") {
+    return (
+      <div>
+        <p className="mt-1 text-xs font-medium text-rose-700">
+          {bulk.error} Sent {bulk.sent} of {bulk.total} before it stopped.
+        </p>
+        <BulkSendBar done={bulk.done} total={bulk.total} tone="rose" />
+      </div>
+    );
+  }
+  const label = bulk.status === "cancelled" ? "Stopped" : "Finished";
+  return (
+    <p className="mt-1 text-xs text-amber-800/80">
+      {label}: {bulk.sent} sent
+      {bulk.failed > 0 ? `, ${bulk.failed} failed` : ""} of {bulk.total}.
+      {bulk.errors.length > 0 ? ` ${bulk.errors.slice(0, 2).join("; ")}` : ""}
+    </p>
+  );
+}
+
 function PendingApproval({
   campaign,
   onChanged,
@@ -498,13 +691,24 @@ function PendingApproval({
 }) {
   const qc = useQueryClient();
   const [busyId, setBusyId] = useState<number | null>(null);
-  const [sendingAll, setSendingAll] = useState(false);
+  const [starting, setStarting] = useState(false);
+
+  // The bulk send runs on the server, so this only watches it. Poll while it is
+  // working; stop polling once it settles.
+  const { data: bulk } = useQuery({
+    queryKey: ["campaign", campaign.id, "bulk-send"],
+    queryFn: () => getCampaignDraftSend(campaign.id),
+    refetchInterval: (q) =>
+      (q.state.data as CampaignBulkSend | null)?.status === "running" ? 3000 : false,
+  });
+  const bulkRunning = bulk?.status === "running";
 
   const { data: drafts, isLoading } = useQuery({
     queryKey: ["campaign", campaign.id, "drafts"],
     queryFn: () =>
       listEmails({ campaign_id: campaign.id, status: "draft", limit: 100 }),
-    refetchInterval: campaign.status === "running" ? 6000 : false,
+    // Also poll while a bulk send is working, so the list empties as it goes.
+    refetchInterval: campaign.status === "running" || bulkRunning ? 6000 : false,
   });
 
   const refresh = () => {
@@ -530,41 +734,43 @@ function PendingApproval({
     }
   };
 
+  // Hands the whole batch to the server and returns. The loop used to run here —
+  // two requests per draft — so it only ever covered the 100 drafts this panel had
+  // loaded, and closing the tab stopped it partway with no way to tell how far it
+  // got. The server works through every draft in the campaign instead, and the
+  // poll above reports progress.
   const sendAll = async () => {
-    if (!drafts?.items.length) return;
-    if (!window.confirm(`Approve and send all ${drafts.items.length} drafts now?`)) return;
-    setSendingAll(true);
-    let ok = 0;
-    // Reasons, not just a count. This used to swallow every failure, so a run
-    // that sent 5 of 50 said exactly that and nothing about the other 45 — the
-    // same drafts then sat there with no way to tell why they had not gone.
-    const failures: string[] = [];
-    for (const d of drafts.items) {
-      try {
-        await setEmailStatus(d.id, "approved");
-        await sendEmail(d.id);
-        ok += 1;
-      } catch (e) {
-        const detail =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-        failures.push(`${d.contact_name ?? `#${d.id}`}: ${detail ?? "send failed"}`);
-      }
+    const waiting = drafts?.total ?? 0;
+    if (!waiting) return;
+    if (!window.confirm(`Approve and send all ${waiting} drafts now?`)) return;
+    setStarting(true);
+    try {
+      await startCampaignDraftSend(campaign.id);
+      qc.invalidateQueries({ queryKey: ["campaign", campaign.id, "bulk-send"] });
+      onChanged(`Sending ${waiting} drafts — this keeps going if you leave the page.`);
+    } catch (e) {
+      onChanged(apiErrorMessage(e, "Could not start sending."));
+    } finally {
+      setStarting(false);
     }
-    setSendingAll(false);
-    const total = drafts.items.length;
-    onChanged(
-      failures.length
-        ? `Sent ${ok} of ${total}. ${failures.length} failed — ${failures
-            .slice(0, 3)
-            .join("; ")}${failures.length > 3 ? `; and ${failures.length - 3} more` : ""}`
-        : `Sent all ${total} drafts.`
-    );
-    refresh();
+  };
+
+  const stopSending = async () => {
+    if (!window.confirm("Stop sending? Emails not yet sent stay as drafts.")) return;
+    try {
+      await cancelCampaignDraftSend(campaign.id);
+      qc.invalidateQueries({ queryKey: ["campaign", campaign.id, "bulk-send"] });
+      onChanged("Stopping after the email currently going out.");
+    } catch (e) {
+      onChanged(apiErrorMessage(e, "Could not stop sending."));
+    }
   };
 
   if (campaign.auto_send) return null;
 
-  const count = drafts?.items.length ?? campaign.pending_drafts;
+  // ``total`` is every draft waiting in this campaign, not just the page loaded
+  // below — the old ``items.length`` read "100 waiting" while 199 were queued.
+  const count = drafts?.total ?? campaign.pending_drafts;
 
   return (
     <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/60 shadow-sm">
@@ -578,12 +784,36 @@ function PendingApproval({
             This campaign drafts every email and waits for your approval — nothing is sent
             automatically. Approve them here, or switch to Autopilot in Edit once you're happy.
           </p>
+          {drafts && drafts.total > drafts.items.length ? (
+            <p className="mt-0.5 text-xs text-amber-800/80">
+              Listing the first {drafts.items.length} — &ldquo;Approve &amp; send all&rdquo;
+              covers all {drafts.total}.
+            </p>
+          ) : null}
+          {bulk ? <BulkSendStatus bulk={bulk} /> : null}
         </div>
-        {count > 0 && (
-          <Button onClick={sendAll} disabled={sendingAll}>
-            {sendingAll ? "Sending…" : "Approve & send all"}
-          </Button>
-        )}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {bulkRunning ? (
+            <>
+              <Button variant="ghost" onClick={stopSending}>
+                Stop sending
+              </Button>
+              <Button disabled>
+                Sending… {bulk?.done ?? 0}/{bulk?.total ?? 0}
+              </Button>
+            </>
+          ) : (
+            count > 0 && (
+              <Button onClick={sendAll} disabled={starting}>
+                {starting
+                  ? "Starting…"
+                  : bulk?.status === "interrupted"
+                    ? "Continue sending"
+                    : "Approve & send all"}
+              </Button>
+            )
+          )}
+        </div>
       </div>
       {isLoading ? (
         <Loading />
@@ -614,7 +844,10 @@ function PendingApproval({
                       <Button variant="secondary">View</Button>
                     </Link>
                   )}
-                  <Button onClick={() => approveAndSend(d)} disabled={busyId === d.id || sendingAll}>
+                  <Button
+                    onClick={() => approveAndSend(d)}
+                    disabled={busyId === d.id || bulkRunning || starting}
+                  >
                     {busyId === d.id ? "Sending…" : "Approve & send"}
                   </Button>
                 </div>
@@ -717,12 +950,15 @@ export default function CampaignDashboard() {
   }, [campaign?.last_run_at, campaignId, qc]);
 
   const run = useMutation({
-    mutationFn: (resume?: boolean) => runCampaign(campaignId, resume === true),
-    onSuccess: (_d, resume) => {
+    mutationFn: (opts?: { resume?: boolean; skipDiscovery?: boolean }) =>
+      runCampaign(campaignId, opts?.resume === true, opts?.skipDiscovery === true),
+    onSuccess: (_d, opts) => {
       notify(
-        resume
-          ? "Continuing — picking up where the last run left off."
-          : "Run started — watch the funnel update below."
+        opts?.resume && opts?.skipDiscovery
+          ? "Continuing — finishing the existing backlog, no new prospects this time."
+          : opts?.resume
+            ? "Continuing — picking up where the last run left off."
+            : "Run started — watch the funnel update below."
       );
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] });
       qc.invalidateQueries({ queryKey: ["campaigns"] });
@@ -1006,18 +1242,28 @@ export default function CampaignDashboard() {
             </Button>
           ) : (
             <>
-              <Button onClick={() => run.mutate(false)} disabled={run.isPending}>
+              <Button onClick={() => run.mutate({ resume: false })} disabled={run.isPending}>
                 Run now
               </Button>
               {canContinue && (
-                <Button
-                  variant="secondary"
-                  onClick={() => run.mutate(true)}
-                  disabled={run.isPending}
-                  title="Finish people from earlier runs who never got a draft"
-                >
-                  Continue
-                </Button>
+                <>
+                  <Button
+                    variant="secondary"
+                    onClick={() => run.mutate({ resume: true })}
+                    disabled={run.isPending}
+                    title="Finish people from earlier runs who never got a draft, plus find new ones too"
+                  >
+                    Continue
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => run.mutate({ resume: true, skipDiscovery: true })}
+                    disabled={run.isPending}
+                    title="Finish people from earlier runs who never got a draft — skip finding new people"
+                  >
+                    Continue without new prospects
+                  </Button>
+                </>
               )}
             </>
           )}

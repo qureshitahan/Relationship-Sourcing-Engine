@@ -3,11 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { usePersistedState } from "../hooks/usePersistedState";
 import {
+  cancelRunJob,
   checkLinkedInUpdates,
   createLinkedInConnectLink,
   deleteLinkedIn,
   draftRunLinkedIn,
   getDiscoveryRun,
+  getLinkedInSendProgress,
+  getLinkedInStats,
   listDiscoveryRuns,
   listLinkedInAccounts,
   listLinkedInMessages,
@@ -17,9 +20,10 @@ import {
   sendLinkedIn,
   sendOpenLinkedIn,
   setLinkedInStatus,
+  stopLinkedInSend,
   updateLinkedIn,
 } from "../api/client";
-import type { DiscoveryRun, LinkedInMessage } from "../types";
+import type { DiscoveryRun, LinkedInMessage, LinkedInSendProgress } from "../types";
 import {
   Badge,
   Button,
@@ -324,6 +328,38 @@ export default function LinkedIn() {
     refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
+  // Invitation funnel. Keyed under ["linkedin", …] on purpose: every existing
+  // invalidateQueries({ queryKey: ["linkedin"] }) — send, bulk send, status
+  // change, acceptance/reply scan — refreshes these counts too, so they track
+  // the message list without any extra wiring.
+  const { data: inviteStats } = useQuery({
+    queryKey: ["linkedin", "stats", runId],
+    queryFn: () => getLinkedInStats(runId ? { discovery_run_id: runId } : {}),
+    refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
+  });
+
+  // Drives the Stop button. Polls only while a send is actually running, and is
+  // fetched on mount so reloading mid-send still offers Stop.
+  const { data: sendProgress } = useQuery({
+    queryKey: ["linkedin", "send-progress"],
+    queryFn: getLinkedInSendProgress,
+    refetchInterval: (q) =>
+      (q.state.data as LinkedInSendProgress | undefined)?.status === "running"
+        ? 2000
+        : false,
+  });
+  const sendRunning = sendProgress?.status === "running";
+
+  const stopSend = useMutation({
+    mutationFn: stopLinkedInSend,
+    onSuccess: (res) => {
+      setNote(res.message);
+      if (res.stopped) setSendingUntil(0);
+      qc.invalidateQueries({ queryKey: ["linkedin"] });
+    },
+    onError: () => setNote("Could not stop the send — check backend logs."),
+  });
+
   // True from the moment a draft job is started until its outcome is reported.
   const [awaitingJob, setAwaitingJob] = useState(false);
 
@@ -386,6 +422,17 @@ export default function LinkedIn() {
     setAwaitingJob(false);
     qc.invalidateQueries({ queryKey: ["linkedin"] });
   }, [awaitingJob, runJob, qc]);
+  // Drafting is run-anchored, so it reuses the existing run-level cancel that
+  // the Discover page already drives — the worker checks between prospects.
+  const stopDraft = useMutation({
+    mutationFn: () => cancelRunJob(runId!),
+    onSuccess: () => {
+      setNote("Stopping — messages already written are kept.");
+      qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
+    },
+    onError: () => setNote("Could not stop drafting — check backend logs."),
+  });
+
   const poll = useMutation({
     mutationFn: checkLinkedInUpdates,
     onSuccess: (res) => {
@@ -516,12 +563,36 @@ export default function LinkedIn() {
         <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900">
           <div className="flex items-center justify-between gap-3">
             <span className="font-medium">
-              Writing LinkedIn messages… {runJob?.job_done ?? 0} of{" "}
-              {runJob?.job_total ?? 0}
+              {runJob?.job_cancel_requested
+                ? "Stopping after the message in progress…"
+                : `Writing LinkedIn messages… ${runJob?.job_done ?? 0} of ${
+                    runJob?.job_total ?? 0
+                  }`}
             </span>
-            <span className="text-xs text-violet-700">
-              Runs on the server — you can leave this page.
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-violet-700">
+                Runs on the server — you can leave this page.
+              </span>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Stop drafting now?\n\nMessages already written are kept as " +
+                        "drafts. The prospects not yet drafted are left untouched — " +
+                        'you can draft them later with "Draft all approved".'
+                    )
+                  )
+                    stopDraft.mutate();
+                }}
+                disabled={stopDraft.isPending || !!runJob?.job_cancel_requested}
+                title="Halt drafting after the message currently being written"
+              >
+                {runJob?.job_cancel_requested || stopDraft.isPending
+                  ? "Stopping…"
+                  : "Stop drafting"}
+              </Button>
+            </div>
           </div>
           <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-violet-200">
             <div
@@ -529,6 +600,36 @@ export default function LinkedIn() {
               style={{
                 width: `${Math.round(
                   ((runJob?.job_done ?? 0) / Math.max(1, runJob?.job_total ?? 1)) * 100
+                )}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {sendRunning && (
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="font-medium">
+              {sendProgress?.stop_requested
+                ? "Stopping after the current message…"
+                : `Sending LinkedIn messages… ${sendProgress?.done ?? 0} of ${
+                    sendProgress?.total ?? 0
+                  }`}
+            </span>
+            <span className="text-xs text-blue-700">
+              {sendProgress?.sent ?? 0} sent
+              {(sendProgress?.failed ?? 0) > 0 && ` · ${sendProgress?.failed} failed`}
+              {" · paced ~20s apart"}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-blue-200">
+            <div
+              className="h-full rounded-full bg-blue-600 transition-all"
+              style={{
+                width: `${Math.round(
+                  ((sendProgress?.done ?? 0) / Math.max(1, sendProgress?.total ?? 1)) *
+                    100
                 )}%`,
               }}
             />
@@ -678,18 +779,91 @@ export default function LinkedIn() {
               )
                 bulkSend.mutate();
             }}
-            disabled={bulkSend.isPending}
+            disabled={bulkSend.isPending || sendRunning}
             title="Approve every draft and send them in one go — paced and daily-capped to protect the account"
           >
             {bulkSend.isPending
               ? "Starting…"
-              : `Approve & send all${openCount ? ` (${openCount})` : ""}`}
+              : sendRunning
+                ? "Sending…"
+                : `Approve & send all${openCount ? ` (${openCount})` : ""}`}
           </Button>
+          {sendRunning && (
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Stop sending now?\n\nThe message already in flight finishes, " +
+                      "then sending halts. Everything not yet sent stays as a " +
+                      "draft/approved message and can be sent later."
+                  )
+                )
+                  stopSend.mutate();
+              }}
+              disabled={stopSend.isPending || sendProgress?.stop_requested}
+              title="Halt the paced bulk send after the current message"
+            >
+              {sendProgress?.stop_requested
+                ? "Stopping…"
+                : stopSend.isPending
+                  ? "Stopping…"
+                  : "Stop sending"}
+            </Button>
+          )}
           <Button variant="secondary" onClick={() => poll.mutate()} disabled={poll.isPending}>
             {poll.isPending ? "Checking…" : "Check acceptances & replies"}
           </Button>
         </div>
       </Card>
+
+      {inviteStats && (
+        <Card className="mb-4 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-slate-700">
+              Connection requests{runId ? ` · run #${runId}` : ""}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-5 text-sm text-slate-600">
+              <span>
+                <span className="text-lg font-semibold text-slate-900">
+                  {inviteStats.invites_sent}
+                </span>{" "}
+                sent
+              </span>
+              <span>
+                <span className="text-lg font-semibold text-emerald-700">
+                  {inviteStats.invites_accepted}
+                </span>{" "}
+                accepted
+              </span>
+              <span>
+                <span className="text-lg font-semibold text-amber-700">
+                  {inviteStats.invites_pending}
+                </span>{" "}
+                awaiting
+              </span>
+            </div>
+          </div>
+          <div
+            className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200"
+            role="progressbar"
+            aria-label="Connection requests accepted"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={inviteStats.acceptance_rate}
+          >
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all"
+              style={{ width: `${inviteStats.acceptance_rate}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-xs text-slate-500">
+            {inviteStats.invites_sent > 0
+              ? `${inviteStats.acceptance_rate}% accepted (${inviteStats.invites_accepted} of ${inviteStats.invites_sent}). An accepted invite auto-sends the queued message.`
+              : "No connection invitations sent yet. People you are already connected to are messaged directly, so they never appear here."}
+          </p>
+        </Card>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-2">
         {STATUS_TABS.map((tab) => (

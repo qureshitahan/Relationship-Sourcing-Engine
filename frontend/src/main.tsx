@@ -23,10 +23,14 @@ import CampaignWizard from "./pages/CampaignWizard";
 import CampaignDashboard from "./pages/CampaignDashboard";
 import Calls from "./pages/Calls";
 import Guide from "./pages/Guide";
+import { clearDiscoverStateOnReload } from "./utils/resetDiscoverOnReload";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
 });
+
+// Must run before the tree mounts, so persisted hooks read post-clear storage.
+clearDiscoverStateOnReload();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
