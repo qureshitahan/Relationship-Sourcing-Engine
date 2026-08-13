@@ -126,6 +126,17 @@ def followers_status(db: Session = Depends(get_db), message: Optional[str] = Non
             .where(LinkedInFollower.account_id == account_id)
         ).scalar_one()
     )
+    # Roster-wide progress, independent of any campaign, so the page can answer
+    # "how many of my followers have I reached" before a message is even typed.
+    payload["contacted_all_time"] = int(
+        db.execute(
+            select(func.count(func.distinct(LinkedInFollowerSend.follower_provider_id)))
+            .where(
+                LinkedInFollowerSend.account_id == account_id,
+                LinkedInFollowerSend.status == FollowerSendStatus.SENT,
+            )
+        ).scalar_one()
+    )
     key = service.campaign_key_for(message)
     if key:
         payload["campaign_key"] = key

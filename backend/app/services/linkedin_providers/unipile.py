@@ -299,6 +299,69 @@ class UnipileLinkedInProvider(LinkedInProvider):
             )
         return FollowerPage(followers=followers, cursor=data.get("cursor") or None)
 
+    def list_connections(
+        self, *, cursor: Optional[str] = None, limit: int = FOLLOWERS_PAGE_LIMIT
+    ) -> FollowerPage:
+        """One page of the account's 1st-degree connections.
+
+        This is the audience source the Followers module uses, because
+        ``/users/followers`` is hard-capped by LinkedIn at 1,000 records while
+        this one pages all the way through. Measured on an account with 7,759
+        followers / 7,533 connections: followers stopped dead at exactly 1,000
+        (cursor gone), connections were still paging past 1,594.
+
+        Returns the same ``FollowerPage`` shape as ``list_followers`` so either can
+        be swapped in. Field names differ from the followers endpoint —
+        ``member_id`` rather than ``id``, and a split first/last name — but the
+        member id is the same ACoAA… identifier, so rows dedupe against followers
+        already synced.
+        """
+        if not self._configured():
+            return FollowerPage(supported=False, error="Unipile not configured.")
+        params: dict = {
+            "account_id": self.account_id,
+            "limit": max(1, min(int(limit), FOLLOWERS_PAGE_LIMIT)),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
+                resp = client.get(
+                    f"{self.base_url}/users/relations", headers=self._headers(), params=params
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Unipile list_connections network error: %s", exc)
+            return FollowerPage(error=str(exc), network_error=True)
+        if resp.status_code >= 400:
+            logger.warning(
+                "Unipile list_connections failed (%s): %s", resp.status_code, resp.text[:300]
+            )
+            return FollowerPage(error=f"Unipile {resp.status_code}: {resp.text[:200]}")
+        data = resp.json() or {}
+        items = data.get("items") or data.get("data") or []
+        connections: list[FollowerRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            provider_id = (item.get("member_id") or item.get("id") or "").strip()
+            if not provider_id:
+                # Without a member id there is nobody to address the DM to.
+                continue
+            name = " ".join(
+                p for p in (item.get("first_name"), item.get("last_name")) if p
+            ).strip()
+            connections.append(
+                FollowerRecord(
+                    provider_id=provider_id,
+                    urn=item.get("member_urn") or item.get("connection_urn"),
+                    name=name or None,
+                    headline=(item.get("headline") or "").strip() or None,
+                    profile_url=item.get("public_profile_url") or item.get("profile_url"),
+                    picture_url=item.get("profile_picture_url"),
+                )
+            )
+        return FollowerPage(followers=connections, cursor=data.get("cursor") or None)
+
     # --- account management (connect / list) ---
 
     def list_accounts(self) -> list[dict]:

@@ -321,10 +321,14 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
         run = running.get(config.id)
         interrupted = needs_continue.get(config.id)
 
-        if config.paused or not config.enabled:
-            status = "paused"
-        elif run:
+        if run:
+            # A run in progress always shows as running, even for a campaign
+            # with daily automation off — otherwise a manual "Run now" on a
+            # daily-off campaign never surfaces a "Stop run" button, since
+            # "not enabled" would otherwise mask it as paused.
             status = "running"
+        elif config.paused or not config.enabled:
+            status = "paused"
         elif playbook:
             status = "ready"  # UI label: "Runs daily"
         else:
@@ -544,10 +548,14 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     )
     current_run_out = _run_snapshot(running_run)
 
-    if config.paused or not config.enabled:
-        status = "paused"
-    elif running_run:
+    if running_run:
+        # A run in progress always shows as running, even for a campaign with
+        # daily automation off — otherwise a manual "Run now" on a daily-off
+        # campaign never surfaces a "Stop run" button, since "not enabled"
+        # would otherwise mask it as paused.
         status = "running"
+    elif config.paused or not config.enabled:
+        status = "paused"
     elif playbook:
         status = "ready"  # UI label: "Runs daily"
     else:
@@ -579,7 +587,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "principal_id": config.principal_id,
         "principal_name": principal.name if principal else "",
         "enabled": bool(config.enabled),
-        "paused": bool(config.paused) or not bool(config.enabled),
+        "paused": bool(config.paused),
         "scheduled_count": scheduled_count,
         "approved_unscheduled": approved_unscheduled,
         "status": status,

@@ -139,9 +139,29 @@ class LinkedInProvider(ABC):
     def list_followers(
         self, *, cursor: Optional[str] = None, limit: int = 100
     ) -> FollowerPage:
-        """One page of the connected account's own followers."""
+        """One page of the connected account's own followers.
+
+        Note this source is capped by LinkedIn at 1,000 records — see the Unipile
+        implementation. ``list_connections`` is the uncapped alternative.
+        """
         return FollowerPage(
             supported=False, error="Listing followers is not supported by this provider."
+        )
+
+    def list_connections(
+        self, *, cursor: Optional[str] = None, limit: int = 100
+    ) -> FollowerPage:
+        """One page of the account's 1st-degree connections.
+
+        Same shape as ``list_followers`` so callers can use either as an audience
+        source. Connections are the better one in practice: LinkedIn caps the
+        followers list at 1,000 but pages connections all the way through, and
+        connecting auto-follows, so they are very nearly the same people — all of
+        them directly messageable without an InMail credit.
+        """
+        return FollowerPage(
+            supported=False,
+            error="Listing connections is not supported by this provider.",
         )
 
     def check_reply(

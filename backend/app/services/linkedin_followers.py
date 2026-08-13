@@ -60,11 +60,12 @@ logger = logging.getLogger(__name__)
 
 PROGRESS_KEY = "linkedin_followers_progress"
 
-#: Hard ceiling on how many follower pages one sync will pull, so a huge
-#: follower list can never turn into an unbounded background job. Pages are 50
-#: followers each (the provider's real maximum), so this covers 5,000 followers;
-#: beyond that, run the sync again to pick up the rest.
-MAX_SYNC_PAGES = 100
+#: Hard ceiling on how many pages one sync will pull, so a huge network can never
+#: turn into an unbounded background job. Pages are 50 records each (the
+#: provider's real maximum), so this covers 15,000 people; beyond that, run the
+#: sync again to pick up the rest. Sized off a real account with 7,533
+#: connections (151 pages, roughly 4 minutes) with room to spare.
+MAX_SYNC_PAGES = 300
 
 STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
@@ -212,12 +213,21 @@ def job_running() -> bool:
 def sync_followers(
     db: Session, *, account_id: str, max_pages: int = MAX_SYNC_PAGES
 ) -> dict:
-    """Refresh the follower roster for ``account_id`` from the provider.
+    """Refresh the audience roster for ``account_id`` from the provider.
+
+    The source is the account's **1st-degree connections**, not the followers
+    list. LinkedIn hard-caps ``/users/followers`` at 1,000 records — measured on
+    an account with 7,759 followers, it stopped dead at exactly 1,000 and dropped
+    the cursor — while it pages connections all the way through. Since connecting
+    on LinkedIn auto-follows, the two sets very nearly coincide, and every
+    connection is 1st-degree so it can be DM'd without an InMail credit.
 
     Upsert by (account_id, provider_id): re-syncing updates the same rows rather
-    than duplicating people, and ``last_seen_at`` records who still follows. Rows
-    are never deleted — a follower who unfollows after being DM'd must stay
-    visible in the Sent tab.
+    than duplicating people, and ``last_seen_at`` records who is still in the
+    network. Both endpoints return the same ACoAA… member id, so people already
+    synced from the followers list dedupe against this cleanly. Rows are never
+    deleted — someone who disconnects after being DM'd must stay visible in the
+    Sent tab.
     """
     provider = get_linkedin_provider(account_id)
     if not provider.supports_followers():
@@ -226,7 +236,7 @@ def sync_followers(
             "imported": 0,
             "updated": 0,
             "pages": 0,
-            "error": "This LinkedIn provider cannot list followers.",
+            "error": "This LinkedIn provider cannot list your network.",
         }
 
     now = datetime.utcnow()
@@ -237,7 +247,7 @@ def sync_followers(
     error: Optional[str] = None
 
     while pages < max_pages:
-        page = provider.list_followers(cursor=cursor)
+        page = provider.list_connections(cursor=cursor)
         pages += 1
         if page.error:
             error = page.error
@@ -1010,10 +1020,24 @@ def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
             )
         ).scalar_one()
     )
+    # Roster-wide progress, across EVERY campaign this account has run — the
+    # "how far through my 999 followers am I" number. Distinct followers, so a
+    # follower reached under two different messages still counts once.
+    contacted_all_time = int(
+        db.execute(
+            select(func.count(func.distinct(LinkedInFollowerSend.follower_provider_id)))
+            .where(
+                LinkedInFollowerSend.account_id == account_id,
+                LinkedInFollowerSend.status == FollowerSendStatus.SENT,
+            )
+        ).scalar_one()
+    )
     cap = max(0, int(settings.linkedin_daily_send_cap))
     sent_today = linkedin_sent_today(db, account_id)
     return {
         "followers_total": followers_total,
+        "contacted_all_time": contacted_all_time,
+        "never_contacted": max(0, followers_total - contacted_all_time),
         "eligible": count_eligible_followers(
             db, account_id=account_id, campaign_key=campaign_key
         ),

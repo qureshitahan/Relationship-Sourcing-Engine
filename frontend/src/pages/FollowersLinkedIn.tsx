@@ -67,7 +67,7 @@ function JobBar({ progress }: { progress: FollowersProgress }) {
   const pct = total > 0 ? Math.floor((done / total) * 100) : null;
   const title =
     job === "sync"
-      ? `Refreshing followers — ${progress.imported} new so far`
+      ? `Refreshing network — ${progress.imported} new so far`
       : job === "draft"
         ? `Writing DMs — ${progress.drafted} of ${total}`
         : `Sending DMs — ${progress.sent} of ${total}`;
@@ -96,10 +96,52 @@ function JobBar({ progress }: { progress: FollowersProgress }) {
   );
 }
 
+/** How far through the whole follower roster you are — the "47 of 999" answer.
+ *  Counted across every campaign, so it does not reset when the message changes. */
+function RosterProgress({
+  total,
+  contacted,
+  cap,
+}: {
+  total: number;
+  contacted: number;
+  cap: number;
+}) {
+  if (!total) return null;
+  const remaining = Math.max(0, total - contacted);
+  const pct = Math.floor((contacted / total) * 100);
+  // At the daily cap, how many more days of sending the rest represents.
+  const days = cap > 0 ? Math.ceil(remaining / cap) : null;
+  return (
+    <div className="mb-4 rounded-lg border border-slate-200 bg-white px-4 py-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-sm font-semibold text-slate-900">
+          {contacted} of {total} in your network contacted
+        </div>
+        <div className="text-xs text-slate-500">
+          {remaining} still to reach
+          {days !== null && remaining > 0
+            ? ` · about ${days} more day${days === 1 ? "" : "s"} at ${cap}/day`
+            : ""}
+        </div>
+      </div>
+      <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="h-full rounded-full bg-emerald-500 transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-1 text-[11px] text-slate-500">
+        {pct}% — counts everyone ever messaged from this account, under any message.
+      </div>
+    </div>
+  );
+}
+
 /** The created / approved / sent counters, read from the database. */
 function CountRow({ stats }: { stats: FollowerStats }) {
   const cells: { label: string; value: number; hint: string }[] = [
-    { label: "Followers", value: stats.followers_total, hint: "In your synced roster" },
+    { label: "In network", value: stats.followers_total, hint: "People in your synced roster" },
     { label: "Created", value: stats.all, hint: "DMs drafted for this message" },
     { label: "Approved", value: stats.approved, hint: "Approved, not yet sent" },
     { label: "Sent", value: stats.sent, hint: "Delivered DMs" },
@@ -181,7 +223,7 @@ function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
               type="button"
               onClick={() =>
                 window.confirm(
-                  `Delete the draft for ${row.name ?? "this follower"}? ` +
+                  `Delete the draft for ${row.name ?? "this person"}? ` +
                     "They become eligible again, so the next Draft all will write it fresh."
                 ) && remove.mutate()
               }
@@ -322,10 +364,10 @@ export default function FollowersLinkedIn() {
   const banner = useMemo(() => {
     if (statusLoading || !status) return null;
     if (status.provider === "stub")
-      return "LinkedIn is in test mode (stub provider) — followers are fake and nothing is actually sent.";
+      return "LinkedIn is in test mode (stub provider) — the people listed are fake and nothing is actually sent.";
     if (!status.supports_followers)
-      return "This provider cannot read your followers. Connect a LinkedIn account via Unipile.";
-    if (!activeId) return "Pick the connected LinkedIn account whose followers you want to reach.";
+      return "This provider cannot read your LinkedIn network. Connect an account via Unipile.";
+    if (!activeId) return "Pick the connected LinkedIn account whose network you want to reach.";
     return null;
   }, [status, statusLoading, activeId]);
 
@@ -437,7 +479,7 @@ export default function FollowersLinkedIn() {
     <div>
       <PageHeader
         title="Followers LinkedIn"
-        subtitle="Direct-message the people who already follow your LinkedIn account. Followers only — nobody else is ever contacted from here, and a follower who has been messaged is never messaged again for the same message."
+        subtitle="Direct-message your LinkedIn network — your 1st-degree connections, who also follow you. Nobody outside your network is ever contacted from here, and once someone has been messaged they are never messaged again for the same message."
       />
 
       {banner && (
@@ -458,6 +500,17 @@ export default function FollowersLinkedIn() {
       )}
 
       {progress && <JobBar progress={progress} />}
+
+      {/* Roster progress sits above everything: it is the one number that
+          answers "how far through my followers am I", and unlike the campaign
+          tiles below it does not reset when the message text changes. */}
+      {activeId && (status?.followers_total ?? 0) > 0 && (
+        <RosterProgress
+          total={status?.followers_total ?? 0}
+          contacted={status?.contacted_all_time ?? 0}
+          cap={stats?.cap ?? 50}
+        />
+      )}
 
       {/* --- Account --- */}
       <Card className="mb-4">
@@ -511,9 +564,9 @@ export default function FollowersLinkedIn() {
               variant="secondary"
               onClick={() => sync.mutate()}
               disabled={busy || !activeId || !status?.supports_followers}
-              title="Pull the latest follower list from LinkedIn"
+              title="Pull your latest connections from LinkedIn"
             >
-              {sync.isPending || progress?.job === "sync" ? "Refreshing…" : "Refresh followers"}
+              {sync.isPending || progress?.job === "sync" ? "Refreshing…" : "Refresh network"}
             </Button>
             <Button
               variant="ghost"
@@ -525,8 +578,8 @@ export default function FollowersLinkedIn() {
           </div>
           {typeof status?.followers_total === "number" && (
             <div className="pb-2 text-sm text-slate-600">
-              {status.followers_total} follower
-              {status.followers_total === 1 ? "" : "s"} synced
+              {status.followers_total} in network
+              {status.followers_total === 1 ? "" : ""} synced
             </div>
           )}
         </div>
@@ -658,7 +711,7 @@ export default function FollowersLinkedIn() {
                 {stats.remaining_today} of {stats.cap} sends left today for this account
                 {stats.sent_today > 0 ? ` (${stats.sent_today} used)` : ""}
               </span>
-              <span>{stats.eligible} follower(s) still to draft</span>
+              <span>{stats.eligible} still to draft</span>
               {stats.contacted_ever > 0 && (
                 <span title="Recorded in the checkpoint — these are skipped on every future run">
                   {stats.contacted_ever} already contacted with this message
@@ -708,16 +761,16 @@ export default function FollowersLinkedIn() {
       </div>
 
       {!activeId ? (
-        <EmptyState message="Select a connected LinkedIn account to see its followers." />
+        <EmptyState message="Select a connected LinkedIn account to see its network." />
       ) : isLoading ? (
         <Loading />
       ) : items.length === 0 ? (
         <EmptyState
           message={
             (status?.followers_total ?? 0) === 0
-              ? 'No followers synced yet — click "Refresh followers".'
+              ? 'Nothing synced yet — click "Refresh network".'
               : activeMessage
-                ? `No followers in this tab for this message.`
+                ? `Nobody in this tab for this message.`
                 : "Write your message and click Draft all to begin."
           }
         />

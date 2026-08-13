@@ -443,6 +443,10 @@ export interface FollowerRow {
 /** DB-derived counts for one follower campaign — never reset by a refresh. */
 export interface FollowerStats {
   followers_total: number;
+  /** Distinct followers ever successfully DM'd from this account, across every
+   *  campaign — the "how far through my roster am I" number. */
+  contacted_all_time: number;
+  never_contacted: number;
   /** Followers with no draft yet for this message. */
   eligible: number;
   all: number;
@@ -471,6 +475,8 @@ export interface FollowersStatus {
   default_account_id?: string | null;
   accounts: LinkedInConnectedAccount[];
   followers_total?: number;
+  /** Roster-wide, campaign-independent, so it shows before a message is typed. */
+  contacted_all_time?: number;
   campaign_key?: string | null;
   stats?: FollowerStats | null;
 }

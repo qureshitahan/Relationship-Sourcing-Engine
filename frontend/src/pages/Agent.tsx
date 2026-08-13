@@ -63,7 +63,7 @@ function CampaignCard({
       )}
 
       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
-        {campaign.paused ? (
+        {campaign.paused || !campaign.enabled ? (
           <span className="font-medium text-rose-700">Paused — daily finding off</span>
         ) : campaign.status === "running" ? (
           <span className="flex items-center gap-1.5 font-medium text-sky-700">

@@ -61,7 +61,7 @@ class StubLinkedInProvider(LinkedInProvider):
     def list_followers(
         self, *, cursor: Optional[str] = None, limit: int = 100
     ) -> FollowerPage:
-        """A single fixed page of fake followers (stable ids across calls, so
+        """A single fixed page of fake people (stable ids across calls, so
         re-syncing updates the same rows instead of inventing new people)."""
         if cursor:
             return FollowerPage(followers=[], cursor=None)
@@ -76,6 +76,17 @@ class StubLinkedInProvider(LinkedInProvider):
             for index, (name, headline) in enumerate(_STUB_FOLLOWERS[:limit], start=1)
         ]
         return FollowerPage(followers=followers, cursor=None)
+
+    def list_connections(
+        self, *, cursor: Optional[str] = None, limit: int = 100
+    ) -> FollowerPage:
+        """Same fake people as ``list_followers``.
+
+        Identical ids on purpose: the live endpoints return the same member ids
+        for the same person, so a stub that invented a second set of people would
+        hide dedup bugs rather than expose them.
+        """
+        return self.list_followers(cursor=cursor, limit=limit)
 
     def send_invitation(self, *, provider_id: str, note: str) -> InviteResult:
         return InviteResult(
