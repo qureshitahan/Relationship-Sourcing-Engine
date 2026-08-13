@@ -18,8 +18,9 @@ const STATUS_TONE: Record<CampaignSummary["status"], Tone> = {
 
 function statusLabel(c: CampaignSummary): string {
   if (c.status === "draft") return "Needs setup";
-  if (c.paused || c.status === "paused" || !c.enabled) return "Paused";
   if (c.status === "running") return "Running now";
+  if (c.paused) return "Paused";
+  if (!c.enabled) return "Daily run off";
   if (c.needs_continue) return "Needs Continue";
   return "Runs daily";
 }
@@ -31,13 +32,16 @@ function CampaignCard({
   campaign: CampaignSummary;
   onOpen: () => void;
 }) {
-  const badgeTone: Tone = campaign.paused
-    ? "red"
-    : campaign.status === "running"
+  const badgeTone: Tone =
+    campaign.status === "running"
       ? "blue"
-      : campaign.needs_continue
-        ? "amber"
-        : STATUS_TONE[campaign.status];
+      : campaign.paused
+        ? "red"
+        : !campaign.enabled
+          ? "amber"
+          : campaign.needs_continue
+            ? "amber"
+            : STATUS_TONE[campaign.status];
 
   return (
     <button
@@ -63,13 +67,15 @@ function CampaignCard({
       )}
 
       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-500">
-        {campaign.paused || !campaign.enabled ? (
-          <span className="font-medium text-rose-700">Paused — daily finding off</span>
-        ) : campaign.status === "running" ? (
+        {campaign.status === "running" ? (
           <span className="flex items-center gap-1.5 font-medium text-sky-700">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500" />
             {campaign.current_run_discovered ?? 0} found · {campaign.current_run_sent ?? 0} sent
           </span>
+        ) : campaign.paused ? (
+          <span className="font-medium text-rose-700">Paused — daily finding off</span>
+        ) : !campaign.enabled ? (
+          <span className="font-medium text-amber-700">Daily run off — run manually anytime</span>
         ) : campaign.needs_continue ? (
           <span className="font-medium text-amber-700">
             Interrupted

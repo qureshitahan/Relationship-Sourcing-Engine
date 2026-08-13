@@ -1215,18 +1215,22 @@ export default function CampaignDashboard() {
           <div className="flex flex-col items-end gap-1.5">
             <Badge
               tone={
-                paused || !campaign.enabled
-                  ? "red"
-                  : running
-                    ? "blue"
-                    : "green"
+                running
+                  ? "blue"
+                  : paused
+                    ? "red"
+                    : !campaign.enabled
+                      ? "amber"
+                      : "green"
               }
             >
-              {paused || !campaign.enabled
-                ? "Paused"
-                : running
-                  ? "Running now"
-                  : "Runs daily"}
+              {running
+                ? "Running now"
+                : paused
+                  ? "Paused"
+                  : !campaign.enabled
+                    ? "Daily run off"
+                    : "Runs daily"}
             </Badge>
             <Badge tone={campaign.auto_send ? "green" : "purple"}>
               {campaign.auto_send ? "Autopilot" : "Review before send"}

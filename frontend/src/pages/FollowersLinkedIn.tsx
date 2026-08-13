@@ -269,10 +269,12 @@ export default function FollowersLinkedIn() {
   // The message IS the campaign: its text decides which DMs belong together and
   // who has already been contacted, so it must survive a navigation or refresh.
   const [message, setMessage] = usePersistedState<string>("followers:message", "");
-  const [principalId, setPrincipalId] = usePersistedState<string>(
-    "followers:principalId",
-    ""
-  );
+  // No principal picker any more. It used to matter when this module generated
+  // copy in a principal's voice; the message is now sent verbatim, so the choice
+  // could not change a single character of what goes out — it only decided which
+  // name the record was filed under, which made "Send as" actively misleading
+  // (the DM has always gone from the LinkedIn account selected above). The
+  // principal is now derived from that account instead. See attributedPrincipalId.
   // Only the committed message drives queries. Typing must not silently re-key
   // the campaign on every keystroke.
   const [activeMessage, setActiveMessage] = usePersistedState<string>(
@@ -346,20 +348,22 @@ export default function FollowersLinkedIn() {
   const accounts = status?.accounts ?? [];
   const activeId = status?.active_account_id ?? null;
   const stats = status?.stats ?? null;
-  // Default to the principal whose name matches the connected LinkedIn account —
-  // the DM goes out from that account, so writing it in anyone else's voice is
-  // almost never intended. Falls back to the first principal only if no name
-  // matches (the list is ordered by id, where a leftover test row often sits).
-  const defaultPrincipalId = useMemo(() => {
+  // Which principal each draft is filed under. Derived from the connected
+  // LinkedIn account by name, because that account is what actually sends — so
+  // the record matches reality without anyone having to keep two dropdowns in
+  // sync. Falls back to the first principal when no name matches; the list is
+  // ordered by id, where a leftover test row often sits, so the resolved name is
+  // shown next to the buttons rather than left invisible.
+  const attributedPrincipal = useMemo(() => {
     const list = principals?.items ?? [];
     if (list.length === 0) return undefined;
     const accountName = (status?.active_account_name ?? "").trim().toLowerCase();
     const match = accountName
       ? list.find((p) => (p.name ?? "").trim().toLowerCase() === accountName)
       : undefined;
-    return (match ?? list[0]).id;
+    return match ?? list[0];
   }, [principals, status?.active_account_name]);
-  const resolvedPrincipalId = principalId ? Number(principalId) : defaultPrincipalId;
+  const resolvedPrincipalId = attributedPrincipal?.id;
 
   const banner = useMemo(() => {
     if (statusLoading || !status) return null;
@@ -624,25 +628,6 @@ export default function FollowersLinkedIn() {
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Send as
-            </label>
-            <select
-              // Show the resolved default until the user picks explicitly, so the
-              // dropdown never displays someone other than who will actually send.
-              value={principalId || (resolvedPrincipalId ? String(resolvedPrincipalId) : "")}
-              onChange={(e) => setPrincipalId(e.target.value)}
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
-              disabled={busy}
-            >
-              {(principals?.items ?? []).map((p) => (
-                <option key={p.id} value={String(p.id)}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
               Draft how many
             </label>
             <input
@@ -660,7 +645,9 @@ export default function FollowersLinkedIn() {
               const text = requireMessage();
               if (!text) return;
               if (!resolvedPrincipalId) {
-                setNote("Add a principal first — the DM is written in their voice.");
+                setNote(
+                  "Add a principal on the Principals page first — drafts are filed against one."
+                );
                 return;
               }
               draftAll.mutate(text);
@@ -702,6 +689,19 @@ export default function FollowersLinkedIn() {
             </Button>
           )}
         </div>
+
+        {/* Replaces the old "Send as" picker. Shown, not editable: it never
+            changed the message or the sender, so a control invited the mistake
+            of filing DMs under someone who did not send them. */}
+        {attributedPrincipal && (
+          <p className="mt-2 text-xs text-slate-500">
+            Sent from <span className="font-medium text-slate-700">
+              {status?.active_account_name ?? "the selected LinkedIn account"}
+            </span>
+            , recorded against{" "}
+            <span className="font-medium text-slate-700">{attributedPrincipal.name}</span>.
+          </p>
+        )}
 
         {stats && (
           <div className="mt-4 space-y-3">
