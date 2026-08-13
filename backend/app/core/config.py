@@ -227,6 +227,13 @@ class Settings(BaseSettings):
     # flagged. A run-level bulk LinkedIn send stops once today's total reaches this.
     # LinkedIn realistically tolerates well under this; 50 is an aggressive max.
     linkedin_daily_send_cap: int = 50
+    # How many roster pages the Followers sync fetches at once. Purely read-only
+    # listing (never sending), and 99% of a sync is waiting on the provider — one
+    # page is a ~2s round-trip and a 7.5k network is 150+ pages, so sequential
+    # paging took minutes. Kept modest rather than maximal: this still talks to
+    # LinkedIn through Unipile, and hammering it risks a rate limit on an account
+    # we care about. Set to 1 to restore fully sequential paging.
+    linkedin_sync_concurrency: int = 6
     # How many drafts to generate CONCURRENTLY in a run-level bulk draft job —
     # each draft is one Claude call, and Claude calls are I/O-bound (network
     # wait), so running several at once cuts wall-clock roughly linearly

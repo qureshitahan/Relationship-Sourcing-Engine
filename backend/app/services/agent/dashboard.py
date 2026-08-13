@@ -313,7 +313,6 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
     }
 
     items: list[dict[str, Any]] = []
-    healed = False
     for config in configs:
         principal = principals.get(config.principal_id)
         if principal is None:
@@ -322,16 +321,14 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
         run = running.get(config.id)
         interrupted = needs_continue.get(config.id)
 
-        # Daily-off without the paused flag is leftover from the old "Turn off
-        # daily" control — treat it as paused so the badge matches reality.
-        if playbook and not config.enabled and not config.paused:
-            config.paused = True
-            healed = True
-
-        if config.paused or not config.enabled:
-            status = "paused"
-        elif run:
+        if run:
+            # A run in progress always shows as running, even for a campaign
+            # with daily automation off — otherwise a manual "Run now" on a
+            # daily-off campaign never surfaces a "Stop run" button, since
+            # "not enabled" would otherwise mask it as paused.
             status = "running"
+        elif config.paused or not config.enabled:
+            status = "paused"
         elif playbook:
             status = "ready"  # UI label: "Runs daily"
         else:
@@ -348,7 +345,7 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 "playbook_name": playbook.name if playbook else None,
                 "objective_preview": objective[:160] if objective else None,
                 "enabled": bool(config.enabled),
-                "paused": bool(config.paused) or not bool(config.enabled),
+                "paused": bool(config.paused),
                 "status": status,
                 "current_run_id": run.id if run else None,
                 "current_run_discovered": run.discovered if run else None,
@@ -362,9 +359,6 @@ def list_campaigns(db: Session, *, days: int = 14) -> dict[str, Any]:
                 ),
             }
         )
-
-    if healed:
-        db.commit()
 
     return {"items": items, "running_count": len(running)}
 
@@ -504,6 +498,12 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
             "id": run.id,
             "status": run.status,
             "trigger": run.trigger,
+            # The DiscoveryRun this run imported into. Two different things are
+            # both labelled "Run #" in the UI — an AgentRun on the campaign page,
+            # a DiscoveryRun in the LinkedIn/Prospects run pickers — and their ids
+            # are unrelated. Without this the two cannot be matched up from the
+            # UI at all: an agent run shown as #332 is #463 in those pickers.
+            "discovery_run_id": run.discovery_run_id,
             "started_at": run.started_at.isoformat() if run.started_at else None,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "discovered": run.discovered,
@@ -548,16 +548,14 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
     )
     current_run_out = _run_snapshot(running_run)
 
-    # Daily-off without the paused flag is leftover from the old "Turn off
-    # daily" control — treat it as paused so the badge matches reality.
-    if playbook and not config.enabled and not config.paused:
-        config.paused = True
-        db.commit()
-
-    if config.paused or not config.enabled:
-        status = "paused"
-    elif running_run:
+    if running_run:
+        # A run in progress always shows as running, even for a campaign with
+        # daily automation off — otherwise a manual "Run now" on a daily-off
+        # campaign never surfaces a "Stop run" button, since "not enabled"
+        # would otherwise mask it as paused.
         status = "running"
+    elif config.paused or not config.enabled:
+        status = "paused"
     elif playbook:
         status = "ready"  # UI label: "Runs daily"
     else:
@@ -589,7 +587,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "principal_id": config.principal_id,
         "principal_name": principal.name if principal else "",
         "enabled": bool(config.enabled),
-        "paused": bool(config.paused) or not bool(config.enabled),
+        "paused": bool(config.paused),
         "scheduled_count": scheduled_count,
         "approved_unscheduled": approved_unscheduled,
         "status": status,

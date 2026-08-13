@@ -25,6 +25,9 @@ import type {
   EmailDraft,
   IngestSummary,
   IndexFileResult,
+  FollowerRow,
+  FollowersProgress,
+  FollowersStatus,
   LinkedInAccount,
   LinkedInAccountsResponse,
   LinkedInInviteStats,
@@ -627,6 +630,97 @@ export interface LinkedInScanProgress {
 }
 export const getLinkedInScanProgress = () =>
   api.get<LinkedInScanProgress>("/api/linkedin/scan-progress").then((r) => r.data);
+
+// --- Followers LinkedIn ---
+// A separate lane from the prospect-driven LinkedIn calls above. It reuses the
+// account picker (listLinkedInAccounts / selectLinkedInAccount) so there is one
+// notion of "the active account" app-wide.
+
+/** Header state: connection status, account list, and counts for one message. */
+export const getFollowersStatus = (message?: string) =>
+  api
+    .get<FollowersStatus>("/api/linkedin-followers/status", {
+      params: { message: message || undefined },
+    })
+    .then((r) => r.data);
+
+/** Live progress of the running sync/draft/send job (poll while running). */
+export const getFollowersProgress = () =>
+  api.get<FollowersProgress>("/api/linkedin-followers/progress").then((r) => r.data);
+
+export interface FollowerFilters {
+  /** The exact message text; hashed server-side into the campaign key. */
+  message?: string;
+  /** draft | approved | sent | replied | pending */
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listFollowers = (params: FollowerFilters = {}) =>
+  api
+    .get<Page<FollowerRow>>("/api/linkedin-followers", { params })
+    .then((r) => r.data);
+
+/** Refresh the follower roster from LinkedIn, in the background. */
+export const syncFollowers = () =>
+  api
+    .post<{ started: boolean; account_id?: string; message: string }>(
+      "/api/linkedin-followers/sync",
+      {},
+      { timeout: 60000 }
+    )
+    .then((r) => r.data);
+
+export interface FollowerJobStart {
+  started: boolean;
+  candidates?: number;
+  matched?: number;
+  campaign_key: string;
+  message: string;
+}
+/** Draft DMs for followers not yet drafted for this message (background).
+ *  The message is used verbatim with `Hi <first name>,` prepended — no model
+ *  call. `limit` caps how many followers enter this campaign in one go. */
+export const draftAllFollowers = (
+  message: string,
+  principalId: number,
+  limit?: number
+) =>
+  api
+    .post<FollowerJobStart>(
+      "/api/linkedin-followers/draft-all",
+      {
+        message,
+        principal_id: principalId,
+        limit: limit && limit > 0 ? limit : null,
+      },
+      { timeout: 60000 }
+    )
+    .then((r) => r.data);
+
+export const approveAllFollowers = (message: string) =>
+  api
+    .post<{ approved: number; campaign_key: string }>(
+      "/api/linkedin-followers/approve-all",
+      { message },
+      { timeout: 60000 }
+    )
+    .then((r) => r.data);
+
+/** Approve + send every open DM for this message — paced, capped, checkpointed. */
+export const sendAllFollowers = (message: string) =>
+  api
+    .post<FollowerJobStart>(
+      "/api/linkedin-followers/send-all",
+      { message },
+      { timeout: 60000 }
+    )
+    .then((r) => r.data);
+
+export const stopFollowersJob = () =>
+  api
+    .post<{ stopped: boolean; message: string }>("/api/linkedin-followers/stop")
+    .then((r) => r.data);
 export const setEmailStatus = (id: number, status: string) =>
   api.post<EmailDraft>(`/api/emails/${id}/status`, { status }).then((r) => r.data);
 export const sendEmail = (id: number) =>

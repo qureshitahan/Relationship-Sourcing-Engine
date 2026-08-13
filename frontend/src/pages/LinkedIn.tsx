@@ -719,8 +719,12 @@ export default function LinkedIn() {
           >
             <option value="">All runs</option>
             {runs?.items.map((r) => (
+              // Named "Discovery run" rather than "Run": the campaign page labels
+              // its own agent runs "Run #" too, and the two numbering schemes are
+              // unrelated, so a bare "Run #463" reads as the same thing as the
+              // campaign's "Run #332" when it is not.
               <option key={r.id} value={r.id}>
-                Run #{r.id} · {r.people_imported ?? 0} prospects
+                Discovery run #{r.id} · {r.people_imported ?? 0} prospects
               </option>
             ))}
           </select>
