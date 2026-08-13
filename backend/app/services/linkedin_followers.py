@@ -29,6 +29,7 @@ import json
 import logging
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
@@ -243,60 +244,97 @@ def sync_followers(
     imported = 0
     updated = 0
     pages = 0
-    cursor: Optional[str] = None
     error: Optional[str] = None
+    page_size = 50
+    # 1 restores the original strictly-sequential paging.
+    workers = max(1, int(getattr(settings, "linkedin_sync_concurrency", 1)))
 
-    while pages < max_pages:
-        page = provider.list_connections(cursor=cursor)
-        pages += 1
-        if page.error:
-            error = page.error
-            break
-        for record in page.followers:
-            existing = db.execute(
-                select(LinkedInFollower).where(
-                    LinkedInFollower.account_id == account_id,
-                    LinkedInFollower.provider_id == record.provider_id,
-                )
-            ).scalars().first()
-            public_id = (
-                public_identifier_from_url(record.profile_url or "") or None
+    def upsert(record) -> None:
+        """Insert or refresh one person. Runs on THIS thread only — the Session
+        is not thread-safe, so only the HTTP fetches are parallelised."""
+        nonlocal imported, updated
+        existing = db.execute(
+            select(LinkedInFollower).where(
+                LinkedInFollower.account_id == account_id,
+                LinkedInFollower.provider_id == record.provider_id,
             )
-            if existing is None:
-                db.add(
-                    LinkedInFollower(
-                        account_id=account_id,
-                        provider_id=record.provider_id,
-                        urn=record.urn,
-                        public_identifier=public_id,
-                        name=record.name,
-                        headline=record.headline,
-                        profile_url=record.profile_url,
-                        picture_url=record.picture_url,
-                        first_seen_at=now,
-                        last_seen_at=now,
-                    )
+        ).scalars().first()
+        public_id = public_identifier_from_url(record.profile_url or "") or None
+        if existing is None:
+            db.add(
+                LinkedInFollower(
+                    account_id=account_id,
+                    provider_id=record.provider_id,
+                    urn=record.urn,
+                    public_identifier=public_id,
+                    name=record.name,
+                    headline=record.headline,
+                    profile_url=record.profile_url,
+                    picture_url=record.picture_url,
+                    first_seen_at=now,
+                    last_seen_at=now,
                 )
-                imported += 1
-            else:
-                # Refresh the display fields; never overwrite a good value with
-                # a blank one from a sparser page.
-                existing.name = record.name or existing.name
-                existing.headline = record.headline or existing.headline
-                existing.profile_url = record.profile_url or existing.profile_url
-                existing.picture_url = record.picture_url or existing.picture_url
-                existing.public_identifier = public_id or existing.public_identifier
-                existing.urn = record.urn or existing.urn
-                existing.last_seen_at = now
-                updated += 1
-        # Commit per page so a long sync keeps its work if it is interrupted.
-        db.commit()
-        write_progress(done=imported + updated, imported=imported)
-        if not page.cursor:
-            break
-        cursor = page.cursor
+            )
+            imported += 1
+        else:
+            # Refresh the display fields; never overwrite a good value with a
+            # blank one from a sparser page.
+            existing.name = record.name or existing.name
+            existing.headline = record.headline or existing.headline
+            existing.profile_url = record.profile_url or existing.profile_url
+            existing.picture_url = record.picture_url or existing.picture_url
+            existing.public_identifier = public_id or existing.public_identifier
+            existing.urn = record.urn or existing.urn
+            existing.last_seen_at = now
+            updated += 1
+
+    # Fetch a batch of pages at once. A page is ~2s of pure waiting on the
+    # provider and a large network is 150+ pages, so sequential paging spent
+    # minutes idle. Offsets are computed rather than followed, which is only
+    # possible because the cursor is a plain {"limit","startIndex"} (see
+    # cursor_for_offset) — verified to return identical rows to walking there.
+    offset = 0
+    done = False
+    while not done and pages < max_pages:
         if stop_requested():
             break
+        batch = [
+            offset + i * page_size
+            for i in range(min(workers, max_pages - pages))
+        ]
+        if workers == 1:
+            results = [(batch[0], provider.list_connections(offset=batch[0] or None))]
+        else:
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                futures = {
+                    pool.submit(provider.list_connections, offset=off or None): off
+                    for off in batch
+                }
+                results = sorted(
+                    ((futures[f], f.result()) for f in as_completed(futures)),
+                    key=lambda pair: pair[0],
+                )
+
+        # Apply in offset order so the roster keeps LinkedIn's own ordering —
+        # that ordering is what makes "the next 50" predictable between runs.
+        for off, page in results:
+            pages += 1
+            if page.error:
+                error = page.error
+                done = True
+                break
+            for record in page.followers:
+                upsert(record)
+            # A page with no cursor is the last one. Emptiness alone is not a
+            # reliable end signal: LinkedIn returns short pages mid-list (37 of
+            # 75 pages on a real account), so a short page must NOT stop the sync.
+            if not page.cursor or not page.followers:
+                done = True
+                break
+        # Commit per batch so a long sync keeps its work if it is interrupted.
+        db.commit()
+        write_progress(done=imported + updated, imported=imported)
+        offset += len(batch) * page_size
 
     return {
         "supported": True,

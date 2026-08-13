@@ -19,6 +19,8 @@ Docs: https://developer.unipile.com/docs/getting-started
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -46,6 +48,21 @@ REQUEST_TIMEOUT = 30.0
 # 400 errors/limit_too_high (measured against api28: 60/80/90/100 all fail, 50
 # succeeds). Sending 100 made every sync fail with zero followers imported.
 FOLLOWERS_PAGE_LIMIT = 50
+
+
+def cursor_for_offset(offset: int, limit: int = FOLLOWERS_PAGE_LIMIT) -> str:
+    """Build a pagination cursor for an arbitrary offset.
+
+    Unipile's cursor is not opaque: it is base64 of ``{"limit":N,"startIndex":M}``.
+    Synthesising it means a page can be fetched WITHOUT first walking every page
+    before it, which is what lets the roster sync run pages concurrently instead
+    of one 2-second round-trip at a time.
+
+    Verified against the live API: a synthesised cursor for startIndex=100
+    returned byte-identical member ids to the cursor obtained by walking there.
+    """
+    payload = json.dumps({"limit": int(limit), "startIndex": int(offset)}, separators=(",", ":"))
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 def _is_unreachable(status_code: int, body: str) -> bool:
@@ -300,7 +317,11 @@ class UnipileLinkedInProvider(LinkedInProvider):
         return FollowerPage(followers=followers, cursor=data.get("cursor") or None)
 
     def list_connections(
-        self, *, cursor: Optional[str] = None, limit: int = FOLLOWERS_PAGE_LIMIT
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = FOLLOWERS_PAGE_LIMIT,
+        offset: Optional[int] = None,
     ) -> FollowerPage:
         """One page of the account's 1st-degree connections.
 
@@ -318,12 +339,14 @@ class UnipileLinkedInProvider(LinkedInProvider):
         """
         if not self._configured():
             return FollowerPage(supported=False, error="Unipile not configured.")
-        params: dict = {
-            "account_id": self.account_id,
-            "limit": max(1, min(int(limit), FOLLOWERS_PAGE_LIMIT)),
-        }
+        page_limit = max(1, min(int(limit), FOLLOWERS_PAGE_LIMIT))
+        params: dict = {"account_id": self.account_id, "limit": page_limit}
+        # An explicit offset jumps straight to that page (see cursor_for_offset);
+        # an explicit cursor always wins, so sequential callers are unaffected.
         if cursor:
             params["cursor"] = cursor
+        elif offset:
+            params["cursor"] = cursor_for_offset(offset, page_limit)
         try:
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
                 resp = client.get(

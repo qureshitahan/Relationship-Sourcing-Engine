@@ -149,9 +149,17 @@ class LinkedInProvider(ABC):
         )
 
     def list_connections(
-        self, *, cursor: Optional[str] = None, limit: int = 100
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+        offset: Optional[int] = None,
     ) -> FollowerPage:
         """One page of the account's 1st-degree connections.
+
+        ``offset`` fetches a page directly without walking the ones before it,
+        which lets callers pull pages concurrently. Providers that cannot do that
+        may ignore it and page sequentially.
 
         Same shape as ``list_followers`` so callers can use either as an audience
         source. Connections are the better one in practice: LinkedIn caps the

@@ -78,14 +78,22 @@ class StubLinkedInProvider(LinkedInProvider):
         return FollowerPage(followers=followers, cursor=None)
 
     def list_connections(
-        self, *, cursor: Optional[str] = None, limit: int = 100
+        self,
+        *,
+        cursor: Optional[str] = None,
+        limit: int = 100,
+        offset: Optional[int] = None,
     ) -> FollowerPage:
         """Same fake people as ``list_followers``.
 
         Identical ids on purpose: the live endpoints return the same member ids
         for the same person, so a stub that invented a second set of people would
-        hide dedup bugs rather than expose them.
+        hide dedup bugs rather than expose them. A non-zero ``offset`` is past the
+        end of the fixed list, so it returns nothing — which is exactly how the
+        parallel fetcher detects the tail.
         """
+        if offset:
+            return FollowerPage(followers=[], cursor=None)
         return self.list_followers(cursor=cursor, limit=limit)
 
     def send_invitation(self, *, provider_id: str, note: str) -> InviteResult:
