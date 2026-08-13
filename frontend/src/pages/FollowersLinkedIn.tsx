@@ -167,7 +167,6 @@ function CountRow({ stats }: { stats: FollowerStats }) {
 
 function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
   // Reuses the existing LinkedIn delete endpoint, which refuses to delete a
   // sent/invited message — so a delivered DM can never be erased from the record.
   const remove = useMutation({
@@ -209,15 +208,6 @@ function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
               Profile
             </a>
           )}
-          {row.body && (
-            <button
-              type="button"
-              onClick={() => setOpen((v) => !v)}
-              className="text-slate-600 hover:underline"
-            >
-              {open ? "Hide DM" : "View DM"}
-            </button>
-          )}
           {deletable && (
             <button
               type="button"
@@ -240,7 +230,10 @@ function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
           )}
         </div>
       </div>
-      {open && row.body && (
+      {/* Always visible. The DM is the thing being reviewed before it is sent to
+          a real person, so hiding it behind a toggle put the one detail that
+          matters an extra click away. */}
+      {row.body && (
         <pre className="mt-3 whitespace-pre-wrap rounded-md bg-slate-50 p-3 text-sm text-slate-800">
           {row.body}
         </pre>
