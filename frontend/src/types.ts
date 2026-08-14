@@ -788,6 +788,17 @@ export interface CampaignDetail {
     runs: number;
   };
   reply_rate: number;
+  /**
+   * `totals.sent` / `totals.replies` / `reply_rate` cover the last
+   * `window_days`, while `totals.discovered` / `qualified` / `drafted` are
+   * lifetime counts. These lifetime counterparts are reported alongside so the
+   * page can show both and say which is which, instead of a funnel that silently
+   * mixes the two periods.
+   */
+  window_days?: number;
+  sent_all_time?: number;
+  replies_all_time?: number;
+  reply_rate_all_time?: number;
   days: CampaignDayStats[];
   last_run?: CampaignRunSnapshot | null;
   current_run?: CampaignRunSnapshot | null;
@@ -951,6 +962,10 @@ export interface AnalyticsTotals {
   invited: number;
   accepted: number;
   acceptance_rate: number;
+  /** DMs to people already connected, so no invitation was needed. */
+  direct_dms: number;
+  /** Invitations + direct DMs — the real outbound volume, with no double count. */
+  outreach_total: number;
 }
 
 export interface AnalyticsTrendPoint {

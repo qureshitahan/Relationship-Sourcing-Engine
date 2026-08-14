@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.agent_config import AgentConfig
+from app.models.bulk_campaign import BulkCampaign
 from app.models.email_draft import EmailDraft
 from app.models.enums import EmailStatus, LinkedInStatus
 from app.models.linkedin_message import LinkedInMessage
@@ -165,54 +166,109 @@ def _email_trend(
     return [buckets[d] for d in sorted(buckets)]
 
 
+def _merge(rows: list[tuple[str | None, str, int, int, int]]) -> list[AnalyticsGroupRow]:
+    """Fold rows sharing a key into one, then rank by sends.
+
+    Two database groups can resolve to the same reported group — a bulk campaign
+    reached through several row shapes, for instance — so totals are summed and
+    the rate recomputed from the summed parts rather than averaged.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for key, label, total, sent, replied in rows:
+        slot = merged.setdefault(
+            key or f"~{label}", {"key": key, "label": label, "t": 0, "s": 0, "r": 0}
+        )
+        slot["t"] += total
+        slot["s"] += sent
+        slot["r"] += replied
+    out = [
+        AnalyticsGroupRow(
+            key=v["key"],
+            label=v["label"],
+            total=v["t"],
+            sent=v["s"],
+            replied=v["r"],
+            reply_rate=_rate(v["r"], v["s"]),
+        )
+        for v in merged.values()
+    ]
+    out.sort(key=lambda r: (-r.sent, -r.total))
+    return out
+
+
 def _email_by_campaign(
-    db: Session, since: Optional[datetime], where: list, names: dict[int, str]
+    db: Session,
+    since: Optional[datetime],
+    where: list,
+    names: dict[int, str],
+    bulk_names: dict[int, str],
 ) -> list[AnalyticsGroupRow]:
+    """Email performance per campaign, counting BOTH kinds of campaign.
+
+    Two independent features write campaigns here: the agent pipeline stamps
+    ``campaign_id``, and the bulk-email module stamps ``bulk_campaign_id`` and
+    nothing else. Grouping on ``campaign_id`` alone therefore dropped every bulk
+    campaign into a single anonymous "No campaign" row, hiding a whole module's
+    output. Both columns are read, and a row is attributed to whichever it
+    carries — preferring the agent campaign when a row somehow has both.
+    """
     rows = _grouped_performance(
         db,
         model=EmailDraft,
-        key_column=EmailDraft.campaign_id,
+        key_columns=[EmailDraft.campaign_id, EmailDraft.bulk_campaign_id],
         since=since,
         where=where,
         sent_column=EmailDraft.sent_at,
         replied_column=EmailDraft.replied_at,
     )
-    return [
-        AnalyticsGroupRow(
-            key=str(key) if key is not None else None,
-            label=names.get(key, "No campaign") if key is not None else "No campaign",
-            total=total,
-            sent=sent,
-            replied=replied,
-            reply_rate=_rate(replied, sent),
-        )
-        for key, total, sent, replied in rows
-    ]
+    labelled = []
+    for (campaign_id, bulk_id), total, sent, replied in rows:
+        if campaign_id is not None:
+            key, label = f"c{campaign_id}", names.get(campaign_id, f"Campaign {campaign_id}")
+        elif bulk_id is not None:
+            # Marked as bulk so it is never mistaken for an agent campaign of the
+            # same name, and so a reader knows which module produced it.
+            key = f"b{bulk_id}"
+            label = f"{bulk_names.get(bulk_id, f'Bulk campaign {bulk_id}')} (bulk)"
+        else:
+            key, label = None, "No campaign"
+        labelled.append((key, label, total, sent, replied))
+    return _merge(labelled)
 
 
 def _email_by_principal(
-    db: Session, since: Optional[datetime], where: list, names: dict[int, str]
+    db: Session,
+    since: Optional[datetime],
+    where: list,
+    names: dict[int, str],
 ) -> list[AnalyticsGroupRow]:
+    """Email performance per principal.
+
+    Bulk-email drafts carry no principal at all — the module sends from a mailbox,
+    not on someone's behalf — so they would sit in a bare "Unassigned" row that
+    says nothing about where they came from. They are named for what they are
+    instead. No principal is inferred from the mailbox: that guess would put real
+    numbers against the wrong person's name.
+    """
     rows = _grouped_performance(
         db,
         model=EmailDraft,
-        key_column=EmailDraft.principal_id,
+        key_columns=[EmailDraft.principal_id, EmailDraft.bulk_campaign_id],
         since=since,
         where=where,
         sent_column=EmailDraft.sent_at,
         replied_column=EmailDraft.replied_at,
     )
-    return [
-        AnalyticsGroupRow(
-            key=str(key) if key is not None else None,
-            label=names.get(key, "Unassigned") if key is not None else "Unassigned",
-            total=total,
-            sent=sent,
-            replied=replied,
-            reply_rate=_rate(replied, sent),
-        )
-        for key, total, sent, replied in rows
-    ]
+    labelled = []
+    for (principal_id, bulk_id), total, sent, replied in rows:
+        if principal_id is not None:
+            key, label = str(principal_id), names.get(principal_id, "Unassigned")
+        elif bulk_id is not None:
+            key, label = "bulk", "Bulk emails (no principal)"
+        else:
+            key, label = None, "Unassigned"
+        labelled.append((key, label, total, sent, replied))
+    return _merge(labelled)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +332,11 @@ def _linkedin_totals(
     )
     sent = count(*during(LinkedInMessage.sent_at))
     replied = count(*during(LinkedInMessage.replied_at))
+    # A DM that needed no invitation — the recipient was already connected.
+    direct_dms = count(
+        *during(LinkedInMessage.sent_at),
+        LinkedInMessage.invitation_sent_at.is_(None),
+    )
     return AnalyticsTotals(
         total=count(*created),
         drafts=count(*created, LinkedInMessage.status == LinkedInStatus.DRAFT),
@@ -286,6 +347,11 @@ def _linkedin_totals(
         invited=invited,
         accepted=accepted,
         acceptance_rate=_rate(accepted, invited),
+        direct_dms=direct_dms,
+        # Invitations plus the DMs that needed none. Disjoint by construction —
+        # a row either carries an invitation timestamp or it does not — so nobody
+        # is counted twice.
+        outreach_total=invited + direct_dms,
         by_status=by_status,
     )
 
@@ -319,7 +385,7 @@ def _linkedin_by_campaign(
     rows = _grouped_performance(
         db,
         model=LinkedInMessage,
-        key_column=LinkedInMessage.campaign_id,
+        key_columns=[LinkedInMessage.campaign_id],
         since=since,
         where=where,
         sent_column=LinkedInMessage.sent_at,
@@ -334,7 +400,7 @@ def _linkedin_by_campaign(
             replied=replied,
             reply_rate=_rate(replied, sent),
         )
-        for key, total, sent, replied in rows
+        for (key,), total, sent, replied in rows
     ]
 
 
@@ -344,7 +410,7 @@ def _linkedin_by_principal(
     rows = _grouped_performance(
         db,
         model=LinkedInMessage,
-        key_column=LinkedInMessage.principal_id,
+        key_columns=[LinkedInMessage.principal_id],
         since=since,
         where=where,
         sent_column=LinkedInMessage.sent_at,
@@ -359,7 +425,7 @@ def _linkedin_by_principal(
             replied=replied,
             reply_rate=_rate(replied, sent),
         )
-        for key, total, sent, replied in rows
+        for (key,), total, sent, replied in rows
     ]
 
 
@@ -372,12 +438,12 @@ def _grouped_performance(
     db: Session,
     *,
     model,
-    key_column,
+    key_columns: list,
     since: Optional[datetime],
     where: list,
     sent_column,
     replied_column,
-) -> list[tuple[Any, int, int, int]]:
+) -> list[tuple[tuple, int, int, int]]:
     """``(key, total, sent, replied)`` per group, in one pass.
 
     Conditional aggregates rather than a query per metric: three round trips per
@@ -398,17 +464,18 @@ def _grouped_performance(
         func.sum(case((created, 1), else_=0)) if created is not None else func.count()
     )
 
+    n = len(key_columns)
     query = select(
-        key_column,
+        *key_columns,
         total_expr,
         func.sum(case((in_window(sent_column), 1), else_=0)),
         func.sum(case((in_window(replied_column), 1), else_=0)),
     )
     query = _apply(query, where)
-    rows = db.execute(query.group_by(key_column)).all()
+    rows = db.execute(query.group_by(*key_columns)).all()
     out = [
-        (key, int(total or 0), int(sent or 0), int(replied or 0))
-        for key, total, sent, replied in rows
+        (tuple(row[:n]), int(row[n] or 0), int(row[n + 1] or 0), int(row[n + 2] or 0))
+        for row in rows
     ]
     # A group with nothing at all in the window is noise, not information.
     out = [r for r in out if r[1] or r[2] or r[3]]
@@ -468,6 +535,12 @@ def analytics(
         for p in db.execute(select(Principal).order_by(Principal.id)).scalars().all()
     }
     campaign_names = _campaign_labels(db, principal_names)
+    # The bulk-email module's own campaigns, so its output is named rather than
+    # pooled into "No campaign".
+    bulk_names = {
+        b.id: (b.name or "").strip() or f"Bulk campaign {b.id}"
+        for b in db.execute(select(BulkCampaign).order_by(BulkCampaign.id)).scalars().all()
+    }
 
     email_where = _email_filters(principal_id, campaign_id)
     linkedin_where = _linkedin_filters(principal_id, campaign_id)
@@ -476,7 +549,7 @@ def analytics(
         channel="email",
         totals=_email_totals(db, since, email_where),
         trend=_email_trend(db, since, email_where),
-        by_campaign=_email_by_campaign(db, since, email_where, campaign_names),
+        by_campaign=_email_by_campaign(db, since, email_where, campaign_names, bulk_names),
         by_principal=_email_by_principal(db, since, email_where, principal_names),
     )
     linkedin = AnalyticsChannel(

@@ -457,6 +457,15 @@ class CampaignDetailOut(BaseModel):
     current_run_id: Optional[int] = None
     totals: dict = {}
     reply_rate: float = 0.0
+    # ``totals.sent``/``replies`` and ``reply_rate`` cover the recent window, while
+    # ``totals.discovered``/``qualified``/``drafted`` are lifetime counts. The
+    # lifetime counterparts below are reported alongside — never instead — so the
+    # page can label each figure's period rather than presenting a funnel that
+    # silently mixes the two. Defaulted, so an older client is unaffected.
+    window_days: int = 14
+    sent_all_time: int = 0
+    replies_all_time: int = 0
+    reply_rate_all_time: float = 0.0
     days: List[dict] = []
     last_run: Optional[dict] = None
     current_run: Optional[dict] = None
@@ -697,6 +706,16 @@ class AnalyticsTotals(BaseModel):
     invited: int = 0
     accepted: int = 0
     acceptance_rate: float = 0.0
+    # DMs to people who were already 1st-degree connections, so no invitation was
+    # needed. Counted apart because they are the half of outreach that carries no
+    # invitation, and adding invited + sent would double-count every accepted
+    # invite (an accepted invite becomes a sent DM).
+    direct_dms: int = 0
+    # People actually contacted: every invitation that went out, plus the DMs that
+    # needed no invitation. This is the real outbound volume — an invitation note
+    # is a message the recipient reads, even when the invite is never accepted, so
+    # counting only delivered DMs understates the work by the acceptance rate.
+    outreach_total: int = 0
 
 
 class AnalyticsTrendPoint(BaseModel):
