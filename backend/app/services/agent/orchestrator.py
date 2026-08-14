@@ -405,8 +405,32 @@ def _draft_one(
         db.close()
 
 
+# Caps how many runs execute at once, across every trigger (daily scheduler,
+# "Run now", automation). The scheduler starts every campaign due in the same
+# hour in its own thread, and each run holds one DB connection for its whole
+# duration plus one per concurrent worker — so uncapped, demand outgrew any pool
+# size and starved the web requests, which is what put the UI on "Loading...".
+#
+# Acquired BEFORE the session is opened. A queued run must not sit holding a
+# connection while it waits, or it would consume the very resource the cap
+# exists to protect.
+_RUN_SLOTS = threading.BoundedSemaphore(
+    max(1, int(getattr(settings, "agent_max_concurrent_runs", 3)))
+)
+
+
 def execute_run(run_id: int) -> None:
-    """Execute the full pipeline for an existing AgentRun (own DB session)."""
+    """Execute the full pipeline for an existing AgentRun (own DB session).
+
+    Waits for a free slot when ``agent_max_concurrent_runs`` runs are already in
+    flight, then runs exactly as before. Every caller is a background thread, so
+    queueing here delays a run and never an HTTP request.
+    """
+    with _RUN_SLOTS:
+        _execute_run(run_id)
+
+
+def _execute_run(run_id: int) -> None:
     db = SessionLocal()
     errors: list[str] = []
     try:

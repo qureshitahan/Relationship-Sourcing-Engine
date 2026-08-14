@@ -27,7 +27,18 @@ import Guide from "./pages/Guide";
 import { clearDiscoverStateOnReload } from "./utils/resetDiscoverOnReload";
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { refetchOnWindowFocus: false } },
+  defaultOptions: {
+    queries: {
+      refetchOnWindowFocus: false,
+      // Why "Loading..." used to sit there for minutes: the default is 3 retries
+      // with exponential backoff, and while the API was starved of DB
+      // connections EVERY attempt burned the full pool timeout before failing.
+      // Four attempts x 30s meant a page could spin for two minutes before any
+      // error surfaced. One retry still covers a transient blip, but a genuine
+      // outage now reaches the error branch in seconds instead of minutes.
+      retry: 1,
+    },
+  },
 });
 
 // Must run before the tree mounts, so persisted hooks read post-clear storage.

@@ -246,6 +246,22 @@ class Settings(BaseSettings):
     # call inside every request — the single biggest reason bulk outreach on
     # ~500 prospects took hours instead of minutes.
     bulk_approve_workers: int = 8
+    # How many campaign runs may execute AT THE SAME TIME, across every trigger
+    # (daily scheduler, "Run now", automation). Extra runs queue and start as
+    # slots free; none is skipped or cancelled.
+    #
+    # This is what makes DB load predictable instead of hopeful. The scheduler
+    # launches every campaign whose run hour has arrived, each in its own thread,
+    # and a run holds one connection for its whole duration plus one per
+    # concurrent worker. Uncapped, N campaigns sharing a run hour demanded
+    # N x (workers + 1) connections; the pool ran dry and every page failed with
+    # "QueuePool limit ... connection timed out" while the UI sat on "Loading...".
+    #
+    #   peak connections from runs = agent_max_concurrent_runs x (fan-out + 1)
+    #
+    # db/session.py sizes the Postgres pool from exactly this figure, so the two
+    # move together. Raising it costs connections, not money.
+    agent_max_concurrent_runs: int = 3
 
     # --- Sending cadence (drip) ---
     # When the agent auto-sends, it sends in small batches with a pause between

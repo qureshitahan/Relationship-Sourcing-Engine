@@ -42,16 +42,39 @@ if settings.database_url.startswith("sqlite"):
         pool_timeout=30,
     )
 else:
-    # Postgres (Azure): give the pool headroom + recycle so concurrent background
-    # jobs (agent runs, LinkedIn worker, bulk reveals) don't starve web requests
-    # with "QueuePool limit ... connection timed out", and stale/broken
-    # connections are re-established instead of erroring.
+    # Postgres (Azure): size the pool from the SAME per-run fan-out the SQLite
+    # branch above uses. This branch was a flat 10 + 20, so the environment that
+    # actually needed the headroom got less than half of what local SQLite got —
+    # production ran dry and every page hung on "Loading..." while the logs filled
+    # with "QueuePool limit of size 10 overflow 20 reached".
+    #
+    # Demand is bounded, not guessed: `agent_max_concurrent_runs` caps how many
+    # runs execute at once (agent/orchestrator._RUN_SLOTS) and one run needs a
+    # connection for its own session plus one per concurrent worker. Qualify and
+    # draft are sequential stages, so the fan-out counts once, not twice.
+    #
+    #   peak from runs = concurrent_runs x (fan_out + 1)
+    #
+    # pool_size covers that plus headroom for web requests, the four schedulers
+    # and the followers sync; max_overflow is burst room above it. Explicit
+    # DB_POOL_SIZE / DB_MAX_OVERFLOW always win, so the numbers can still be
+    # pinned by hand for a smaller Postgres tier.
+    _fan_out = max(
+        int(settings.bulk_approve_workers), int(settings.bulk_draft_batch_size), 1
+    )
+    _concurrent_runs = max(1, int(getattr(settings, "agent_max_concurrent_runs", 3)))
+    _run_peak = _concurrent_runs * (_fan_out + 1)
+    # Non-run consumers: web requests, 4 schedulers, followers sync, bulk jobs.
+    _overhead = 12
     _engine_kwargs.update(
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
+        pool_size=max(int(settings.db_pool_size), _run_peak + _overhead),
+        max_overflow=max(int(settings.db_max_overflow), _run_peak),
         pool_pre_ping=True,
         pool_recycle=1800,
-        pool_timeout=30,
+        # Fail fast rather than hang. With the pool sized off a bounded peak,
+        # waiting should not happen; when it does, a request that gives up in
+        # 10s lets the UI show an error instead of spinning for half a minute.
+        pool_timeout=10,
     )
 
 engine = create_engine(settings.database_url, **_engine_kwargs)
@@ -125,7 +148,44 @@ def init_db() -> None:
         logging.getLogger(__name__).exception(
             "create_all failed during init_db; continuing so the app can boot"
         )
+    _log_pool_headroom()
     _apply_lightweight_migrations()
+
+
+def _log_pool_headroom() -> None:
+    """Record what this process may open against what the server allows.
+
+    The pool is sized from a bounded worst case, but that only holds if the
+    server can grant it — and every gunicorn worker builds its OWN pool, so real
+    demand is (instances x workers x ceiling). Logging both numbers at boot makes
+    a misconfiguration visible immediately instead of as "QueuePool limit
+    reached" under load hours later.
+    """
+    log = logging.getLogger(__name__)
+    ceiling = engine.pool.size() + engine.pool._max_overflow  # noqa: SLF001
+    if settings.database_url.startswith("sqlite"):
+        log.info("DB pool ceiling %s connections (sqlite)", ceiling)
+        return
+    try:
+        with engine.connect() as conn:
+            server_max = int(conn.exec_driver_sql("SHOW max_connections").scalar_one())
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never block boot
+        log.warning("Could not read Postgres max_connections: %s", exc)
+        return
+    log.info(
+        "DB pool ceiling %s per worker; Postgres max_connections=%s",
+        ceiling, server_max,
+    )
+    # Half is an alarm line, not the limit: it leaves room for a second worker or
+    # instance, the connections Postgres reserves for superusers, and any other
+    # client sharing the server.
+    if ceiling * 2 > server_max:
+        log.critical(
+            "DB pool may exhaust Postgres: one worker can open %s of %s "
+            "connections. Lower AGENT_MAX_CONCURRENT_RUNS / BULK_APPROVE_WORKERS, "
+            "or pin DB_POOL_SIZE and DB_MAX_OVERFLOW.",
+            ceiling, server_max,
+        )
 
 
 # Minimal additive migrations for SQLite (create_all won't add columns to
