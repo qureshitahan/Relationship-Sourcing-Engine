@@ -5,11 +5,18 @@ of any size lives for many minutes. State is kept in the AppSetting store rather
 than in module memory because the request asking it to stop is served by a
 different thread — and, under a multi-worker deployment, a different process —
 than the one doing the sending.
+
+State is scoped PER SENDING ACCOUNT. It used to be one shared record, which meant
+two operators sending from two accounts at once overwrote each other's progress
+numbers, and either one's Stop halted both batches. Each account now owns its own
+record, so stopping Taha's send leaves Usama's running. Callers that pass no
+account fall back to the original shared key, keeping older behaviour intact.
 """
 from __future__ import annotations
 
 import json
 import time
+from typing import Optional
 
 from app.services.app_settings import get_setting, set_setting
 
@@ -30,8 +37,18 @@ _IDLE: dict = {
 }
 
 
-def read_progress() -> dict:
-    raw = get_setting(PROGRESS_KEY)
+def key_for(account_id: Optional[str] = None) -> str:
+    """The AppSetting key holding one account's send state.
+
+    No account => the original shared key, so a caller that never learned about
+    accounts keeps reading and writing exactly what it used to.
+    """
+    account = (account_id or "").strip()
+    return f"{PROGRESS_KEY}:{account}" if account else PROGRESS_KEY
+
+
+def read_progress(account_id: Optional[str] = None) -> dict:
+    raw = get_setting(key_for(account_id))
     if raw:
         try:
             data = json.loads(raw)
@@ -42,17 +59,18 @@ def read_progress() -> dict:
     return dict(_IDLE)
 
 
-def write_progress(**changes) -> dict:
-    state = {**read_progress(), **changes}
-    set_setting(PROGRESS_KEY, json.dumps(state))
+def write_progress(account_id: Optional[str] = None, **changes) -> dict:
+    state = {**read_progress(account_id), **changes}
+    set_setting(key_for(account_id), json.dumps(state))
     return state
 
 
-def start(total: int) -> None:
-    """Open a fresh record. Clears any stop request left by a previous run, so
-    an old Stop click can never halt the next send before it begins."""
+def start(total: int, account_id: Optional[str] = None) -> None:
+    """Open a fresh record for this account. Clears any stop request left by a
+    previous run, so an old Stop click can never halt the next send before it
+    begins."""
     set_setting(
-        PROGRESS_KEY,
+        key_for(account_id),
         json.dumps(
             {
                 "status": STATUS_RUNNING,
@@ -61,30 +79,38 @@ def start(total: int) -> None:
                 "sent": 0,
                 "failed": 0,
                 "stop_requested": False,
+                "account_id": (account_id or "").strip() or None,
             }
         ),
     )
 
 
-def request_stop() -> bool:
-    """Ask a running job to stop. False when nothing is running to stop."""
-    if read_progress().get("status") != STATUS_RUNNING:
+def request_stop(account_id: Optional[str] = None) -> bool:
+    """Ask THIS account's running job to stop. False when it has none running.
+
+    Deliberately scoped: another account's batch must keep going.
+    """
+    if read_progress(account_id).get("status") != STATUS_RUNNING:
         return False
-    write_progress(stop_requested=True)
+    write_progress(account_id, stop_requested=True)
     return True
 
 
-def stop_requested() -> bool:
-    return bool(read_progress().get("stop_requested"))
+def stop_requested(account_id: Optional[str] = None) -> bool:
+    return bool(read_progress(account_id).get("stop_requested"))
 
 
-def finish(*, stopped: bool) -> None:
+def finish(*, stopped: bool, account_id: Optional[str] = None) -> None:
     write_progress(
-        status=STATUS_STOPPED if stopped else STATUS_DONE, stop_requested=False
+        account_id,
+        status=STATUS_STOPPED if stopped else STATUS_DONE,
+        stop_requested=False,
     )
 
 
-def sleep_unless_stopped(seconds: float, poll: float = 2.0) -> bool:
+def sleep_unless_stopped(
+    seconds: float, poll: float = 2.0, account_id: Optional[str] = None
+) -> bool:
     """Pace the next send, but stay responsive to Stop.
 
     Sleeping the full gap in one call would leave Stop with no effect until the
@@ -92,9 +118,9 @@ def sleep_unless_stopped(seconds: float, poll: float = 2.0) -> bool:
     """
     waited = 0.0
     while waited < seconds:
-        if stop_requested():
+        if stop_requested(account_id):
             return True
         chunk = min(poll, seconds - waited)
         time.sleep(chunk)
         waited += chunk
-    return stop_requested()
+    return stop_requested(account_id)

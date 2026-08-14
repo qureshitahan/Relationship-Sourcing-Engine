@@ -57,7 +57,14 @@ function distanceLabel(d?: string | null): string | null {
   return map[d.toUpperCase()] ?? d.replace(/_/g, " ").toLowerCase();
 }
 
-function MessageCard({ msg }: { msg: LinkedInMessage }) {
+function MessageCard({
+  msg,
+  accountId,
+}: {
+  msg: LinkedInMessage;
+  /** The account this tab sends as, so a single send matches the bulk send. */
+  accountId?: string;
+}) {
   const qc = useQueryClient();
   // Persisted per-message: navigating away (e.g. to Emails/Campaigns) before
   // clicking Save/Send used to silently lose whatever was typed here, since
@@ -103,7 +110,7 @@ function MessageCard({ msg }: { msg: LinkedInMessage }) {
     onSuccess: invalidate,
   });
   const send = useMutation({
-    mutationFn: () => sendLinkedIn(msg.id),
+    mutationFn: () => sendLinkedIn(msg.id, accountId),
     onSuccess: invalidate,
   });
   const remove = useMutation({
@@ -309,6 +316,29 @@ export default function LinkedIn() {
     queryKey: ["linkedin-accounts"],
     queryFn: listLinkedInAccounts,
   });
+
+  // Resolved up here because the progress query below is scoped to this account.
+  const accounts = accountsData?.accounts ?? [];
+  // The account THIS tab sends as. Kept per tab (sessionStorage) rather than read
+  // from the server's single active-account row: that row is shared by every tab
+  // and browser, so picking Scott in a second tab silently switched the tab that
+  // was already sending as Farah, and the running batch with it. Empty = follow
+  // the server's choice, which is what a freshly opened tab does.
+  const [tabAccountId, setTabAccountId] = usePersistedState<string>(
+    "linkedin:accountId",
+    ""
+  );
+  const serverActiveId = accountsData?.active_account_id ?? null;
+  // Fall back to the server's account, but only while this tab has made no
+  // choice of its own, and never to an account that is no longer connected.
+  const activeId =
+    (tabAccountId && accounts.some((a) => a.id === tabAccountId)
+      ? tabAccountId
+      : null) ?? serverActiveId;
+  const activeAccount = accounts.find((a) => a.id === activeId);
+  const activeName = activeAccount?.name ?? null;
+  const activeStatus = activeAccount?.status ?? (activeId ? "OK" : null);
+
   const { data: runs } = useQuery({
     queryKey: ["discovery-runs"],
     queryFn: () => listDiscoveryRuns({ limit: 25 }),
@@ -341,8 +371,10 @@ export default function LinkedIn() {
   // Drives the Stop button. Polls only while a send is actually running, and is
   // fetched on mount so reloading mid-send still offers Stop.
   const { data: sendProgress } = useQuery({
-    queryKey: ["linkedin", "send-progress"],
-    queryFn: getLinkedInSendProgress,
+    // Keyed on the account so switching accounts in this tab shows that
+    // account's batch, not whichever one happened to be cached.
+    queryKey: ["linkedin", "send-progress", activeId],
+    queryFn: () => getLinkedInSendProgress(activeId ?? undefined),
     refetchInterval: (q) =>
       (q.state.data as LinkedInSendProgress | undefined)?.status === "running"
         ? 2000
@@ -351,7 +383,8 @@ export default function LinkedIn() {
   const sendRunning = sendProgress?.status === "running";
 
   const stopSend = useMutation({
-    mutationFn: stopLinkedInSend,
+    // Stops only this tab's account. Another account's batch keeps running.
+    mutationFn: () => stopLinkedInSend(activeId ?? undefined),
     onSuccess: (res) => {
       setNote(res.message);
       if (res.stopped) setSendingUntil(0);
@@ -461,11 +494,6 @@ export default function LinkedIn() {
     setSearchParams(next);
   };
 
-  const accounts = accountsData?.accounts ?? [];
-  const activeId = accountsData?.active_account_id ?? null;
-  const activeAccount = accounts.find((a) => a.id === activeId);
-  const activeName = activeAccount?.name ?? null;
-  const activeStatus = activeAccount?.status ?? (activeId ? "OK" : null);
   const banner = useMemo(() => {
     if (!accountsData) return null;
     if (accountsData.provider === "stub")
@@ -473,16 +501,21 @@ export default function LinkedIn() {
     return null;
   }, [accountsData]);
 
-  // Switch the active sending account (Dalbir / Farah / …). Applies to every
-  // send from here on — manual, run bulk, and the scheduler — until changed.
+  // Switch the sending account. The choice is recorded for THIS tab first, so it
+  // takes effect here immediately and cannot be moved by another tab. The server
+  // is still told, because background work with no tab behind it — the reply
+  // poller and the daily automation — reads that shared setting.
   const selectAccount = useMutation({
-    mutationFn: (accountId: string) => selectLinkedInAccount(accountId),
+    mutationFn: (accountId: string) => {
+      setTabAccountId(accountId);
+      return selectLinkedInAccount(accountId);
+    },
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["linkedin-accounts"] });
       const name = (accountsData?.accounts ?? []).find(
         (a) => a.id === res.active_account_id
       )?.name;
-      setNote(`Now sending LinkedIn DMs as ${name ?? res.active_account_id}.`);
+      setNote(`This tab now sends LinkedIn DMs as ${name ?? res.active_account_id}.`);
     },
     onError: () => setNote("Could not switch LinkedIn account — please try again."),
   });
@@ -501,8 +534,10 @@ export default function LinkedIn() {
   });
 
   // Approve + send every open draft in one go (paced + daily-capped, background).
+  // Sends this tab's account explicitly, which also pins the batch server-side so
+  // another tab switching accounts cannot redirect the rest of it.
   const bulkSend = useMutation({
-    mutationFn: () => sendOpenLinkedIn(runId),
+    mutationFn: () => sendOpenLinkedIn(runId, activeId ?? undefined),
     onSuccess: (res) => {
       if (res.queued > 0) {
         // Auto-refresh the list until the paced run should be finished.
@@ -901,7 +936,7 @@ export default function LinkedIn() {
       ) : (
         <div className="space-y-4">
           {items.map((m) => (
-            <MessageCard key={m.id} msg={m} />
+            <MessageCard key={m.id} msg={m} accountId={activeId ?? undefined} />
           ))}
         </div>
       )}

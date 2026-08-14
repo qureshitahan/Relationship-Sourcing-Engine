@@ -1395,7 +1395,10 @@ def _linkedin_send_worker(run_id: int) -> None:
                 msg.approved_at = datetime.utcnow()
                 db.commit()
             try:
-                perform_linkedin_send(db, msg)
+                # Pinned to the account the cap above was counted against. Without
+                # this, switching accounts in another tab mid-run sent the rest of
+                # the batch from the new one, against the old one's budget.
+                perform_linkedin_send(db, msg, account_id=sending_account)
                 sent += 1
             except SendError as exc:
                 db.rollback()
@@ -1431,7 +1434,9 @@ def _linkedin_send_worker(run_id: int) -> None:
 
 # --- LinkedIn "approve & send all" (not run-anchored) -----------------------
 
-def launch_linkedin_message_send(message_ids: list[int]) -> None:
+def launch_linkedin_message_send(
+    message_ids: list[int], *, account_id: Optional[str] = None
+) -> None:
     """Approve (if draft) + send specific LinkedIn messages, paced, in background.
 
     Used by the LinkedIn page's "Approve & send all" button. The caller has
@@ -1440,18 +1445,27 @@ def launch_linkedin_message_send(message_ids: list[int]) -> None:
     ``bulk_linkedin_send_delay_seconds`` to protect the account. Reuses the exact
     tested single-send path (``perform_linkedin_send``) — DM if connected, else a
     connection invite — so behaviour matches sending one at a time.
+
+    ``account_id`` PINS the sending account for the whole batch. Without it each
+    message re-read the globally selected account, so switching accounts in
+    another browser tab mid-run silently redirected the rest of the batch to the
+    new account — and the daily cap had already been counted against the old one.
+    Omitted => the active account, i.e. the previous behaviour.
     """
     if not message_ids:
         return
     threading.Thread(
         target=_linkedin_message_send_worker,
         args=(list(message_ids),),
+        kwargs={"account_id": account_id},
         name=f"linkedin-bulk-send-{len(message_ids)}",
         daemon=True,
     ).start()
 
 
-def _linkedin_message_send_worker(message_ids: list[int]) -> None:
+def _linkedin_message_send_worker(
+    message_ids: list[int], *, account_id: Optional[str] = None
+) -> None:
     from datetime import datetime
 
     from app.api.routes.linkedin import SendError, perform_linkedin_send
@@ -1464,10 +1478,13 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
         sent = 0
         failed = 0
         done = 0
-        progress.start(len(message_ids))
+        # Progress and Stop are scoped to the sending account, so another
+        # account's batch running at the same time neither overwrites these
+        # numbers nor gets halted when this one is stopped.
+        progress.start(len(message_ids), account_id)
         for index, mid in enumerate(message_ids):
             # Checked before each send, so Stop never leaves a message half-sent.
-            if progress.stop_requested():
+            if progress.stop_requested(account_id):
                 stopped = True
                 break
             msg = db.get(LinkedInMessage, mid)
@@ -1482,7 +1499,7 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
                 msg.approved_at = datetime.utcnow()
                 db.commit()
             try:
-                perform_linkedin_send(db, msg)
+                perform_linkedin_send(db, msg, account_id=account_id)
                 sent += 1
             except SendError as exc:
                 db.rollback()
@@ -1495,9 +1512,11 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
                 failed += 1
                 logger.exception("Bulk approve+send crashed for message %s", mid)
             done += 1
-            progress.write_progress(done=done, sent=sent, failed=failed)
+            progress.write_progress(
+                account_id, done=done, sent=sent, failed=failed
+            )
             if delay and index < len(message_ids) - 1:
-                if progress.sleep_unless_stopped(delay):
+                if progress.sleep_unless_stopped(delay, account_id=account_id):
                     stopped = True
                     break
         logger.info(
@@ -1509,7 +1528,7 @@ def _linkedin_message_send_worker(message_ids: list[int]) -> None:
     finally:
         # Always clear "running", or the UI would offer Stop on a dead job.
         try:
-            progress.finish(stopped=stopped)
+            progress.finish(stopped=stopped, account_id=account_id)
         except Exception:  # noqa: BLE001 - progress is reporting, not the job
             logger.exception("Failed to close LinkedIn bulk-send progress record")
         db.close()
