@@ -605,8 +605,16 @@ export const setLinkedInStatus = (id: number, status: string) =>
   api
     .post<LinkedInMessage>(`/api/linkedin/${id}/status`, { status })
     .then((r) => r.data);
-export const sendLinkedIn = (id: number) =>
-  api.post<LinkedInMessage>(`/api/linkedin/${id}/send`, {}, { timeout: 120000 }).then((r) => r.data);
+/** `accountId` is the account picked in THIS tab, so a single send goes from the
+ *  same account as the rest of the tab even if another tab switched accounts. */
+export const sendLinkedIn = (id: number, accountId?: string) =>
+  api
+    .post<LinkedInMessage>(
+      `/api/linkedin/${id}/send`,
+      {},
+      { params: accountId ? { account_id: accountId } : undefined, timeout: 120000 }
+    )
+    .then((r) => r.data);
 export const replyLinkedIn = (id: number, body: string) =>
   api
     .post<LinkedInMessage>(`/api/linkedin/${id}/reply`, { body }, { timeout: 120000 })
@@ -622,21 +630,34 @@ export interface LinkedInSendOpenResult {
 }
 /** Approve + send all open (draft/approved) LinkedIn messages, paced + capped, in
  *  the background. Optional runId scopes to one discovery run. */
-export const sendOpenLinkedIn = (discoveryRunId?: number) =>
+/** `accountId` is the account picked in THIS tab. Sending it explicitly is what
+ *  lets two tabs drive two accounts at once, and pins the batch so another tab
+ *  switching accounts cannot redirect it mid-run. */
+export const sendOpenLinkedIn = (discoveryRunId?: number, accountId?: string) =>
   api
     .post<LinkedInSendOpenResult>(
       "/api/linkedin/send-open",
-      { discovery_run_id: discoveryRunId },
+      { discovery_run_id: discoveryRunId, account_id: accountId },
       { timeout: 60000 }
     )
     .then((r) => r.data);
-/** Live progress of the bulk send, so the UI can offer Stop while it runs. */
-export const getLinkedInSendProgress = () =>
-  api.get<LinkedInSendProgress>("/api/linkedin/send-progress").then((r) => r.data);
-/** Halt the running bulk send after the message currently in flight. */
-export const stopLinkedInSend = () =>
+/** Live progress of the bulk send for ONE account, so a tab watching Taha's
+ *  batch never sees Usama's numbers. */
+export const getLinkedInSendProgress = (accountId?: string) =>
   api
-    .post<{ stopped: boolean; message: string }>("/api/linkedin/stop-send")
+    .get<LinkedInSendProgress>("/api/linkedin/send-progress", {
+      params: accountId ? { account_id: accountId } : undefined,
+    })
+    .then((r) => r.data);
+/** Halt the running bulk send for ONE account, after the message in flight.
+ *  Other accounts' batches keep running. */
+export const stopLinkedInSend = (accountId?: string) =>
+  api
+    .post<{ stopped: boolean; account_id?: string | null; message: string }>(
+      "/api/linkedin/stop-send",
+      {},
+      { params: accountId ? { account_id: accountId } : undefined }
+    )
     .then((r) => r.data);
 export const checkLinkedInUpdates = () =>
   api

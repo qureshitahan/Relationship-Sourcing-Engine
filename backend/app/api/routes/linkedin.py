@@ -669,12 +669,22 @@ def perform_linkedin_send(
 
 
 @router.post("/{message_id}/send", response_model=LinkedInMessageOut)
-def send_message(message_id: int, db: Session = Depends(get_db)):
+def send_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    account_id: Optional[str] = Query(
+        None,
+        description=(
+            "Connected LinkedIn account to send from. The browser passes the "
+            "account picked in that tab; omitted = the globally active account."
+        ),
+    ),
+):
     msg = db.get(LinkedInMessage, message_id)
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
     try:
-        perform_linkedin_send(db, msg)
+        perform_linkedin_send(db, msg, account_id=(account_id or "").strip() or None)
     except SendError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
     return _msg_out(db, msg)
@@ -713,54 +723,82 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
     # LinkedIn limits per account, so a shared global budget let sends from one
     # account block every other one. All send paths still share that account's
     # budget. Only the ids that fit today are queued.
-    sending_account = active_send_account_id()
+    # The tab's own choice wins over the globally selected account, so two
+    # operators (or two tabs) can drive two accounts at the same time.
+    sending_account = (payload.account_id or "").strip() or active_send_account_id()
     sent_today = linkedin_sent_today(db, sending_account)
     cap = max(0, int(settings.linkedin_daily_send_cap))
     remaining = max(0, cap - sent_today)
     will_send = [m.id for m in messages][:remaining]
     held = matched - len(will_send)
 
-    launch_linkedin_message_send(will_send)
+    # Pin the account for the whole batch: the cap above was counted against it,
+    # and re-reading the global setting per message let another tab's switch
+    # redirect the rest of this run to a different account.
+    launch_linkedin_message_send(will_send, account_id=sending_account)
     return {
         "matched": matched,
         "queued": len(will_send),
         "held": held,
         "cap": cap,
         "sent_today": sent_today,
+        "account_id": sending_account,
     }
 
 
 @router.get("/send-progress")
-def send_progress():
+def send_progress(
+    account_id: Optional[str] = Query(
+        None,
+        description=(
+            "Report this account's send only. The browser passes the account "
+            "picked in that tab; omitted = the legacy shared record."
+        ),
+    ),
+):
     """Live state of the bulk approve+send job, so the UI can show progress and
-    offer Stop while it is running."""
+    offer Stop while it is running.
+
+    Scoped per account: a tab watching Taha's batch must not see Usama's numbers.
+    """
     from app.services import linkedin_send_progress as progress
 
-    return progress.read_progress()
+    return progress.read_progress((account_id or "").strip() or None)
 
 
 @router.post("/stop-send")
-def stop_send(db: Session = Depends(get_db)):
-    """Halt the running bulk approve+send.
+def stop_send(
+    db: Session = Depends(get_db),
+    account_id: Optional[str] = Query(
+        None,
+        description="Stop only this account's send; omitted = the legacy shared record.",
+    ),
+):
+    """Halt the running bulk approve+send FOR ONE ACCOUNT.
 
     The worker checks between messages, so the one already in flight completes
     and everything after it is left untouched — nothing is half-sent. Messages
     that never went out keep their draft/approved status and can be sent later.
+
+    Deliberately scoped to the account: stopping Taha's batch must leave Usama's
+    running. A shared stop used to halt every batch at once.
     """
     from app.services import linkedin_send_progress as progress
 
-    if not progress.request_stop():
+    account = (account_id or "").strip() or None
+    if not progress.request_stop(account):
         return {"stopped": False, "message": "No LinkedIn send is running."}
     log_action(
         db,
         AuditAction.LINKEDIN_SEND,
         entity_type="linkedin_bulk_send",
         actor="human",
-        summary="Stopped the bulk LinkedIn send",
+        summary=f"Stopped the bulk LinkedIn send for account {account or 'default'}",
         commit=True,
     )
     return {
         "stopped": True,
+        "account_id": account,
         "message": "Stopping — the message in flight finishes, then sending halts.",
     }
 

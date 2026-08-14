@@ -261,9 +261,15 @@ class LinkedInSendOpenRequest(BaseModel):
     """Bulk approve + send all open (draft/approved) LinkedIn messages.
 
     Optional ``discovery_run_id`` scopes the send to one run; omitted = all runs.
+
+    ``account_id`` names the connected LinkedIn account this batch sends from.
+    The browser passes the account the operator picked in THIS tab, so two tabs
+    can drive two accounts at once; omitted = the globally active account, which
+    is the previous behaviour.
     """
 
     discovery_run_id: Optional[int] = None
+    account_id: Optional[str] = None
 
 
 class FollowerSyncRequest(BaseModel):
