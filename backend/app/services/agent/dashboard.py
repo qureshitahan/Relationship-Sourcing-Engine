@@ -478,6 +478,32 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         ).scalar_one()
     )
 
+    # The same two figures with no window, reported ALONGSIDE the windowed ones
+    # rather than replacing them.
+    #
+    # The funnel above mixes periods: discovered/qualified/drafted are lifetime
+    # counts while sent/replies cover the last ``days``. Read as one funnel that
+    # says "1,385 drafted, 10 sent", which looks like a catastrophic send rate
+    # when the lifetime figure is 1,027. Rather than change numbers the team
+    # already reads, the lifetime pair is added so the page can show both and
+    # label which is which.
+    sent_all_time = int(
+        db.execute(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.campaign_id == campaign_id,
+                EmailDraft.sent_at.isnot(None),
+            )
+        ).scalar_one()
+    )
+    replies_all_time = int(
+        db.execute(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.campaign_id == campaign_id,
+                EmailDraft.status == EmailStatus.REPLIED,
+            )
+        ).scalar_one()
+    )
+
     totals = {
         "discovered": _campaign_contact_count(db, campaign_id),
         "qualified": _campaign_qualified_count(db, campaign_id, config),
@@ -610,6 +636,13 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "last_run_at": config.last_run_at,
         "current_run_id": running_run.id if running_run else None,
         "totals": totals,
+        # Additive: existing keys keep their windowed meaning untouched.
+        "window_days": max(1, days),
+        "sent_all_time": sent_all_time,
+        "replies_all_time": replies_all_time,
+        "reply_rate_all_time": round(
+            (replies_all_time / sent_all_time) if sent_all_time else 0.0, 4
+        ),
         "reply_rate": round(reply_rate, 4),
         "days": days_out,
         "last_run": last_run_out,

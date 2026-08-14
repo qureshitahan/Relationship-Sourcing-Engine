@@ -38,12 +38,16 @@ type Tone = "green" | "blue" | "amber" | "slate" | "purple";
 const inputCls =
   "w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-100";
 
+// `period` records which timeframe each step is actually counted over. The first
+// three are lifetime totals and the last two cover the recent window — a mix that
+// reads as a single funnel and makes the send rate look far worse than it is. The
+// numbers are left exactly as they were; the label just stops the misreading.
 const FUNNEL = [
-  { key: "discovered", label: "Find", desc: "Found on Apollo" },
-  { key: "qualified", label: "Score", desc: "Passed AI research" },
-  { key: "drafted", label: "Draft", desc: "Emails written" },
-  { key: "sent", label: "Send", desc: "Emails sent" },
-  { key: "followups_sent", label: "Follow up", desc: "Follow-ups sent" },
+  { key: "discovered", label: "Find", desc: "Found on Apollo", period: "all" },
+  { key: "qualified", label: "Score", desc: "Passed AI research", period: "all" },
+  { key: "drafted", label: "Draft", desc: "Emails written", period: "all" },
+  { key: "sent", label: "Send", desc: "Emails sent", period: "window" },
+  { key: "followups_sent", label: "Follow up", desc: "Follow-ups sent", period: "window" },
 ] as const;
 
 function Stat({ label, value, sub, accent = "slate" }: {
@@ -1105,6 +1109,9 @@ export default function CampaignDashboard() {
   }
 
   const t = campaign.totals;
+  // The window the API actually used. Falls back to 14 — the server default —
+  // so an older response still labels itself correctly rather than saying nothing.
+  const windowDays = campaign.window_days ?? 14;
   const running = campaign.status === "running";
   const paused = campaign.paused;
   const queued = campaign.scheduled_count ?? 0;
@@ -1460,14 +1467,43 @@ export default function CampaignDashboard() {
       {/* Self-optimizing A/B: who we target + how we write */}
       <LearningPanel principalId={campaign.principal_id} />
 
-      {/* KPIs */}
+      {/*
+        KPIs. The headline figures are the recent window, unchanged — but the
+        lifetime totals were reported nowhere on this page, so a campaign that has
+        sent a thousand emails and paused a fortnight ago read as "10 sent". The
+        lifetime number now rides alongside each one instead of replacing it.
+      */}
       <div className="mt-6 grid gap-3 sm:grid-cols-4">
-        <Stat label="Emails sent" value={t.sent} sub="Last 14 days" accent="sky" />
-        <Stat label="Replies" value={t.replies} sub="People who wrote back" accent="emerald" />
+        <Stat
+          label="Emails sent"
+          value={t.sent}
+          sub={
+            campaign.sent_all_time !== undefined
+              ? `Last ${windowDays} days · ${campaign.sent_all_time.toLocaleString()} all time`
+              : `Last ${windowDays} days`
+          }
+          accent="sky"
+        />
+        <Stat
+          label="Replies"
+          value={t.replies}
+          sub={
+            campaign.replies_all_time !== undefined
+              ? `Last ${windowDays} days · ${campaign.replies_all_time.toLocaleString()} all time`
+              : "People who wrote back"
+          }
+          accent="emerald"
+        />
         <Stat
           label="Reply rate"
           value={`${Math.round((campaign.reply_rate || 0) * 100)}%`}
-          sub="Replies ÷ sent"
+          sub={
+            campaign.reply_rate_all_time !== undefined
+              ? `Last ${windowDays} days · ${Math.round(
+                  campaign.reply_rate_all_time * 100
+                )}% all time`
+              : "Replies ÷ sent"
+          }
           accent="violet"
         />
         <Stat label="Qualified" value={t.qualified} sub="Passed AI research" accent="amber" />
@@ -1475,9 +1511,11 @@ export default function CampaignDashboard() {
 
       {/* Funnel */}
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-sm font-semibold text-slate-900">Pipeline (last 14 days)</h2>
+        <h2 className="text-sm font-semibold text-slate-900">Pipeline</h2>
         <p className="mt-0.5 text-xs text-slate-500">
-          Find people → score them → draft emails → send → follow up.
+          Find people → score them → draft emails → send → follow up. The first
+          three steps are lifetime totals; the last two cover the last{" "}
+          {windowDays} days, so they are not a like-for-like ratio.
         </p>
         <div className="mt-4 grid gap-2 sm:grid-cols-5">
           {FUNNEL.map((step, i) => {
@@ -1492,6 +1530,9 @@ export default function CampaignDashboard() {
                 </div>
                 <p className="mt-2 text-2xl font-semibold tabular-nums text-slate-900">{value}</p>
                 <p className="text-[11px] text-slate-500">{step.desc}</p>
+                <p className="text-[11px] text-slate-400">
+                  {step.period === "all" ? "all time" : `last ${windowDays} days`}
+                </p>
               </div>
             );
           })}

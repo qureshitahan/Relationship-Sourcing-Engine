@@ -192,8 +192,15 @@ function EmailSection({ channel }: { channel: AnalyticsChannel }) {
         section.
       </p>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        <StatTile label="Total drafts" value={t.total} sub="all statuses" />
+      {/* Same tile width as the LinkedIn section, so the two read as siblings. */}
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        {/*
+          Not "Total drafts": the table is called email_drafts, so every row is a
+          "draft" in the storage sense even after it has been sent — which reads,
+          wrongly, as a pile of unsent work sitting in the queue. "Total emails"
+          counts rows; "Awaiting approval" is the one that is actually a draft.
+        */}
+        <StatTile label="Total emails" value={t.total} sub="every status" />
         <StatTile label="Awaiting approval" value={t.drafts} sub="status: draft" />
         <StatTile label="Approved" value={t.approved} tone="amber" />
         <StatTile label="Sent" value={t.sent} tone="blue" />
@@ -281,13 +288,13 @@ function LinkedInSection({ channel }: { channel: AnalyticsChannel }) {
   const series: Series[] = [
     {
       key: "li.invited",
-      label: "Invited",
+      label: "Invitations",
       color: VIZ.series[1],
       values: channel.trend.map((p) => p.invited),
     },
     {
       key: "li.sent",
-      label: "Sent",
+      label: "DMs delivered",
       color: VIZ.series[0],
       values: channel.trend.map((p) => p.sent),
     },
@@ -309,28 +316,58 @@ function LinkedInSection({ channel }: { channel: AnalyticsChannel }) {
         />
         <h2 className="text-base font-semibold text-slate-900">LinkedIn</h2>
       </div>
-      <p className="mb-4 text-xs text-slate-400">
-        Prospect messages only. Follower DMs belong to the Followers module and are
-        not counted here. LinkedIn reports no opens, so there is no open rate on
-        this side — it reports invitations instead.
+      <p className="mb-4 max-w-4xl text-xs text-slate-400">
+        Prospect messages only — follower DMs belong to the Followers module and
+        are not counted here, and anything sent by hand on linkedin.com is not
+        recorded at all. LinkedIn has no opens, so it reports invitations instead.
+        Reaching a non-connection takes two steps: an invitation goes out first,
+        and the DM only arrives once that invitation is accepted — so{" "}
+        <b>total outreach</b> is what left, while <b>DMs delivered</b> is what
+        landed.
       </p>
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      {/*
+        "Sent" alone reads as the whole outreach effort, which understates it
+        badly: an unaccepted invitation still put a note in front of someone, and
+        on this side most invitations are never accepted. So the volume figure
+        leads, and the delivered-DM figure says plainly what it is.
+      */}
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
         <StatTile label="Total messages" value={t.total} sub="all statuses" />
         <StatTile label="Awaiting approval" value={t.drafts} sub="status: draft" />
         <StatTile label="Approved" value={t.approved} tone="amber" />
         <StatTile
-          label="Invited"
+          label="Total outreach"
+          value={t.outreach_total}
+          sub={
+            t.direct_dms
+              ? `${t.invited} invitations + ${t.direct_dms} direct DMs`
+              : "invitations + direct DMs"
+          }
+          tone="blue"
+        />
+        <StatTile
+          label="Invitations sent"
           value={t.invited}
           sub={`${t.accepted} accepted · ${pct(t.acceptance_rate)}`}
           tone="amber"
         />
-        <StatTile label="Sent" value={t.sent} tone="blue" />
+        <StatTile
+          label="DMs delivered"
+          value={t.sent}
+          sub="reached the inbox"
+          tone="blue"
+        />
         <StatTile
           label="Replied"
           value={t.replied}
-          sub={`${pct(t.reply_rate)} reply rate`}
+          sub={`${pct(t.reply_rate)} of delivered DMs`}
           tone="green"
+        />
+        <StatTile
+          label="Awaiting acceptance"
+          value={Math.max(0, t.invited - t.accepted)}
+          sub="invited, not yet connected"
         />
       </div>
 
@@ -344,7 +381,7 @@ function LinkedInSection({ channel }: { channel: AnalyticsChannel }) {
         />
         <BarList
           title="Campaign performance"
-          subtitle="LinkedIn messages sent per campaign — hover a row for replies"
+          subtitle="DMs delivered per campaign — hover a row for replies"
           rows={groupRows(channel.by_campaign)}
           valueLabel="Sent"
           color={VIZ.series[1]}
@@ -355,7 +392,7 @@ function LinkedInSection({ channel }: { channel: AnalyticsChannel }) {
       <div className="mb-4 grid gap-4 lg:grid-cols-2">
         <BarList
           title="Outreach by principal"
-          subtitle="LinkedIn messages sent on each principal's behalf"
+          subtitle="DMs delivered on each principal's behalf"
           rows={groupRows(channel.by_principal)}
           valueLabel="Sent"
           color={VIZ.series[1]}
