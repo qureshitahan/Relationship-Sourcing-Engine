@@ -14,6 +14,7 @@ import Organizations from "./pages/Organizations";
 import OrganizationDetail from "./pages/OrganizationDetail";
 import Emails from "./pages/Emails";
 import LinkedIn from "./pages/LinkedIn";
+import Analytics from "./pages/Analytics";
 import LinkedInResponses from "./pages/LinkedInResponses";
 import FollowersLinkedIn from "./pages/FollowersLinkedIn";
 import Conversations from "./pages/Conversations";
@@ -66,6 +67,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="outreach" element={<Conversations />} />
             <Route path="emails" element={<Emails />} />
             <Route path="linkedin" element={<LinkedIn />} />
+            <Route path="analytics" element={<Analytics />} />
             <Route path="linkedin-responses" element={<LinkedInResponses />} />
             <Route path="followers-linkedin" element={<FollowersLinkedIn />} />
             <Route path="calls" element={<Calls />} />

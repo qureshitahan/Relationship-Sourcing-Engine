@@ -30,6 +30,7 @@ from app.models.relevance_insight import RelevanceInsight
 from app.models.suppression import OutreachHistory
 from app.schemas.entities import LinkedInInviteStats, LinkedInMessageOut, Page
 from app.schemas.requests import (
+    LinkedInAccountNameRequest,
     LinkedInConnectRequest,
     LinkedInGenerateRequest,
     LinkedInGenerateRunRequest,
@@ -41,6 +42,7 @@ from app.schemas.requests import (
 )
 from app.services.app_settings import get_setting, set_setting
 from app.services.audit import log_action
+from app.services import linkedin_account_names
 from app.services.linkedin_outreach import generate_linkedin_content
 from app.services.linkedin_providers import (
     ACTIVE_ACCOUNT_SETTING,
@@ -142,12 +144,84 @@ def linkedin_account():
     }
 
 
+#: How many by-id account lookups one request may attempt. Bounded so a tenant
+#: full of retired accounts can never turn this page into a long series of calls.
+_MAX_ACCOUNT_LOOKUPS = 5
+
+
+def _sending_account_ids(db: Session) -> list[str]:
+    """Account ids that appear in our own send history, newest activity first."""
+    ids: list[str] = []
+    for account_id in db.execute(
+        select(LinkedInMessage.from_account)
+        .where(LinkedInMessage.from_account.is_not(None))
+        .group_by(LinkedInMessage.from_account)
+        .order_by(func.max(LinkedInMessage.sent_at).desc())
+    ).scalars().all():
+        if account_id and account_id not in ids:
+            ids.append(account_id)
+    return ids
+
+
+def _resolve_missing_names(db: Session, provider, listed: list[dict]) -> None:
+    """Name accounts that sent messages but are absent from the listing.
+
+    An account can send outreach and later drop out of ``list_accounts``, which
+    left its rows in a per-account report labelled by raw id. Asking the provider
+    for those ids directly fills the names in automatically, so nothing has to be
+    entered by hand.
+
+    Only attempted when the listing itself succeeded: an empty listing means the
+    provider did not answer, and firing individual lookups at an unresponsive
+    provider would just be slower failure.
+    """
+    if not listed:
+        return
+    getter = getattr(provider, "get_account", None)
+    if getter is None:
+        return
+    listed_ids = {str(a.get("id")) for a in listed if isinstance(a, dict)}
+    known = linkedin_account_names.entries()
+    try:
+        candidates = [
+            account_id
+            for account_id in _sending_account_ids(db)
+            if account_id not in listed_ids
+            and not known.get(account_id, {}).get("name")
+            # An account removed from the provider never resolves, so a recent
+            # failure means skip it instead of spending a request per page view.
+            and linkedin_account_names.should_attempt_lookup(account_id)
+        ][:_MAX_ACCOUNT_LOOKUPS]
+    except Exception:  # noqa: BLE001 - a naming nicety must not fail the page
+        db.rollback()
+        logger.warning("could not read sending account ids", exc_info=True)
+        return
+    found = []
+    for account_id in candidates:
+        account = getter(account_id)
+        if account and account.get("name"):
+            found.append(account)
+        else:
+            linkedin_account_names.mark_lookup_failed(account_id)
+    if found:
+        linkedin_account_names.remember_provider_names(found)
+
+
 @router.get("/accounts")
-def list_accounts():
+def list_accounts(db: Session = Depends(get_db)):
     """List connected LinkedIn accounts + which one is active (for the picker)."""
     provider = get_linkedin_provider()
     lister = getattr(provider, "list_accounts", None)
     accounts = lister() if lister else []
+    # Keep the local name cache warm off a call the UI already makes. The listing
+    # is the only place account names exist, and it returns [] on any failure, so
+    # remembering names when it does succeed is what lets reports stay readable
+    # afterwards. ``accounts`` itself is passed through untouched — the picker
+    # keeps showing exactly what the provider reports, nothing inferred.
+    linkedin_account_names.remember_provider_names(accounts)
+    # Then chase the ones the listing left out, so an account that has since
+    # dropped off it still shows a name rather than an id.
+    _resolve_missing_names(db, provider, accounts)
     return {
         "provider": provider.name,
         "active_account_id": _active_account_id(),
@@ -155,7 +229,26 @@ def list_accounts():
         # no from_account, so the UI attributes those to this account.
         "default_account_id": (settings.unipile_account_id or None),
         "accounts": accounts,
+        # Every name known locally, including ones the provider is not returning
+        # right now. Additive: callers that only read ``accounts`` are unaffected.
+        "known_names": linkedin_account_names.entries(),
     }
+
+
+@router.put("/account-names")
+def set_account_name(payload: LinkedInAccountNameRequest):
+    """Label a sending account by hand, for reports that name people not ids.
+
+    Needed because the provider listing is the only source of names and it can
+    come back empty; a typed label also outlives it, and outranks it on the next
+    sync. Sending an empty name clears the label, letting the provider's own name
+    take over again.
+    """
+    try:
+        entries = linkedin_account_names.set_manual_name(payload.account_id, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"known_names": entries}
 
 
 @router.post("/connect-link")
@@ -322,6 +415,14 @@ def generate_message(payload: LinkedInGenerateRequest, db: Session = Depends(get
     )
     msg = LinkedInMessage(
         principal_id=principal.id,
+        # Inherit the campaign from the prospect. The column and its filters have
+        # always existed here but nothing ever wrote to them, so every LinkedIn
+        # message reported as "No campaign" and per-campaign LinkedIn performance
+        # was impossible to see. The prospect is the right source: a contact row
+        # belongs to exactly one campaign (see models/contact.py), so there is no
+        # ambiguity and no new data to record. Left NULL when the prospect has no
+        # campaign — a pasted or manually added person — rather than invented.
+        campaign_id=contact.campaign_id,
         company_id=contact.company_id,
         contact_id=contact.id,
         insight_id=insight.id if insight else None,

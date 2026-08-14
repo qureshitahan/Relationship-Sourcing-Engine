@@ -21,6 +21,11 @@ const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     items: [
       { to: "/", label: "Dashboard", end: true },
       {
+        to: "/analytics",
+        label: "Analytics",
+        hint: "Email & LinkedIn, side by side",
+      },
+      {
         to: "/agent",
         label: "Campaigns",
         hint: "Autonomous daily outreach",

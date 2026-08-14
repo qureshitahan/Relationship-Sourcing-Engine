@@ -387,6 +387,43 @@ class UnipileLinkedInProvider(LinkedInProvider):
 
     # --- account management (connect / list) ---
 
+    def get_account(self, account_id: str) -> Optional[dict]:
+        """Fetch one account by id, or None if it cannot be resolved.
+
+        ``list_accounts`` is the normal path, but an account can send messages and
+        later stop appearing in that listing — leaving historical activity with no
+        name to show for it. Asking for the id directly recovers the name when the
+        account still exists in the tenant, and returns None when it genuinely
+        does not, which is the difference between "we could not look it up" and
+        "it is gone".
+        """
+        account_id = (account_id or "").strip()
+        if not account_id or not (self.api_key and self.base_url):
+            return None
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
+                resp = client.get(
+                    f"{self.base_url}/accounts/{account_id}", headers=self._headers()
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Unipile get_account error: %s", exc)
+            return None
+        if resp.status_code >= 400:
+            # 404 is expected and meaningful: the account is no longer in the tenant.
+            logger.info("Unipile get_account(%s) -> %s", account_id, resp.status_code)
+            return None
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {
+            "id": data.get("id") or account_id,
+            "name": data.get("name") or data.get("username"),
+            "type": data.get("type"),
+        }
+
     def list_accounts(self) -> list[dict]:
         """List LinkedIn accounts connected to this Unipile tenant."""
         if not (self.api_key and self.base_url):

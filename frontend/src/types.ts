@@ -403,6 +403,9 @@ export interface LinkedInAccountsResponse {
   active_account_id?: string | null;
   default_account_id?: string | null;
   accounts: LinkedInConnectedAccount[];
+  // Locally cached names, including accounts the provider is not listing right
+  // now. `manual` marks a name typed by a user, which outranks the provider's.
+  known_names?: Record<string, { name: string; manual: boolean }>;
 }
 
 /** Live state of the LinkedIn bulk approve+send job (drives the Stop button). */
@@ -909,6 +912,103 @@ export interface DashboardStats {
   open_rate: number;
   reply_rate: number;
   emails_by_status: Record<string, number>;
+  // LinkedIn funnel. No open-tracking exists on LinkedIn, so this side reports
+  // Invited (connection invitations sent) where email reports Opened.
+  linkedin_drafts: number;
+  linkedin_invited: number;
+  linkedin_sent: number;
+  linkedin_replied: number;
+  linkedin_reply_rate: number;
+  linkedin_by_status: Record<string, number>;
+  // Followers module — deliberately not folded into the counts above.
+  follower_dms_sent: number;
+  followers_total: number;
+  // Same activity as above, split by the account that sent it.
+  linkedin_by_account: LinkedInAccountStats[];
+  // {account_id: display name}, served from local storage so the per-account
+  // table stays named even when the provider listing is unavailable.
+  linkedin_account_names: Record<string, string>;
+}
+
+// --- Analytics ---------------------------------------------------------------
+// Email and LinkedIn are reported as two separate channels and never summed:
+// an email open has no LinkedIn equivalent, an invitation has no email
+// equivalent, and averaging their reply rates would compare different acts.
+
+export interface AnalyticsTotals {
+  total: number;
+  drafts: number;
+  approved: number;
+  sent: number;
+  replied: number;
+  reply_rate: number;
+  by_status: Record<string, number>;
+  // email only
+  scheduled: number;
+  opened: number;
+  open_rate: number;
+  // LinkedIn only
+  invited: number;
+  accepted: number;
+  acceptance_rate: number;
+}
+
+export interface AnalyticsTrendPoint {
+  date: string;
+  created: number;
+  sent: number;
+  replied: number;
+  opened: number;
+  invited: number;
+}
+
+export interface AnalyticsGroupRow {
+  key: string | null;
+  label: string;
+  total: number;
+  sent: number;
+  replied: number;
+  reply_rate: number;
+}
+
+export interface AnalyticsChannel {
+  channel: string;
+  totals: AnalyticsTotals;
+  trend: AnalyticsTrendPoint[];
+  by_campaign: AnalyticsGroupRow[];
+  by_principal: AnalyticsGroupRow[];
+}
+
+export interface AnalyticsFilterOption {
+  id: number;
+  label: string;
+}
+
+export interface AnalyticsOut {
+  days: number;
+  since?: string | null;
+  generated_at?: string | null;
+  email: AnalyticsChannel;
+  linkedin: AnalyticsChannel;
+  principals: AnalyticsFilterOption[];
+  campaigns: AnalyticsFilterOption[];
+}
+
+export interface AnalyticsQuery {
+  days?: number;
+  principal_id?: number;
+  campaign_id?: number;
+}
+
+export interface LinkedInAccountStats {
+  account_id: string;
+  invited: number;
+  accepted: number;
+  acceptance_rate: number;
+  sent: number;
+  replied: number;
+  reply_rate: number;
+  follower_dms_sent: number;
 }
 
 export interface ProviderStatus {

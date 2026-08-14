@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from app.api.routes import (
     agent,
+    analytics,
     automation,
     bulk_emails,
     calls,
@@ -23,6 +24,7 @@ from app.api.routes import (
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(stats.router)
+api_router.include_router(analytics.router)
 api_router.include_router(agent.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(principals.router)

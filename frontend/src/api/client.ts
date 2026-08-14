@@ -6,6 +6,8 @@ import type {
   AgentPlaybook,
   AgentRun,
   AgentVariantsResponse,
+  AnalyticsOut,
+  AnalyticsQuery,
   BulkCampaign,
   BulkCampaignDetail,
   BulkLookup,
@@ -54,6 +56,21 @@ export const api = axios.create({ baseURL: apiBase, timeout: 30_000 });
 // --- Stats ---
 export const getStats = () =>
   api.get<DashboardStats>("/api/stats").then((r) => r.data);
+
+// --- Analytics ---
+export const getAnalytics = (query: AnalyticsQuery = {}) => {
+  const params = new URLSearchParams();
+  // days=0 is meaningful ("all time"), so check for undefined rather than falsy.
+  if (query.days !== undefined) params.set("days", String(query.days));
+  if (query.principal_id !== undefined)
+    params.set("principal_id", String(query.principal_id));
+  if (query.campaign_id !== undefined)
+    params.set("campaign_id", String(query.campaign_id));
+  const qs = params.toString();
+  return api
+    .get<AnalyticsOut>(`/api/analytics${qs ? `?${qs}` : ""}`)
+    .then((r) => r.data);
+};
 
 // --- Pipeline optimization ---
 export const getOptimization = () =>
@@ -526,6 +543,14 @@ export const getLinkedInAccount = () =>
   api.get<LinkedInAccount>("/api/linkedin/account").then((r) => r.data);
 export const listLinkedInAccounts = () =>
   api.get<LinkedInAccountsResponse>("/api/linkedin/accounts").then((r) => r.data);
+/** Label a sending account by hand. An empty name clears the label. */
+export const setLinkedInAccountName = (accountId: string, name: string) =>
+  api
+    .put<{ known_names: Record<string, { name: string; manual: boolean }> }>(
+      "/api/linkedin/account-names",
+      { account_id: accountId, name }
+    )
+    .then((r) => r.data);
 export const createLinkedInConnectLink = (name?: string) =>
   api
     .post<{ url: string }>("/api/linkedin/connect-link", { name }, { timeout: 60000 })
