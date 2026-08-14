@@ -44,3 +44,5 @@ backend/uploads/
 # Local-only working files (kept on disk, deliberately not shared)
 context.md
 dev.ps1
+# Data export: carries real LinkedIn member ids, so it must never be committed.
+followers_migration.sql

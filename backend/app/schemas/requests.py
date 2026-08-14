@@ -246,6 +246,17 @@ class LinkedInSelectAccountRequest(BaseModel):
     account_id: str
 
 
+class LinkedInAccountNameRequest(BaseModel):
+    """Hand-typed display name for one sending account.
+
+    An empty/omitted ``name`` clears the label so the provider's own name applies
+    again on the next account sync.
+    """
+
+    account_id: str
+    name: Optional[str] = None
+
+
 class LinkedInSendOpenRequest(BaseModel):
     """Bulk approve + send all open (draft/approved) LinkedIn messages.
 

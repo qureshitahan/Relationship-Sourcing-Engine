@@ -11,18 +11,24 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.agent_config import AgentConfig
+from app.models.agent_copy_variant import AgentCopyVariant
 from app.models.agent_playbook import AgentPlaybook
 from app.models.agent_run import AgentRun
+from app.models.agent_variant import AgentVariant
+from app.models.bulk_campaign import BulkLookup
+from app.models.call import Call
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
 from app.models.enums import AuditAction
+from app.models.linkedin_message import LinkedInMessage
 from app.models.principal import Principal
 from app.models.relevance_insight import RelevanceInsight
+from app.models.suppression import OutreachHistory
 from app.schemas.entities import (
     CampaignDetailOut,
     CampaignListOut,
@@ -529,6 +535,161 @@ def cancel_send_all_drafts(campaign_id: int, db: Session = Depends(get_db)):
     return campaign_bulk_send.state_for(campaign_id)
 
 
+def _contacts_to_detach(
+    db: Session, campaign_id: int, contact_ids: list[int]
+) -> set[int]:
+    """Which of a campaign's prospects must OUTLIVE the campaign.
+
+    Deleting a campaign was written as "delete its prospects", which is right for
+    a prospect the campaign only ever discovered. It is wrong for one that was
+    actually reached: the LinkedIn row recording that touch points at the contact,
+    so removing the contact removes the touch — and that row is what feeds
+    per-account acceptance/reply rates AND the "never invite the same person
+    twice" guard (``_already_contacted_on_linkedin``, matched on LinkedIn
+    identity). Losing it means the same person can be invited again later, which
+    is exactly what gets a sending account flagged.
+
+    So a prospect with real outreach history is kept and merely detached from the
+    campaign. Returned here; everything else is still deleted as before.
+
+    Covers every table that references a contact and is NOT removed by this
+    endpoint — LinkedIn messages, calls, the outreach cooldown log, bulk-list
+    lookups, and drafts belonging to some other campaign. Each of those was
+    previously an unhandled foreign key: Postgres refused the delete and rolled
+    the whole transaction back, so the campaign silently would not delete.
+    """
+    if not contact_ids:
+        return set()
+
+    keep: set[int] = set()
+    for query in (
+        select(LinkedInMessage.contact_id).where(
+            LinkedInMessage.contact_id.in_(contact_ids)
+        ),
+        select(Call.contact_id).where(Call.contact_id.in_(contact_ids)),
+        select(OutreachHistory.contact_id).where(
+            OutreachHistory.contact_id.in_(contact_ids)
+        ),
+        select(BulkLookup.contact_id).where(BulkLookup.contact_id.in_(contact_ids)),
+        # Drafts from another campaign are not deleted here, so their prospect
+        # cannot be either.
+        select(EmailDraft.contact_id).where(
+            EmailDraft.contact_id.in_(contact_ids),
+            or_(
+                EmailDraft.campaign_id.is_(None),
+                EmailDraft.campaign_id != campaign_id,
+            ),
+        ),
+    ):
+        keep.update(cid for (cid,) in db.execute(query).all() if cid is not None)
+
+    # An insight cannot be deleted while something that survives still points at
+    # it, and a surviving insight in turn pins its prospect — so keep that
+    # prospect too rather than discovering the constraint at commit time.
+    insight_owner = {
+        iid: cid
+        for iid, cid in db.execute(
+            select(RelevanceInsight.id, RelevanceInsight.contact_id).where(
+                RelevanceInsight.contact_id.in_(contact_ids)
+            )
+        ).all()
+    }
+    if insight_owner:
+        insight_ids = list(insight_owner)
+        for query in (
+            select(LinkedInMessage.insight_id).where(
+                LinkedInMessage.insight_id.in_(insight_ids)
+            ),
+            select(Call.insight_id).where(Call.insight_id.in_(insight_ids)),
+            select(EmailDraft.insight_id).where(
+                EmailDraft.insight_id.in_(insight_ids),
+                or_(
+                    EmailDraft.campaign_id.is_(None),
+                    EmailDraft.campaign_id != campaign_id,
+                ),
+            ),
+        ):
+            for (iid,) in db.execute(query).all():
+                owner = insight_owner.get(iid)
+                if owner is not None:
+                    keep.add(owner)
+    return keep
+
+
+def _delete_orphan_playbook(db: Session, playbook_id: int) -> None:
+    """Drop a playbook no campaign uses any more, with what hangs off it.
+
+    This used to delete the playbook row on its own, but a playbook owns the A/B
+    machinery the dashboard shows as "who we target" and "how we write"
+    (``AgentVariant`` / ``AgentCopyVariant``), and those reference it. So the
+    delete raised ForeignKeyViolation — *after* the campaign had already been
+    committed as deleted, which turned a successful delete into a 500 and left
+    the UI sitting on a campaign that no longer existed.
+
+    Only reached when no campaign points at the playbook, so its variants belong
+    to nothing. The references cleared below are A/B attribution only ("which
+    variant wrote this draft"), never outreach content, so history stays intact.
+    """
+    still_used = db.execute(
+        select(func.count())
+        .select_from(AgentConfig)
+        .where(AgentConfig.playbook_id == playbook_id)
+    ).scalar_one()
+    if still_used:
+        return
+    playbook = db.get(AgentPlaybook, playbook_id)
+    if playbook is None:
+        return
+
+    copy_variant_ids = [
+        vid
+        for (vid,) in db.execute(
+            select(AgentCopyVariant.id).where(
+                AgentCopyVariant.playbook_id == playbook_id
+            )
+        ).all()
+    ]
+    variant_ids = [
+        vid
+        for (vid,) in db.execute(
+            select(AgentVariant.id).where(AgentVariant.playbook_id == playbook_id)
+        ).all()
+    ]
+
+    if copy_variant_ids:
+        for draft in db.execute(
+            select(EmailDraft).where(EmailDraft.copy_variant_id.in_(copy_variant_ids))
+        ).scalars().all():
+            draft.copy_variant_id = None
+    if variant_ids:
+        for contact in db.execute(
+            select(Contact).where(Contact.variant_id.in_(variant_ids))
+        ).scalars().all():
+            contact.variant_id = None
+        for run in db.execute(
+            select(AgentRun).where(AgentRun.variant_id.in_(variant_ids))
+        ).scalars().all():
+            run.variant_id = None
+    for run in db.execute(
+        select(AgentRun).where(AgentRun.playbook_id == playbook_id)
+    ).scalars().all():
+        run.playbook_id = None
+
+    for copy_variant in db.execute(
+        select(AgentCopyVariant).where(AgentCopyVariant.playbook_id == playbook_id)
+    ).scalars().all():
+        db.delete(copy_variant)
+    for variant in db.execute(
+        select(AgentVariant).where(AgentVariant.playbook_id == playbook_id)
+    ).scalars().all():
+        db.delete(variant)
+    # Flushed before the playbook for the same reason as above: without ORM
+    # relationships the session will not order these two deletes itself.
+    db.flush()
+    db.delete(playbook)
+    db.commit()
+
+
 @router.delete("/{campaign_id}", status_code=204)
 def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
     config = _get_campaign(db, campaign_id)
@@ -542,16 +703,32 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
         ).all()
         if cid is not None
     ]
-    if contact_ids:
-        for insight in db.execute(
-            select(RelevanceInsight).where(RelevanceInsight.contact_id.in_(contact_ids))
-        ).scalars().all():
-            db.delete(insight)
-        for contact in db.execute(
-            select(Contact).where(Contact.id.in_(contact_ids))
-        ).scalars().all():
-            db.delete(contact)
+    # Prospects that were actually reached are kept (see _contacts_to_detach);
+    # the rest are deleted exactly as before.
+    detach_ids = _contacts_to_detach(db, campaign_id, contact_ids)
+    removable_ids = [cid for cid in contact_ids if cid not in detach_ids]
 
+    # LinkedIn rows outlive the campaign for the same reason their prospects do,
+    # so only the campaign link is cleared. Nothing about the message, its
+    # sending account, or its timestamps changes, which is what keeps the
+    # dashboard's per-account figures and the duplicate-invite guard correct.
+    for message in db.execute(
+        select(LinkedInMessage).where(LinkedInMessage.campaign_id == campaign_id)
+    ).scalars().all():
+        message.campaign_id = None
+
+    if detach_ids:
+        for contact in db.execute(
+            select(Contact).where(Contact.id.in_(detach_ids))
+        ).scalars().all():
+            contact.campaign_id = None
+
+    # These models declare foreign keys but no ORM ``relationship()``, so the
+    # unit of work has no dependency graph to sort a flush by and will happily
+    # emit ``DELETE FROM agent_configs`` before the rows pointing at it. Each
+    # stage below is therefore flushed in dependency order by hand — children
+    # first, parents last — rather than left to the ORM's ordering. Same rows
+    # are removed as before; only the order they reach the database is pinned.
     for run in db.execute(
         select(AgentRun).where(AgentRun.campaign_id == campaign_id)
     ).scalars().all():
@@ -564,18 +741,40 @@ def delete_campaign(campaign_id: int, db: Session = Depends(get_db)):
         select(EmailDraft).where(EmailDraft.campaign_id == campaign_id)
     ).scalars().all():
         db.delete(draft)
+    # Drafts carry both a contact and an insight, so they have to go before
+    # either of those can be removed.
+    db.flush()
+
+    if removable_ids:
+        for insight in db.execute(
+            select(RelevanceInsight).where(
+                RelevanceInsight.contact_id.in_(removable_ids)
+            )
+        ).scalars().all():
+            db.delete(insight)
+        db.flush()
+        for contact in db.execute(
+            select(Contact).where(Contact.id.in_(removable_ids))
+        ).scalars().all():
+            db.delete(contact)
+        db.flush()
 
     db.delete(config)
     db.commit()
-    # Best-effort cleanup of the campaign's own playbook (if not shared).
+    # Best-effort cleanup of the campaign's own playbook (if not shared). The
+    # campaign is already committed as deleted above, so this must never be able
+    # to fail the request: it said "best-effort" but had no guard, and the
+    # foreign-key error it raised surfaced as a 500 on a delete that had in fact
+    # succeeded. Leaving an unused playbook behind is harmless — nothing lists it
+    # once no campaign points at it.
     if playbook_id:
-        still_used = db.execute(
-            select(func.count())
-            .select_from(AgentConfig)
-            .where(AgentConfig.playbook_id == playbook_id)
-        ).scalar_one()
-        if not still_used:
-            pb = db.get(AgentPlaybook, playbook_id)
-            if pb is not None:
-                db.delete(pb)
-                db.commit()
+        try:
+            _delete_orphan_playbook(db, playbook_id)
+        except Exception:  # noqa: BLE001 - cleanup must not fail a done delete
+            db.rollback()
+            logging.getLogger(__name__).exception(
+                "Could not clean up playbook %s after deleting campaign %s; "
+                "leaving it in place",
+                playbook_id,
+                campaign_id,
+            )

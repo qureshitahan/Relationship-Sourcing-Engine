@@ -582,6 +582,10 @@ def _run_linkedin_account(db: Session, spec: LinkedInSpec) -> dict:
             )
             msg = LinkedInMessage(
                 principal_id=principal.id,
+                # From the prospect, matching the LinkedIn routes. ``spec.campaign``
+                # is this job's hardcoded config object, not an AgentConfig row, so
+                # it carries no id to attribute against — the contact does.
+                campaign_id=contact.campaign_id,
                 company_id=contact.company_id,
                 contact_id=contact.id,
                 insight_id=insight.id if insight else None,

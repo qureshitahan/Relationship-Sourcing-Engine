@@ -601,6 +601,33 @@ class AgentPlanOut(BaseModel):
     rationale: Optional[str] = None
 
 
+class LinkedInAccountStats(BaseModel):
+    """LinkedIn outcomes for ONE sending account.
+
+    Keyed by provider account id only. The human name lives with the provider
+    (Unipile ``/accounts``), so the dashboard endpoint stays a pure database read
+    and the UI joins names from the account list it already loads — a provider
+    outage costs a label, not the numbers.
+
+    Only messages that actually left are attributable: ``from_account`` is
+    stamped at send time, so drafts have no account yet and are deliberately
+    absent here rather than guessed at.
+    """
+
+    account_id: str
+    invited: int = 0
+    # Invitations that were accepted: the invite went out and the DM then
+    # delivered. This is the acceptance signal — LinkedIn reports no other.
+    accepted: int = 0
+    acceptance_rate: float = 0.0
+    sent: int = 0
+    replied: int = 0
+    reply_rate: float = 0.0
+    # Followers-module DMs from this account, kept as its own column for the same
+    # reason the totals keep them apart: a bulk blast would distort reply rates.
+    follower_dms_sent: int = 0
+
+
 class DashboardStats(BaseModel):
     principals_total: int
     organizations_total: int
@@ -621,6 +648,102 @@ class DashboardStats(BaseModel):
     open_rate: float = 0.0
     reply_rate: float = 0.0
     emails_by_status: dict = {}
+    # --- LinkedIn funnel (prospect messages; follower DMs counted separately) ---
+    # Defaulted like the email funnel above so a deployment with no LinkedIn
+    # activity, or one whose LinkedIn tables are absent, still returns valid stats.
+    # There is no LinkedIn equivalent of emails_opened: LinkedIn gives no read
+    # receipts, so the funnel's LinkedIn row reports Invited instead of Opened.
+    linkedin_drafts: int = 0
+    linkedin_invited: int = 0
+    linkedin_sent: int = 0
+    linkedin_replied: int = 0
+    linkedin_reply_rate: float = 0.0
+    linkedin_by_status: dict = {}
+    follower_dms_sent: int = 0
+    followers_total: int = 0
+    # Per-sending-account breakout. The totals above stay blended on purpose —
+    # this is the same activity split by which account sent it, so a team can see
+    # one account's acceptance and reply rates without another's volume hiding it.
+    linkedin_by_account: list[LinkedInAccountStats] = []
+    # ``{account_id: display name}``, read from local storage rather than the
+    # provider, so the per-account table stays readable when Unipile is
+    # unreachable — an outage costs a fresh name, not every name.
+    linkedin_account_names: dict = {}
+
+
+class AnalyticsTotals(BaseModel):
+    """Headline counts for ONE channel.
+
+    Both channels share this shape so the UI can render them with one component,
+    but a value is never summed across channels: the extras below exist on one
+    side only, because the acts they measure exist on one side only. Email has
+    opens (a tracking pixel); LinkedIn has invitations (a connection request).
+    Neither has an equivalent on the other side, and the zero simply means
+    "not a thing here".
+    """
+
+    total: int = 0
+    drafts: int = 0
+    approved: int = 0
+    sent: int = 0
+    replied: int = 0
+    reply_rate: float = 0.0
+    by_status: dict = {}
+    # --- email only ---
+    scheduled: int = 0
+    opened: int = 0
+    open_rate: float = 0.0
+    # --- LinkedIn only ---
+    invited: int = 0
+    accepted: int = 0
+    acceptance_rate: float = 0.0
+
+
+class AnalyticsTrendPoint(BaseModel):
+    """One calendar day. Each event counts on the day it actually happened."""
+
+    date: str
+    created: int = 0
+    sent: int = 0
+    replied: int = 0
+    opened: int = 0  # email only
+    invited: int = 0  # LinkedIn only
+
+
+class AnalyticsGroupRow(BaseModel):
+    """Performance for one campaign or one principal, within a single channel."""
+
+    key: Optional[str] = None
+    label: str
+    total: int = 0
+    sent: int = 0
+    replied: int = 0
+    reply_rate: float = 0.0
+
+
+class AnalyticsChannel(BaseModel):
+    """Everything reported for one channel. Never merged with the other."""
+
+    channel: str
+    totals: AnalyticsTotals
+    trend: list[AnalyticsTrendPoint] = []
+    by_campaign: list[AnalyticsGroupRow] = []
+    by_principal: list[AnalyticsGroupRow] = []
+
+
+class AnalyticsFilterOption(BaseModel):
+    id: int
+    label: str
+
+
+class AnalyticsOut(BaseModel):
+    days: int
+    since: Optional[str] = None
+    generated_at: Optional[str] = None
+    email: AnalyticsChannel
+    linkedin: AnalyticsChannel
+    principals: list[AnalyticsFilterOption] = []
+    campaigns: list[AnalyticsFilterOption] = []
 
 
 class ProviderStatusOut(BaseModel):
