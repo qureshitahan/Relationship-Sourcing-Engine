@@ -486,6 +486,10 @@ def generate_run_messages(payload: LinkedInGenerateRunRequest, db: Session = Dep
             db.add(
                 LinkedInMessage(
                     principal_id=principal.id,
+                    # Same rule as the single-draft path above: the campaign comes
+                    # from the prospect, so bulk-generated messages are reportable
+                    # per campaign too.
+                    campaign_id=contact.campaign_id,
                     company_id=contact.company_id,
                     contact_id=contact.id,
                     insight_id=insight.id if insight else None,

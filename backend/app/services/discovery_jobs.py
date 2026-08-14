@@ -835,6 +835,10 @@ def _linkedin_draft_worker(
                         db.add(
                             LinkedInMessage(
                                 principal_id=principal.id,
+                                # From the prospect, as everywhere else that creates
+                                # one of these, so a run's LinkedIn drafts land under
+                                # the campaign that surfaced the people.
+                                campaign_id=contact.campaign_id,
                                 company_id=contact.company_id,
                                 contact_id=contact_id,
                                 insight_id=insight_id,
