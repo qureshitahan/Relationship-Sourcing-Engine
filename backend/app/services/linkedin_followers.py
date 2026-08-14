@@ -812,6 +812,20 @@ def send_all(
     if approve_first:
         approve_all(db, campaign_key=campaign_key)
 
+    # Followers whose checkpoint would refuse a claim anyway — SENT (already
+    # delivered) or CLAIMED (outcome unknown, deliberately never auto-retried).
+    # Mirrors ``_claim`` exactly: FAILED and SKIPPED stay out of this set, so a
+    # retryable follower is still queued and retried as before.
+    settled = select(LinkedInFollowerSend.follower_provider_id).where(
+        LinkedInFollowerSend.account_id == account_id,
+        LinkedInFollowerSend.campaign_key == campaign_key,
+        LinkedInFollowerSend.status.not_in(FollowerSendStatus.RETRYABLE),
+    )
+    settled_followers = select(LinkedInFollower.id).where(
+        LinkedInFollower.account_id == account_id,
+        LinkedInFollower.provider_id.in_(settled),
+    )
+
     messages = list(
         db.execute(
             select(LinkedInMessage)
@@ -821,6 +835,14 @@ def send_all(
                 LinkedInMessage.status.in_(
                     [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
                 ),
+                # Keep the settled ones out of the queue rather than discovering
+                # them one by one inside it. They were skipped correctly, but the
+                # queue is capped per day and ordered by id, so a block of old
+                # already-contacted drafts at the front consumed an entire run's
+                # allowance and delivered nothing. This is a pre-filter only —
+                # every send still passes through ``_claim``, which remains the
+                # actual duplicate guarantee.
+                LinkedInMessage.follower_id.not_in(settled_followers),
             )
             .order_by(LinkedInMessage.id)
         ).scalars().all()
