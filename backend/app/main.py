@@ -1,8 +1,12 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api.routes import api_router
 from app.core.config import settings
@@ -19,12 +23,66 @@ from app.services.linkedin_scheduler import (
 )
 
 
+class ServerErrorAsJSON:
+    """Answer an uncaught exception with a JSON 500 from INSIDE the CORS layer.
+
+    Starlette's own error handling sits *outside* ``CORSMiddleware``, so a crash
+    produced a bare 500 carrying no ``Access-Control-Allow-Origin`` header. The
+    browser then refuses to read it and reports "blocked by CORS policy" — which
+    is not what went wrong, hides the real error from the console, and sends
+    anyone debugging after a phantom CORS misconfiguration. (That is exactly how
+    a foreign-key error on campaign delete stayed invisible.)
+
+    Sitting inside CORS means the 500 gets the usual headers on the way out and
+    the frontend can read ``detail``. Successful responses pass through
+    untouched. The traceback is logged here because swallowing the exception
+    stops the server from logging it — the Azure log stream keeps showing it.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def _send(message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:  # noqa: BLE001 - turn any crash into a readable 500
+            logging.getLogger(__name__).exception(
+                "Unhandled error in %s %s",
+                scope.get("method", "?"),
+                scope.get("path", "?"),
+            )
+            if started:
+                # Headers are already on the wire; nothing can be changed now.
+                raise
+            await JSONResponse(
+                {"detail": "Internal Server Error"}, status_code=500
+            )(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
         description="Recruiting outreach automation platform (MVP).",
     )
+
+    # Added BEFORE the CORS middleware on purpose: Starlette runs the most
+    # recently added middleware outermost, so registering this first places it
+    # inside CORSMiddleware — which is the only position where the 500 it returns
+    # still picks up the CORS headers on its way back out.
+    app.add_middleware(ServerErrorAsJSON)
 
     app.add_middleware(
         CORSMiddleware,

@@ -1081,6 +1081,15 @@ export default function CampaignDashboard() {
       qc.invalidateQueries({ queryKey: ["campaigns"] });
       navigate("/agent");
     },
+    // Every other mutation on this page reports its failure; this one did not,
+    // so a rejected delete left the page exactly as it was and the button simply
+    // looked dead. Say what the server said instead.
+    onError: (e: unknown) => {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
+        "Could not delete this campaign.";
+      notifyError(String(msg));
+    },
   });
 
   if (isLoading) return <Loading />;
