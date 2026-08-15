@@ -10,14 +10,18 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.bulk_campaign import BulkCampaign, BulkLookup
+from app.models.call import Call
 from app.models.company import Company
 from app.models.contact import Contact
 from app.models.email_draft import EmailDraft
+from app.models.linkedin_message import LinkedInMessage
+from app.models.relevance_insight import RelevanceInsight
+from app.models.suppression import OutreachHistory
 from app.models.enums import BulkCampaignStatus, BulkLookupStatus, EmailStatus
 from app.schemas.entities import (
     BulkCampaignDetailOut,
@@ -532,6 +536,29 @@ def get_bulk_recipients(campaign_id: int, db: Session = Depends(get_db)):
     return out
 
 
+def _detach_contact_history(db: Session, contact_ids: list[int]) -> None:
+    """Unlink append-only records from contacts that are about to be deleted.
+
+    Sending an email writes an ``outreach_history`` row, and that row outlives the
+    recipient by design: it is the cooldown / rate-limit trail, and the followers
+    module already writes it with no contact at all. Research notes, calls and
+    LinkedIn messages are the same kind of record.
+
+    They are detached rather than deleted — every one of these columns is
+    nullable, so the history survives with the person's row removed. Left
+    attached they hold a foreign key to a row being deleted, which is what made
+    "delete this campaign" fail with a 500 for any campaign that had ever sent.
+    """
+    if not contact_ids:
+        return
+    for model in (OutreachHistory, RelevanceInsight, Call, LinkedInMessage):
+        db.execute(
+            update(model)
+            .where(model.contact_id.in_(contact_ids))
+            .values(contact_id=None)
+        )
+
+
 @router.delete("/{campaign_id}/recipients/{contact_id}", status_code=204)
 def remove_bulk_recipient(
     campaign_id: int, contact_id: int, db: Session = Depends(get_db)
@@ -557,6 +584,11 @@ def remove_bulk_recipient(
         select(BulkLookup).where(BulkLookup.contact_id == contact_id)
     ).scalars().all():
         db.delete(lookup)
+    _detach_contact_history(db, [contact_id])
+    # Same ordering hazard as deleting a whole campaign: the drafts and lookups
+    # above reference this contact by plain foreign key, so they must reach the
+    # database before the row they point at.
+    db.flush()
     db.delete(contact)
     db.commit()
 
@@ -577,9 +609,20 @@ def delete_bulk_campaign(campaign_id: int, db: Session = Depends(get_db)):
         select(BulkLookup).where(BulkLookup.campaign_id == campaign_id)
     ).scalars().all():
         db.delete(lookup)
+    contact_ids: list[int] = []
     for contact in db.execute(
         select(Contact).where(Contact.bulk_campaign_id == campaign_id)
     ).scalars().all():
         db.delete(contact)
+        contact_ids.append(contact.id)
+    _detach_contact_history(db, contact_ids)
+    # Send the children to the database BEFORE removing the campaign they point
+    # at. Nothing above declares an ORM relationship from those rows back to
+    # BulkCampaign — they carry a plain foreign key column — so the unit of work
+    # has no dependency to order the statements by, and emitted the campaign's
+    # DELETE first. SQLite ignores foreign keys by default, so this passed in
+    # development and failed with a 500 on Postgres, where the constraint is
+    # enforced and every campaign holding a recipient refused to delete.
+    db.flush()
     db.delete(campaign)
     db.commit()

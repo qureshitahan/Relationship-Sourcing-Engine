@@ -15,7 +15,11 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { getAnalytics } from "../api/client";
-import type { AnalyticsChannel, AnalyticsGroupRow } from "../types";
+import type {
+  AnalyticsChannel,
+  AnalyticsFollowers,
+  AnalyticsGroupRow,
+} from "../types";
 import { BarList, StatTile, TrendChart } from "../components/charts";
 import { VIZ } from "../components/vizPalette";
 import type { BarRow, Series } from "../components/vizPalette";
@@ -435,6 +439,178 @@ function LinkedInSection({ channel }: { channel: AnalyticsChannel }) {
   );
 }
 
+/**
+ * Followers — its own section, never folded into LinkedIn above.
+ *
+ * The two measure different acts: prospect outreach invites a stranger and waits
+ * for acceptance, while a follower DM goes to an audience that already follows
+ * the account, with no invitation step. Merging them would let one bulk follower
+ * send swamp the prospect reply rate.
+ *
+ * Grouped by account because that is the only grouping this module has — a
+ * follower belongs to the account they follow, and the DM is sent from that same
+ * account. There is no campaign or principal behind it, which is also why the
+ * filters at the top of the page do not apply here; the note below says so
+ * rather than letting the numbers look filtered when they are not.
+ */
+function FollowersSection({ followers }: { followers: AnalyticsFollowers }) {
+  const rows = followers.by_account ?? [];
+  const t = followers.totals;
+  const needsReview = rows.reduce((n, r) => n + r.needs_review, 0);
+
+  return (
+    <section className="mb-10">
+      <div className="mb-1 flex items-center gap-2">
+        <span
+          aria-hidden
+          className="inline-block h-2.5 w-2.5 rounded-full"
+          style={{ backgroundColor: VIZ.series[2] }}
+        />
+        <h2 className="text-base font-semibold text-slate-900">
+          LinkedIn followers
+        </h2>
+      </div>
+      <p className="mb-4 max-w-4xl text-xs text-slate-400">
+        DMs to people who already follow a connected account — counted apart from
+        the prospect outreach above, and never added to it. Audience size and who
+        has been contacted are <b>all-time</b> figures: a follower carries no
+        "started following" date, so there is nothing to measure a window
+        against. Everything sent and replied does follow the selected range. The
+        principal and campaign filters do not apply here, because a follower
+        belongs to an account rather than to a campaign.
+      </p>
+
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        <StatTile label="Followers" value={t.followers} sub="all time" />
+        <StatTile
+          label="Contacted"
+          value={t.contacted}
+          sub={`${t.never_contacted} never contacted`}
+          tone="amber"
+        />
+        <StatTile label="DMs sent" value={t.sent} sub="in range" tone="blue" />
+        <StatTile
+          label="Replied"
+          value={t.replied}
+          sub={`${pct(t.reply_rate)} reply rate`}
+          tone="green"
+        />
+      </div>
+
+      {/*
+        Surfaced rather than buried in the table: an interrupted send left an
+        outcome nobody knows, and it is deliberately never retried automatically
+        (a possible duplicate is worse than a missed message), so it stays open
+        until a person looks at it.
+      */}
+      {needsReview > 0 && (
+        <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {needsReview} send{needsReview === 1 ? "" : "s"} need review — the job
+          stopped mid-send, so whether the message went out is unknown. These are
+          never retried on their own; check them on the Followers page.
+        </p>
+      )}
+
+      <Card className="p-5">
+        <div className="mb-3 text-sm font-semibold text-slate-800">
+          By sending account
+        </div>
+        {rows.length === 0 ? (
+          <p className="py-4 text-sm text-slate-400">
+            No followers synced yet.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[44rem] text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+                  <th className="py-2 pr-3 text-left font-medium">Account</th>
+                  <th className="px-3 py-2 text-right font-medium">Followers</th>
+                  <th className="px-3 py-2 text-right font-medium">Contacted</th>
+                  <th className="px-3 py-2 text-right font-medium">
+                    Never contacted
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium">DMs sent</th>
+                  <th className="px-3 py-2 text-right font-medium">Replied</th>
+                  <th className="px-3 py-2 text-right font-medium">Reply rate</th>
+                  <th className="px-3 py-2 text-right font-medium">
+                    Not reachable
+                  </th>
+                  <th className="py-2 pl-3 text-right font-medium">
+                    Needs review
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr
+                    key={r.account_id}
+                    className="border-b border-slate-100 last:border-0"
+                  >
+                    {/*
+                      The account's own name when it is known, otherwise a
+                      shortened id with the full value in the tooltip. Never a
+                      guessed name — a wrong label on a performance report is
+                      worse than a raw id.
+                    */}
+                    <td className="py-2 pr-3" title={r.account_id}>
+                      {r.account_name ? (
+                        <span className="font-medium text-slate-900">
+                          {r.account_name}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-xs text-slate-500">
+                          {r.account_id.slice(0, 10)}…
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.followers}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.contacted}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">
+                      {r.never_contacted}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-800">
+                      {r.sent}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.replied}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {r.sent ? (
+                        <span className="font-medium text-emerald-700">
+                          {pct(r.reply_rate)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">
+                      {r.not_reachable || <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="py-2 pl-3 text-right tabular-nums">
+                      {r.needs_review ? (
+                        <span className="font-medium text-amber-700">
+                          {r.needs_review}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 export default function Analytics() {
   const [days, setDays] = useState<number>(30);
   const [principalId, setPrincipalId] = useState<string>("");
@@ -528,6 +704,8 @@ export default function Analytics() {
       <div className={isFetching ? "opacity-60 transition-opacity" : undefined}>
         <EmailSection channel={data.email} />
         <LinkedInSection channel={data.linkedin} />
+        {/* Optional so an API that predates this section renders as before. */}
+        {data.followers && <FollowersSection followers={data.followers} />}
       </div>
     </div>
   );

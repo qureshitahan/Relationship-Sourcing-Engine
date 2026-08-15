@@ -999,12 +999,37 @@ export interface AnalyticsFilterOption {
   label: string;
 }
 
+/** Followers-module outcomes for one connected LinkedIn account. */
+export interface AnalyticsFollowerAccountRow {
+  account_id: string;
+  account_name?: string | null;
+  // Roster figures are always all-time: a follower carries no reliable
+  // "started following" date to window by.
+  followers: number;
+  contacted: number;
+  never_contacted: number;
+  // These respect the selected window, like the rest of the page.
+  sent: number;
+  replied: number;
+  reply_rate: number;
+  not_reachable: number;
+  needs_review: number;
+}
+
+export interface AnalyticsFollowers {
+  by_account: AnalyticsFollowerAccountRow[];
+  totals: AnalyticsFollowerAccountRow;
+}
+
 export interface AnalyticsOut {
   days: number;
   since?: string | null;
   generated_at?: string | null;
   email: AnalyticsChannel;
   linkedin: AnalyticsChannel;
+  // Reported on its own, never folded into the LinkedIn channel. Optional so an
+  // API that predates this section still typechecks.
+  followers?: AnalyticsFollowers;
   principals: AnalyticsFilterOption[];
   campaigns: AnalyticsFilterOption[];
 }
