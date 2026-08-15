@@ -755,12 +755,71 @@ class AnalyticsFilterOption(BaseModel):
     label: str
 
 
+class AnalyticsFollowerAccountRow(BaseModel):
+    """Followers-module outcomes for ONE connected LinkedIn account.
+
+    Reported per account because that is the only grouping this module has: a
+    follower belongs to the account they follow, and a DM is sent from that same
+    account. There is no campaign or principal to group by — the Followers module
+    addresses an audience, not a prospect list.
+
+    Two different clocks live in this row, which is why they are named apart:
+    ``followers``/``contacted``/``never_contacted`` describe the roster as it
+    stands right now (a follower carries no reliable "started following" date, so
+    a trailing window over them would be invented), while ``sent``/``replied``
+    respect the selected window like every other figure on the page.
+    """
+
+    account_id: str
+    # Display name when one is known locally; the UI falls back to the id.
+    account_name: Optional[str] = None
+
+    # --- roster: always all-time, never windowed ---
+    followers: int = 0
+    contacted: int = 0
+    never_contacted: int = 0
+
+    # --- outreach: windowed ---
+    sent: int = 0
+    replied: int = 0
+    reply_rate: float = 0.0
+    # Reachable by no available path when we tried (not connected, not an open
+    # profile, no InMail). Retryable later, so it is not a failure.
+    not_reachable: int = 0
+    # Claims whose outcome is unknown after an interrupted send. Never retried
+    # automatically, so they are surfaced for a human to check.
+    needs_review: int = 0
+
+
+class AnalyticsFollowers(BaseModel):
+    """The Followers module, reported on its own.
+
+    Deliberately NOT folded into the LinkedIn channel. The two measure different
+    acts: prospect outreach invites a stranger and waits for acceptance, while a
+    follower DM goes to an existing audience with no invitation step. Merging
+    them would let one bulk follower send swamp the prospect reply rate, which is
+    the same reason ``linkedin_messages`` queries elsewhere filter on
+    ``follower_id``.
+    """
+
+    by_account: list[AnalyticsFollowerAccountRow] = []
+    # Column sums of the rows above, so the section can show a headline without
+    # the UI re-deriving one. Rates are recomputed from the totals rather than
+    # averaged, since averaging per-account rates would weight a quiet account
+    # the same as a busy one.
+    totals: AnalyticsFollowerAccountRow = AnalyticsFollowerAccountRow(account_id="")
+
+
 class AnalyticsOut(BaseModel):
     days: int
     since: Optional[str] = None
     generated_at: Optional[str] = None
     email: AnalyticsChannel
     linkedin: AnalyticsChannel
+    # Additive: defaulted so any caller reading only the two channels above is
+    # unaffected, and a deployment whose follower tables are missing still gets a
+    # valid response.
+    followers: AnalyticsFollowers = AnalyticsFollowers()
     principals: list[AnalyticsFilterOption] = []
     campaigns: list[AnalyticsFilterOption] = []
 

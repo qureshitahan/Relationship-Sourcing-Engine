@@ -31,16 +31,24 @@ from app.models.agent_config import AgentConfig
 from app.models.bulk_campaign import BulkCampaign
 from app.models.email_draft import EmailDraft
 from app.models.enums import EmailStatus, LinkedInStatus
+from app.models.linkedin_follower import (
+    FollowerSendStatus,
+    LinkedInFollower,
+    LinkedInFollowerSend,
+)
 from app.models.linkedin_message import LinkedInMessage
 from app.models.principal import Principal
 from app.schemas.entities import (
     AnalyticsChannel,
     AnalyticsFilterOption,
+    AnalyticsFollowerAccountRow,
+    AnalyticsFollowers,
     AnalyticsGroupRow,
     AnalyticsOut,
     AnalyticsTotals,
     AnalyticsTrendPoint,
 )
+from app.services.linkedin_account_names import resolved_names as resolved_account_names
 
 logger = logging.getLogger(__name__)
 
@@ -519,6 +527,134 @@ def _campaign_labels(db: Session, principal_names: dict[int, str]) -> dict[int, 
     return labels
 
 
+def _followers_by_account(
+    db: Session, since: Optional[datetime]
+) -> AnalyticsFollowers:
+    """The Followers module split by the account that owns the audience.
+
+    Every figure mirrors a definition the Followers page already uses (see
+    ``services/linkedin_followers.account_stats``) rather than inventing a second
+    opinion — the two screens must agree. What changes here is only the scope:
+    that function answers for one account and one message, this one answers for
+    every account across every message.
+
+    Roster counts are all-time by design (a follower has no "followed on" date to
+    window by); sends and replies respect the window like the rest of the page.
+    """
+    account_names = resolved_account_names()
+
+    def _grouped(query) -> dict[str, int]:
+        return {acct: int(n or 0) for acct, n in db.execute(query).all() if acct}
+
+    # The roster: one row per (account, follower), so a plain count is the
+    # audience size for that account.
+    followers = _grouped(
+        select(LinkedInFollower.account_id, func.count()).group_by(
+            LinkedInFollower.account_id
+        )
+    )
+
+    # Checkpoint truth, counted DISTINCT: the same follower reached under two
+    # different messages is one person contacted, not two.
+    contacted = _grouped(
+        select(
+            LinkedInFollowerSend.account_id,
+            func.count(func.distinct(LinkedInFollowerSend.follower_provider_id)),
+        )
+        .where(LinkedInFollowerSend.status == FollowerSendStatus.SENT)
+        .group_by(LinkedInFollowerSend.account_id)
+    )
+
+    sent_where = [LinkedInFollowerSend.status == FollowerSendStatus.SENT]
+    if since is not None:
+        sent_where.append(LinkedInFollowerSend.sent_at >= since)
+    sent = _grouped(
+        select(LinkedInFollowerSend.account_id, func.count())
+        .where(*sent_where)
+        .group_by(LinkedInFollowerSend.account_id)
+    )
+
+    # Replies live on the message, not the checkpoint — the same place the
+    # Followers page reads them from. ``follower_id IS NOT NULL`` is what marks a
+    # message as a follower DM, the exact inverse of the prospect filter above.
+    replied_where = [
+        LinkedInMessage.follower_id.is_not(None),
+        LinkedInMessage.status == LinkedInStatus.REPLIED,
+        LinkedInMessage.from_account.is_not(None),
+    ]
+    if since is not None:
+        replied_where.append(LinkedInMessage.replied_at >= since)
+    replied = _grouped(
+        select(LinkedInMessage.from_account, func.count())
+        .where(*replied_where)
+        .group_by(LinkedInMessage.from_account)
+    )
+
+    # Not a failure: no path was open at the time (not connected, not an open
+    # profile, no InMail), and connection state changes, so it is retryable.
+    not_reachable = _grouped(
+        select(LinkedInFollowerSend.account_id, func.count())
+        .where(LinkedInFollowerSend.status == FollowerSendStatus.SKIPPED)
+        .group_by(LinkedInFollowerSend.account_id)
+    )
+
+    # A claim whose outcome is unknown. Never windowed: an interrupted send stays
+    # outstanding until someone looks at it, so hiding it once it ages out of the
+    # window would quietly drop the very thing that needs attention.
+    needs_review = _grouped(
+        select(LinkedInFollowerSend.account_id, func.count())
+        .where(LinkedInFollowerSend.status == FollowerSendStatus.CLAIMED)
+        .group_by(LinkedInFollowerSend.account_id)
+    )
+
+    account_ids = (
+        set(followers)
+        | set(contacted)
+        | set(sent)
+        | set(replied)
+        | set(not_reachable)
+        | set(needs_review)
+    )
+
+    rows = [
+        AnalyticsFollowerAccountRow(
+            account_id=acct,
+            account_name=account_names.get(acct),
+            followers=followers.get(acct, 0),
+            contacted=contacted.get(acct, 0),
+            # Clamped: a follower who has since unfollowed can still hold a send
+            # checkpoint, which would otherwise show as a negative remainder.
+            never_contacted=max(0, followers.get(acct, 0) - contacted.get(acct, 0)),
+            sent=sent.get(acct, 0),
+            replied=replied.get(acct, 0),
+            reply_rate=_rate(replied.get(acct, 0), sent.get(acct, 0)),
+            not_reachable=not_reachable.get(acct, 0),
+            needs_review=needs_review.get(acct, 0),
+        )
+        for acct in account_ids
+    ]
+    # Busiest audience first, then by how much was sent, so the account doing the
+    # work leads the table.
+    rows.sort(key=lambda r: (-r.followers, -r.sent, r.account_id))
+
+    total_sent = sum(r.sent for r in rows)
+    total_replied = sum(r.replied for r in rows)
+    totals = AnalyticsFollowerAccountRow(
+        account_id="",
+        followers=sum(r.followers for r in rows),
+        contacted=sum(r.contacted for r in rows),
+        never_contacted=sum(r.never_contacted for r in rows),
+        sent=total_sent,
+        replied=total_replied,
+        # From the summed counts, not an average of the per-account rates: a
+        # quiet account must not weigh as much as a busy one.
+        reply_rate=_rate(total_replied, total_sent),
+        not_reachable=sum(r.not_reachable for r in rows),
+        needs_review=sum(r.needs_review for r in rows),
+    )
+    return AnalyticsFollowers(by_account=rows, totals=totals)
+
+
 @router.get("/analytics", response_model=AnalyticsOut)
 def analytics(
     db: Session = Depends(get_db),
@@ -560,12 +696,29 @@ def analytics(
         by_principal=_linkedin_by_principal(db, since, linkedin_where, principal_names),
     )
 
+    # The Followers module has no principal or campaign to filter by — a
+    # follower belongs to the account they follow — so those filters simply do
+    # not apply here, and the section says so rather than silently reporting
+    # unfiltered numbers under an active filter.
+    #
+    # Guarded because this block was added after the two channels above: a
+    # deployment whose follower tables are missing (they come from create_all,
+    # which init_db lets fail) must still get its email and LinkedIn analytics
+    # rather than a 500.
+    try:
+        followers = _followers_by_account(db, since)
+    except Exception:  # noqa: BLE001 - an added section must not fail the page
+        db.rollback()
+        logger.warning("follower analytics failed; reporting it as empty", exc_info=True)
+        followers = AnalyticsFollowers()
+
     return AnalyticsOut(
         days=days,
         since=since.isoformat() if since else None,
         generated_at=datetime.utcnow().isoformat(),
         email=email,
         linkedin=linkedin,
+        followers=followers,
         principals=[
             AnalyticsFilterOption(id=pid, label=name)
             for pid, name in sorted(principal_names.items(), key=lambda kv: kv[1].lower())
