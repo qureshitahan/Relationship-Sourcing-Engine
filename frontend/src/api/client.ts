@@ -541,8 +541,19 @@ export type LinkedInFilters = {
 };
 export const getLinkedInAccount = () =>
   api.get<LinkedInAccount>("/api/linkedin/account").then((r) => r.data);
+// Accounts hidden from the frontend account picker. Their Unipile account IDs
+// stay fully intact on the backend (nothing is deleted or disconnected) — this
+// ONLY removes them from the "Send LinkedIn DMs as" dropdown in the UI.
+const HIDDEN_LINKEDIN_ACCOUNT_NAMES = ["muhammad usama", "faizan riaz"];
+const normalizeAccountName = (n?: string | null) =>
+  (n ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 export const listLinkedInAccounts = () =>
-  api.get<LinkedInAccountsResponse>("/api/linkedin/accounts").then((r) => r.data);
+  api.get<LinkedInAccountsResponse>("/api/linkedin/accounts").then((r) => ({
+    ...r.data,
+    accounts: (r.data.accounts ?? []).filter(
+      (a) => !HIDDEN_LINKEDIN_ACCOUNT_NAMES.includes(normalizeAccountName(a.name))
+    ),
+  }));
 /** Label a sending account by hand. An empty name clears the label. */
 export const setLinkedInAccountName = (accountId: string, name: string) =>
   api
