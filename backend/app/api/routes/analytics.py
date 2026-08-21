@@ -19,7 +19,8 @@ acceptance) it is computed the same way here on purpose.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -62,11 +63,59 @@ def _rate(part: int, whole: int) -> float:
     return round(part / whole, 4) if whole else 0.0
 
 
-def _window_start(days: int) -> Optional[datetime]:
-    """Start of the reporting window, or None for all time."""
+@dataclass(frozen=True)
+class Window:
+    """The reporting period, as a half-open interval ``[since, until)``.
+
+    Either end may be absent: no ``since`` means "from the beginning", no
+    ``until`` means "up to now". A trailing range (``days``) only ever sets
+    ``since``, which is why the preset ranges behave exactly as before — the
+    upper bound simply is not there. A custom range sets both.
+
+    The predicate helpers live here so every query in this module bounds its
+    dates the same way; a site that built its own comparison would silently
+    ignore the end of a custom range.
+    """
+
+    since: Optional[datetime] = None
+    until: Optional[datetime] = None
+
+    def bounds(self, column) -> list:
+        """Predicates placing ``column`` inside the window (no null check)."""
+        preds = []
+        if self.since is not None:
+            preds.append(column >= self.since)
+        if self.until is not None:
+            preds.append(column < self.until)
+        return preds
+
+    def during(self, column) -> list:
+        """As ``bounds``, plus the column having a value at all."""
+        return [column.is_not(None), *self.bounds(column)]
+
+    def contains(self, column):
+        """A single expression: the column has a value and sits in the window."""
+        return and_(*self.during(column))
+
+
+def _resolve_window(
+    days: int, start: Optional[date], end: Optional[date]
+) -> Window:
+    """Build the window from either an explicit range or the trailing preset.
+
+    An explicit ``start``/``end`` wins over ``days`` — a caller that names its
+    own dates means them. ``end`` is inclusive to the reader, so it becomes an
+    exclusive bound at the start of the following day; otherwise "1 Aug to 7 Aug"
+    would silently drop everything that happened on the 7th.
+    """
+    if start is not None or end is not None:
+        return Window(
+            since=datetime.combine(start, time.min) if start else None,
+            until=datetime.combine(end, time.min) + timedelta(days=1) if end else None,
+        )
     if days <= ALL_TIME:
-        return None
-    return datetime.utcnow() - timedelta(days=days)
+        return Window()
+    return Window(since=datetime.utcnow() - timedelta(days=days))
 
 
 def _day(column):
@@ -88,7 +137,7 @@ def _email_filters(principal_id: Optional[int], campaign_id: Optional[int]) -> l
     return where
 
 
-def _email_totals(db: Session, since: Optional[datetime], where: list) -> AnalyticsTotals:
+def _email_totals(db: Session, win: Window, where: list) -> AnalyticsTotals:
     """Headline counts for the window.
 
     Each metric is dated by the event it describes: a send counts on the day it
@@ -107,10 +156,10 @@ def _email_totals(db: Session, since: Optional[datetime], where: list) -> Analyt
             q = q.where(w)
         return int(db.execute(q).scalar_one())
 
-    created = [EmailDraft.created_at >= since] if since else []
+    created = win.bounds(EmailDraft.created_at)
 
     def during(column) -> list:
-        return [column.is_not(None), *([column >= since] if since else [])]
+        return win.during(column)
 
     by_status = {
         status: int(n or 0)
@@ -146,7 +195,7 @@ def _apply(query, where: list):
 
 
 def _email_trend(
-    db: Session, since: Optional[datetime], where: list
+    db: Session, win: Window, where: list
 ) -> list[AnalyticsTrendPoint]:
     """Daily counts, each event on the day it happened.
 
@@ -159,8 +208,8 @@ def _email_trend(
     def collect(field: str, ts_column, extra: Optional[list] = None) -> None:
         q = select(_day(ts_column), func.count()).where(ts_column.is_not(None))
         q = _apply(q, [*where, *(extra or [])])
-        if since is not None:
-            q = q.where(ts_column >= since)
+        for bound in win.bounds(ts_column):
+            q = q.where(bound)
         for day, n in db.execute(q.group_by(_day(ts_column))).all():
             if not day:
                 continue
@@ -206,7 +255,7 @@ def _merge(rows: list[tuple[str | None, str, int, int, int]]) -> list[AnalyticsG
 
 def _email_by_campaign(
     db: Session,
-    since: Optional[datetime],
+    win: Window,
     where: list,
     names: dict[int, str],
     bulk_names: dict[int, str],
@@ -224,7 +273,7 @@ def _email_by_campaign(
         db,
         model=EmailDraft,
         key_columns=[EmailDraft.campaign_id, EmailDraft.bulk_campaign_id],
-        since=since,
+        win=win,
         where=where,
         sent_column=EmailDraft.sent_at,
         replied_column=EmailDraft.replied_at,
@@ -246,7 +295,7 @@ def _email_by_campaign(
 
 def _email_by_principal(
     db: Session,
-    since: Optional[datetime],
+    win: Window,
     where: list,
     names: dict[int, str],
 ) -> list[AnalyticsGroupRow]:
@@ -262,7 +311,7 @@ def _email_by_principal(
         db,
         model=EmailDraft,
         key_columns=[EmailDraft.principal_id, EmailDraft.bulk_campaign_id],
-        since=since,
+        win=win,
         where=where,
         sent_column=EmailDraft.sent_at,
         replied_column=EmailDraft.replied_at,
@@ -297,7 +346,7 @@ def _linkedin_filters(principal_id: Optional[int], campaign_id: Optional[int]) -
 
 
 def _linkedin_totals(
-    db: Session, since: Optional[datetime], where: list
+    db: Session, win: Window, where: list
 ) -> AnalyticsTotals:
     def count(*extra) -> int:
         q = select(func.count()).select_from(LinkedInMessage)
@@ -305,10 +354,10 @@ def _linkedin_totals(
             q = q.where(w)
         return int(db.execute(q).scalar_one())
 
-    created = [LinkedInMessage.created_at >= since] if since else []
+    created = win.bounds(LinkedInMessage.created_at)
 
     def during(column) -> list:
-        return [column.is_not(None), *([column >= since] if since else [])]
+        return win.during(column)
 
     by_status = {
         status: int(n or 0)
@@ -365,15 +414,15 @@ def _linkedin_totals(
 
 
 def _linkedin_trend(
-    db: Session, since: Optional[datetime], where: list
+    db: Session, win: Window, where: list
 ) -> list[AnalyticsTrendPoint]:
     buckets: dict[str, AnalyticsTrendPoint] = {}
 
     def collect(field: str, ts_column) -> None:
         q = select(_day(ts_column), func.count()).where(ts_column.is_not(None))
         q = _apply(q, where)
-        if since is not None:
-            q = q.where(ts_column >= since)
+        for bound in win.bounds(ts_column):
+            q = q.where(bound)
         for day, n in db.execute(q.group_by(_day(ts_column))).all():
             if not day:
                 continue
@@ -388,13 +437,13 @@ def _linkedin_trend(
 
 
 def _linkedin_by_campaign(
-    db: Session, since: Optional[datetime], where: list, names: dict[int, str]
+    db: Session, win: Window, where: list, names: dict[int, str]
 ) -> list[AnalyticsGroupRow]:
     rows = _grouped_performance(
         db,
         model=LinkedInMessage,
         key_columns=[LinkedInMessage.campaign_id],
-        since=since,
+        win=win,
         where=where,
         sent_column=LinkedInMessage.sent_at,
         replied_column=LinkedInMessage.replied_at,
@@ -413,13 +462,13 @@ def _linkedin_by_campaign(
 
 
 def _linkedin_by_principal(
-    db: Session, since: Optional[datetime], where: list, names: dict[int, str]
+    db: Session, win: Window, where: list, names: dict[int, str]
 ) -> list[AnalyticsGroupRow]:
     rows = _grouped_performance(
         db,
         model=LinkedInMessage,
         key_columns=[LinkedInMessage.principal_id],
-        since=since,
+        win=win,
         where=where,
         sent_column=LinkedInMessage.sent_at,
         replied_column=LinkedInMessage.replied_at,
@@ -447,7 +496,7 @@ def _grouped_performance(
     *,
     model,
     key_columns: list,
-    since: Optional[datetime],
+    win: Window,
     where: list,
     sent_column,
     replied_column,
@@ -464,10 +513,10 @@ def _grouped_performance(
     """
 
     def in_window(column):
-        present = column.is_not(None)
-        return and_(present, column >= since) if since is not None else present
+        return win.contains(column)
 
-    created = model.created_at >= since if since is not None else None
+    created_bounds = win.bounds(model.created_at)
+    created = and_(*created_bounds) if created_bounds else None
     total_expr = (
         func.sum(case((created, 1), else_=0)) if created is not None else func.count()
     )
@@ -528,7 +577,7 @@ def _campaign_labels(db: Session, principal_names: dict[int, str]) -> dict[int, 
 
 
 def _followers_by_account(
-    db: Session, since: Optional[datetime]
+    db: Session, win: Window
 ) -> AnalyticsFollowers:
     """The Followers module split by the account that owns the audience.
 
@@ -566,8 +615,7 @@ def _followers_by_account(
     )
 
     sent_where = [LinkedInFollowerSend.status == FollowerSendStatus.SENT]
-    if since is not None:
-        sent_where.append(LinkedInFollowerSend.sent_at >= since)
+    sent_where.extend(win.bounds(LinkedInFollowerSend.sent_at))
     sent = _grouped(
         select(LinkedInFollowerSend.account_id, func.count())
         .where(*sent_where)
@@ -582,8 +630,7 @@ def _followers_by_account(
         LinkedInMessage.status == LinkedInStatus.REPLIED,
         LinkedInMessage.from_account.is_not(None),
     ]
-    if since is not None:
-        replied_where.append(LinkedInMessage.replied_at >= since)
+    replied_where.extend(win.bounds(LinkedInMessage.replied_at))
     replied = _grouped(
         select(LinkedInMessage.from_account, func.count())
         .where(*replied_where)
@@ -661,10 +708,18 @@ def analytics(
     days: int = Query(
         30, ge=0, le=3650, description="Trailing window in days; 0 = all time"
     ),
+    start: Optional[date] = Query(
+        None, description="Custom range start (inclusive). Overrides days."
+    ),
+    end: Optional[date] = Query(
+        None, description="Custom range end (inclusive). Overrides days."
+    ),
     principal_id: Optional[int] = Query(None),
     campaign_id: Optional[int] = Query(None),
 ):
-    since = _window_start(days)
+    # ``days`` keeps its exact meaning; naming a start or end simply takes
+    # precedence over it, so every existing caller behaves as it always has.
+    win = _resolve_window(days, start, end)
 
     principal_names = {
         p.id: p.name
@@ -683,17 +738,17 @@ def analytics(
 
     email = AnalyticsChannel(
         channel="email",
-        totals=_email_totals(db, since, email_where),
-        trend=_email_trend(db, since, email_where),
-        by_campaign=_email_by_campaign(db, since, email_where, campaign_names, bulk_names),
-        by_principal=_email_by_principal(db, since, email_where, principal_names),
+        totals=_email_totals(db, win, email_where),
+        trend=_email_trend(db, win, email_where),
+        by_campaign=_email_by_campaign(db, win, email_where, campaign_names, bulk_names),
+        by_principal=_email_by_principal(db, win, email_where, principal_names),
     )
     linkedin = AnalyticsChannel(
         channel="linkedin",
-        totals=_linkedin_totals(db, since, linkedin_where),
-        trend=_linkedin_trend(db, since, linkedin_where),
-        by_campaign=_linkedin_by_campaign(db, since, linkedin_where, campaign_names),
-        by_principal=_linkedin_by_principal(db, since, linkedin_where, principal_names),
+        totals=_linkedin_totals(db, win, linkedin_where),
+        trend=_linkedin_trend(db, win, linkedin_where),
+        by_campaign=_linkedin_by_campaign(db, win, linkedin_where, campaign_names),
+        by_principal=_linkedin_by_principal(db, win, linkedin_where, principal_names),
     )
 
     # The Followers module has no principal or campaign to filter by — a
@@ -706,7 +761,7 @@ def analytics(
     # which init_db lets fail) must still get its email and LinkedIn analytics
     # rather than a 500.
     try:
-        followers = _followers_by_account(db, since)
+        followers = _followers_by_account(db, win)
     except Exception:  # noqa: BLE001 - an added section must not fail the page
         db.rollback()
         logger.warning("follower analytics failed; reporting it as empty", exc_info=True)
@@ -714,7 +769,10 @@ def analytics(
 
     return AnalyticsOut(
         days=days,
-        since=since.isoformat() if since else None,
+        since=win.since.isoformat() if win.since else None,
+        # Reported back as the inclusive day the caller asked for, not the
+        # exclusive instant used in the query.
+        until=(win.until - timedelta(days=1)).date().isoformat() if win.until else None,
         generated_at=datetime.utcnow().isoformat(),
         email=email,
         linkedin=linkedin,

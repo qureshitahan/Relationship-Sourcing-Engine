@@ -613,16 +613,26 @@ function FollowersSection({ followers }: { followers: AnalyticsFollowers }) {
 
 export default function Analytics() {
   const [days, setDays] = useState<number>(30);
+  // A custom range, when the presets are not the shape of the question. Empty
+  // strings mean "not set", so the presets keep working exactly as before.
+  const [start, setStart] = useState<string>("");
+  const [end, setEnd] = useState<string>("");
   const [principalId, setPrincipalId] = useState<string>("");
   const [campaignId, setCampaignId] = useState<string>("");
+
+  const custom = Boolean(start || end);
 
   const query = useMemo(
     () => ({
       days,
+      // Sent only when set; the server then ignores `days`. Leaving `days` in
+      // the payload keeps the request shape unchanged for every existing call.
+      start: start || undefined,
+      end: end || undefined,
       principal_id: principalId ? Number(principalId) : undefined,
       campaign_id: campaignId ? Number(campaignId) : undefined,
     }),
-    [days, principalId, campaignId]
+    [days, start, end, principalId, campaignId]
   );
 
   const { data, isLoading, isFetching } = useQuery({
@@ -650,9 +660,15 @@ export default function Analytics() {
             <button
               key={r.label}
               type="button"
-              onClick={() => setDays(r.days)}
+              // Choosing a preset clears the custom dates, so the two controls
+              // can never both claim to be active.
+              onClick={() => {
+                setStart("");
+                setEnd("");
+                setDays(r.days);
+              }}
               className={`rounded-lg px-2.5 py-1.5 text-sm transition ${
-                days === r.days
+                !custom && days === r.days
                   ? "bg-slate-900 font-medium text-white"
                   : "text-slate-600 hover:bg-slate-100"
               }`}
@@ -660,6 +676,48 @@ export default function Analytics() {
               {r.label}
             </button>
           ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-slate-500">Custom</span>
+          <input
+            type="date"
+            aria-label="Start date"
+            value={start}
+            max={end || undefined}
+            onChange={(e) => setStart(e.target.value)}
+            className={`rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none ${
+              custom
+                ? "border-slate-400 bg-white text-slate-800"
+                : "border-slate-300 bg-white text-slate-600"
+            }`}
+          />
+          <span className="text-xs text-slate-400">to</span>
+          <input
+            type="date"
+            aria-label="End date"
+            value={end}
+            min={start || undefined}
+            onChange={(e) => setEnd(e.target.value)}
+            className={`rounded-lg border px-2.5 py-1.5 text-sm focus:outline-none ${
+              custom
+                ? "border-slate-400 bg-white text-slate-800"
+                : "border-slate-300 bg-white text-slate-600"
+            }`}
+          />
+          {custom && (
+            <button
+              type="button"
+              onClick={() => {
+                setStart("");
+                setEnd("");
+              }}
+              className="text-xs font-medium text-blue-700 hover:underline"
+              title="Go back to the preset range"
+            >
+              Clear dates
+            </button>
+          )}
         </div>
 
         <Select
@@ -695,8 +753,12 @@ export default function Analytics() {
         )}
 
         <span className="ml-auto text-xs text-slate-400">
-          {data.since
+          {data.since && data.until
+            ? `${data.since.slice(0, 10)} to ${data.until}`
+            : data.since
             ? `Since ${data.since.slice(0, 10)}`
+            : data.until
+            ? `Up to ${data.until}`
             : "All data since the beginning"}
         </span>
       </Card>
