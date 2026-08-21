@@ -32,6 +32,7 @@ from app.schemas.entities import LinkedInInviteStats, LinkedInMessageOut, Page
 from app.schemas.requests import (
     LinkedInAccountNameRequest,
     LinkedInConnectRequest,
+    LinkedInDeleteManyRequest,
     LinkedInGenerateRequest,
     LinkedInGenerateRunRequest,
     LinkedInReplyRequest,
@@ -43,6 +44,7 @@ from app.schemas.requests import (
 from app.services.app_settings import get_setting, set_setting
 from app.services.audit import log_action
 from app.services import linkedin_account_names
+from app.services.linkedin_budget import linkedin_sent_today
 from app.services.linkedin_outreach import generate_linkedin_content
 from app.services.linkedin_providers import (
     ACTIVE_ACCOUNT_SETTING,
@@ -442,6 +444,89 @@ def generate_message(payload: LinkedInGenerateRequest, db: Session = Depends(get
     return _msg_out(db, msg)
 
 
+@router.get("/run-draft-state")
+def run_draft_state(
+    discovery_run_id: int,
+    principal_id: Optional[int] = None,
+    account_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """How many of this run's prospects still have no message, and today's room.
+
+    Drafting a whole run at once produces far more messages than a day's cap can
+    deliver, which is what left hundreds of stale drafts queued. Showing what is
+    left to draft — and how many sends the account can still make today — lets an
+    operator prepare a batch that will actually go out.
+    """
+    run = db.get(DiscoveryRun, discovery_run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    resolved_principal = principal_id or run.principal_id
+    remaining = 0
+    if resolved_principal is not None:
+        approved = db.execute(
+            select(Contact).where(
+                Contact.discovery_run_id == discovery_run_id,
+                Contact.approved_for_outreach.is_(True),
+            )
+        ).scalars().all()
+        for contact in approved:
+            if not public_identifier_from_url(contact.linkedin_url or ""):
+                continue
+            if contact.do_not_contact:
+                continue
+            if _existing_open_message(db, resolved_principal, contact.id) is not None:
+                continue
+            remaining += 1
+
+    cap = max(0, int(settings.linkedin_daily_send_cap))
+    account = (account_id or "").strip() or _active_account_id()
+    try:
+        used = linkedin_sent_today(db, account)
+    except Exception:  # noqa: BLE001 - a hint must never fail the page
+        used = 0
+    return {
+        "discovery_run_id": discovery_run_id,
+        "left_to_draft": remaining,
+        "daily_cap": cap,
+        "sent_today": used,
+        "remaining_today": max(0, cap - used),
+    }
+
+
+@router.post("/delete-many", status_code=200)
+def delete_many(payload: LinkedInDeleteManyRequest, db: Session = Depends(get_db)):
+    """Delete several drafted messages in one go.
+
+    Only messages that have not gone anywhere are removable: once an invitation
+    or a DM has left, the row is the record of that contact and deleting it would
+    erase the only evidence the person was approached. Those are reported as
+    skipped rather than failing the whole request, so one sent message in a
+    selection does not block the rest.
+    """
+    ids = [int(i) for i in (payload.ids or [])]
+    if not ids:
+        return {"deleted": 0, "skipped": 0}
+    rows = db.execute(select(LinkedInMessage).where(LinkedInMessage.id.in_(ids))).scalars().all()
+    deleted = skipped = 0
+    for msg in rows:
+        if msg.status not in _OPEN_STATUSES or msg.sent_at or msg.invitation_sent_at:
+            skipped += 1
+            continue
+        db.delete(msg)
+        deleted += 1
+    if deleted:
+        log_action(
+            db,
+            AuditAction.LINKEDIN_DRAFT,
+            entity_type="linkedin_message",
+            actor="human",
+            summary=f"Deleted {deleted} LinkedIn draft(s)",
+        )
+    db.commit()
+    return {"deleted": deleted, "skipped": skipped}
+
+
 @router.post("/generate-run")
 def generate_run_messages(payload: LinkedInGenerateRunRequest, db: Session = Depends(get_db)):
     """Draft LinkedIn messages for approved prospects (with a LinkedIn URL) in a run."""
@@ -465,10 +550,15 @@ def generate_run_messages(payload: LinkedInGenerateRunRequest, db: Session = Dep
             .order_by(Contact.id)
         ).scalars().all()
     )
+    # Stop once this many NEW drafts exist. None/0 keeps the original behaviour
+    # of drafting for everyone eligible.
+    cap = payload.limit if (payload.limit or 0) > 0 else None
     generated = 0
     skipped = 0
     errors: list[str] = []
     for contact in approved:
+        if cap is not None and generated >= cap:
+            break
         # Only personal /in/ profiles can be messaged; skip company pages / blanks.
         if not public_identifier_from_url(contact.linkedin_url or "") or contact.do_not_contact:
             skipped += 1

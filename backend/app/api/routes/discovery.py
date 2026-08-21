@@ -344,9 +344,11 @@ def draft_run_linkedin(
     run_id: int,
     outreach_goal: Optional[str] = Body(default=None, embed=True),
     principal_id: Optional[int] = Body(default=None, embed=True),
+    # Prepare at most this many. Omitted keeps the original whole-run behaviour.
+    limit: Optional[int] = Body(default=None, embed=True),
     db: Session = Depends(get_db),
 ):
-    """Draft LinkedIn messages for every approved prospect in the run (background).
+    """Draft LinkedIn messages for approved prospects in the run (background).
 
     Returns 202 immediately; progress lands on the run's ``job_*`` columns. Like
     email drafting, this is one LLM call per prospect — done inline it outlived
@@ -357,7 +359,10 @@ def draft_run_linkedin(
     if run.principal_id is None and principal_id is None:
         raise HTTPException(status_code=400, detail="Run has no principal")
     launch_run_linkedin_draft(
-        run_id, outreach_goal=outreach_goal, draft_principal_id=principal_id
+        run_id,
+        outreach_goal=outreach_goal,
+        draft_principal_id=principal_id,
+        limit=limit,
     )
     db.refresh(run)
     return _discovery_run_out(run)

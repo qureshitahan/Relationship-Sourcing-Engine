@@ -7,7 +7,9 @@ import {
   checkLinkedInUpdates,
   createLinkedInConnectLink,
   deleteLinkedIn,
+  deleteLinkedInMessages,
   draftRunLinkedIn,
+  getLinkedInRunDraftState,
   getDiscoveryRun,
   getLinkedInSendProgress,
   getLinkedInStats,
@@ -60,10 +62,15 @@ function distanceLabel(d?: string | null): string | null {
 function MessageCard({
   msg,
   accountId,
+  selected,
+  onSelect,
 }: {
   msg: LinkedInMessage;
   /** The account this tab sends as, so a single send matches the bulk send. */
   accountId?: string;
+  /** Selection for the bulk delete. Absent for messages that have already gone. */
+  selected?: boolean;
+  onSelect?: (checked: boolean) => void;
 }) {
   const qc = useQueryClient();
   // Persisted per-message: navigating away (e.g. to Emails/Campaigns) before
@@ -138,6 +145,15 @@ function MessageCard({
       <div className="flex items-start justify-between gap-4 border-b border-slate-100 bg-slate-50/80 px-5 py-4">
         <div>
           <div className="flex flex-wrap items-center gap-2">
+            {onSelect && (
+              <input
+                type="checkbox"
+                checked={!!selected}
+                onChange={(e) => onSelect(e.target.checked)}
+                aria-label={`Select ${msg.contact_name ?? "message"}`}
+                className="h-4 w-4 cursor-pointer rounded border-slate-300"
+              />
+            )}
             <span className="text-base font-semibold text-slate-900">
               {msg.contact_name ?? `Prospect #${msg.contact_id}`}
             </span>
@@ -410,6 +426,48 @@ export default function LinkedIn() {
 
   const currentRun = runs?.items.find((r) => r.id === runId);
 
+  // How many to prepare this time. Blank keeps the original behaviour of
+  // drafting the whole run; a number prepares only what can realistically be
+  // sent, so the queue never outgrows the daily cap again.
+  const [draftLimit, setDraftLimit] = usePersistedState<string>(
+    `linkedin:${runId ?? "none"}:draftLimit`,
+    ""
+  );
+
+  // Selection for the bulk delete. Ids only, cleared whenever the visible slice
+  // changes so a hidden row can never be deleted by a stale tick.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const bulkDelete = useMutation({
+    mutationFn: () => deleteLinkedInMessages(chosenIds),
+    onSuccess: (res) => {
+      setNote(
+        `Deleted ${res.deleted} draft${res.deleted === 1 ? "" : "s"}.` +
+          (res.skipped
+            ? ` ${res.skipped} kept — already sent, so they stay as the record of that contact.`
+            : "")
+      );
+      setSelectedIds(new Set());
+      qc.invalidateQueries({ queryKey: ["linkedin"] });
+    },
+    onError: (e: unknown) => {
+      const detail =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setNote(String(detail ?? "Could not delete the selected drafts."));
+    },
+  });
+
+  const { data: draftState } = useQuery({
+    queryKey: ["linkedin", "run-draft-state", runId, draftPrincipalId, activeId],
+    queryFn: () =>
+      getLinkedInRunDraftState(
+        runId!,
+        draftPrincipalId ? Number(draftPrincipalId) : undefined,
+        activeId ?? undefined
+      ),
+    enabled: !!runId,
+  });
+
   const draftRun = useMutation({
     // Background job, not an inline request. Drafting is one Claude call per
     // prospect, so a run of any size outlived both the browser's timeout and
@@ -419,12 +477,14 @@ export default function LinkedIn() {
       draftRunLinkedIn(
         runId!,
         undefined,
-        draftPrincipalId ? Number(draftPrincipalId) : undefined
+        draftPrincipalId ? Number(draftPrincipalId) : undefined,
+        Number(draftLimit) > 0 ? Number(draftLimit) : undefined
       ),
     onSuccess: () => {
       setNote("Drafting started in the background — you can leave this page.");
       setAwaitingJob(true);
       qc.invalidateQueries({ queryKey: ["discoveryRun", runId] });
+      qc.invalidateQueries({ queryKey: ["linkedin", "run-draft-state"] });
     },
     onError: (e: unknown) => {
       const detail =
@@ -482,6 +542,17 @@ export default function LinkedIn() {
   });
 
   const items = data?.items ?? [];
+
+  // Only messages that have not gone anywhere can be removed; a sent one is the
+  // record that the person was approached.
+  const deletable = items.filter(
+    (m) => (m.status === "draft" || m.status === "approved") && !m.sent_at
+  );
+  // Intersect with what is actually on screen. Ticks survive a filter or run
+  // change in state, so without this the bar could offer to delete rows the
+  // operator can no longer see — it read "select all (8)" while holding 64.
+  const deletableIds = new Set(deletable.map((m) => m.id));
+  const chosenIds = [...selectedIds].filter((id) => deletableIds.has(id));
   // Draft/approved messages that "Approve & send all" would act on. Accurate on
   // the default "All" view; the backend re-derives the true set on send anyway.
   const openCount = items.filter(
@@ -793,6 +864,21 @@ export default function LinkedIn() {
                     </option>
                   ))}
               </select>
+              <label className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-slate-500">
+                  Draft how many
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  value={draftLimit}
+                  placeholder="all"
+                  onChange={(e) => setDraftLimit(e.target.value)}
+                  disabled={draftRun.isPending || draftJobRunning}
+                  title="Blank prepares every remaining prospect. A number prepares only that many, so you can draft what you can actually send today."
+                  className="w-20 rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                />
+              </label>
               <Button
                 onClick={() => draftRun.mutate()}
                 disabled={draftRun.isPending || draftJobRunning}
@@ -801,8 +887,18 @@ export default function LinkedIn() {
                   ? "Drafting…"
                   : draftRun.isPending
                     ? "Starting…"
-                    : "Draft all approved"}
+                    : Number(draftLimit) > 0
+                      ? `Draft ${Number(draftLimit)}`
+                      : "Draft all approved"}
               </Button>
+              {draftState && (
+                <span className="text-xs text-slate-500">
+                  run #{runId} · <b>{draftState.left_to_draft}</b> left to draft
+                  {draftState.remaining_today < draftState.daily_cap && (
+                    <> · {draftState.remaining_today} sends left today</>
+                  )}
+                </span>
+              )}
             </>
           )}
           <Button
@@ -935,9 +1031,87 @@ export default function LinkedIn() {
         </Card>
       ) : (
         <div className="space-y-4">
-          {items.map((m) => (
-            <MessageCard key={m.id} msg={m} accountId={activeId ?? undefined} />
-          ))}
+          {(() => {
+            const allChosen =
+              deletable.length > 0 && chosenIds.length === deletable.length;
+            if (deletable.length === 0) return null;
+            return (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5">
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={allChosen}
+                    onChange={(e) =>
+                      setSelectedIds(
+                        e.target.checked ? new Set(deletable.map((m) => m.id)) : new Set()
+                      )
+                    }
+                    className="h-4 w-4 cursor-pointer rounded border-slate-300"
+                  />
+                  Select all on this page ({deletable.length})
+                </label>
+                {chosenIds.length > 0 && (
+                  <>
+                    <span className="text-sm text-slate-500">
+                      {chosenIds.length} selected
+                    </span>
+                    <Button
+                      variant="danger"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Delete ${chosenIds.length} draft${
+                              chosenIds.length === 1 ? "" : "s"
+                            }?
+
+Only the messages are removed. The prospects, their ` +
+                              "research and their history stay, so nothing has to be " +
+                              "discovered or researched again."
+                          )
+                        )
+                          bulkDelete.mutate();
+                      }}
+                      disabled={bulkDelete.isPending}
+                    >
+                      {bulkDelete.isPending
+                        ? "Deleting…"
+                        : `Delete selected (${chosenIds.length})`}
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds(new Set())}
+                      className="text-xs font-medium text-blue-700 hover:underline"
+                    >
+                      Clear selection
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+          {items.map((m) => {
+            const selectable =
+              (m.status === "draft" || m.status === "approved") && !m.sent_at;
+            return (
+              <MessageCard
+                key={m.id}
+                msg={m}
+                accountId={activeId ?? undefined}
+                selected={selectable ? selectedIds.has(m.id) : undefined}
+                onSelect={
+                  selectable
+                    ? (checked) =>
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (checked) next.add(m.id);
+                          else next.delete(m.id);
+                          return next;
+                        })
+                    : undefined
+                }
+              />
+            );
+          })}
         </div>
       )}
     </div>
