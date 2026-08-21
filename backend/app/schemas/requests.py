@@ -221,6 +221,23 @@ class LinkedInGenerateRunRequest(BaseModel):
     discovery_run_id: int
     principal_id: Optional[int] = None
     outreach_goal: Optional[str] = None
+    #: Stop after this many new drafts. Omitted (or 0) keeps the original
+    #: behaviour of drafting for everyone still eligible. Drafting the whole run
+    #: at once builds a queue far larger than a day's sending cap, which is how
+    #: hundreds of stale drafts accumulated; a limit lets the operator prepare
+    #: only what can actually go out.
+    limit: Optional[int] = None
+
+
+class LinkedInDeleteManyRequest(BaseModel):
+    """Delete several drafted messages at once.
+
+    Only the messages — the prospects, their research and their history stay.
+    Deleting a prospect would let a later discovery re-import and re-research
+    them, so this is deliberately the narrower action.
+    """
+
+    ids: list[int]
 
 
 class LinkedInUpdateRequest(BaseModel):

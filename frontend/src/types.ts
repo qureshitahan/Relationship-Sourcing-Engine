@@ -1045,6 +1045,15 @@ export interface AnalyticsQuery {
   campaign_id?: number;
 }
 
+/** What is left to prepare for one run, and how much the account can send today. */
+export interface LinkedInRunDraftState {
+  discovery_run_id: number;
+  left_to_draft: number;
+  daily_cap: number;
+  sent_today: number;
+  remaining_today: number;
+}
+
 export interface LinkedInAccountStats {
   account_id: string;
   invited: number;

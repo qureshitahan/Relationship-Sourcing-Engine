@@ -674,17 +674,23 @@ def launch_run_linkedin_draft(
     *,
     outreach_goal: Optional[str] = None,
     draft_principal_id: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> None:
     """Draft LinkedIn messages for a run's approved prospects, in the background.
 
     ``draft_principal_id`` drafts as a different principal than the one who
     discovered the run, mirroring ``launch_run_draft``.
+
+    ``limit`` stops after that many prospects. Drafting a whole run produces far
+    more messages than a day's sending cap can deliver, so the surplus sits as
+    stale drafts written against week-old research; preparing only what can go
+    out keeps the queue honest. Omitted, the whole run is drafted as before.
     """
     _mark_starting(run_id, JOB_DRAFT_LINKEDIN)
     threading.Thread(
         target=_linkedin_draft_worker,
         args=(run_id, outreach_goal),
-        kwargs=dict(draft_principal_id=draft_principal_id),
+        kwargs=dict(draft_principal_id=draft_principal_id, limit=limit),
         name=f"run-linkedin-draft-{run_id}",
         daemon=True,
     ).start()
@@ -735,6 +741,7 @@ def _linkedin_draft_worker(
     outreach_goal: Optional[str],
     *,
     draft_principal_id: Optional[int] = None,
+    limit: Optional[int] = None,
 ) -> None:
     from app.models.enums import AuditAction, LinkedInStatus
     from app.models.linkedin_message import LinkedInMessage
@@ -786,6 +793,10 @@ def _linkedin_draft_worker(
             ).scalars().all()
         )
         to_draft = [c for c in messageable if c.id not in existing_ids]
+        # Prepare only what was asked for. The rest stay eligible, so the next
+        # batch picks up where this one stopped.
+        if limit and limit > 0:
+            to_draft = to_draft[:limit]
 
         _start_job(db, run, JOB_DRAFT_LINKEDIN, len(to_draft))
         if not to_draft:

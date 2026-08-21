@@ -34,6 +34,7 @@ import type {
   LinkedInAccountsResponse,
   LinkedInInviteStats,
   LinkedInMessage,
+  LinkedInRunDraftState,
   LinkedInSendProgress,
   Mailbox,
   OptimizationState,
@@ -543,6 +544,26 @@ export type LinkedInFilters = {
 };
 export const getLinkedInAccount = () =>
   api.get<LinkedInAccount>("/api/linkedin/account").then((r) => r.data);
+/** How many of a run's prospects still need a draft, plus today's send room. */
+export const getLinkedInRunDraftState = (
+  discoveryRunId: number,
+  principalId?: number,
+  accountId?: string
+) =>
+  api
+    .get<LinkedInRunDraftState>("/api/linkedin/run-draft-state", {
+      params: {
+        discovery_run_id: discoveryRunId,
+        principal_id: principalId,
+        account_id: accountId,
+      },
+    })
+    .then((r) => r.data);
+/** Delete several drafts at once. Sent messages are refused and reported back. */
+export const deleteLinkedInMessages = (ids: number[]) =>
+  api
+    .post<{ deleted: number; skipped: number }>("/api/linkedin/delete-many", { ids })
+    .then((r) => r.data);
 export const listLinkedInAccounts = () =>
   api.get<LinkedInAccountsResponse>("/api/linkedin/accounts").then((r) => r.data);
 /** Label a sending account by hand. An empty name clears the label. */
@@ -591,12 +612,15 @@ export const generateLinkedIn = (payload: {
 export const draftRunLinkedIn = (
   id: number,
   outreachGoal?: string,
-  principalId?: number
+  principalId?: number,
+  /** Prepare at most this many. Omitted drafts the whole run, as before. */
+  limit?: number
 ) =>
   api
     .post<DiscoveryRun>(`/api/discovery/runs/${id}/draft-linkedin`, {
       outreach_goal: outreachGoal ?? null,
       principal_id: principalId ?? null,
+      limit: limit ?? null,
     })
     .then((r) => r.data);
 export const updateLinkedIn = (
