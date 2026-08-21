@@ -314,6 +314,11 @@ export default function LinkedIn() {
   const [searchParams, setSearchParams] = useSearchParams();
   const runId = searchParams.get("run") ? Number(searchParams.get("run")) : undefined;
   const [statusFilter, setStatusFilter] = usePersistedState("linkedin:statusFilter", "");
+  // Clicking the tab that is already open collapses the list, so a long page of
+  // drafts can be folded away without losing the tab or the filter. Deliberately
+  // NOT persisted: coming back to the page should always show the messages, not
+  // an empty screen whose cause is a click from days ago.
+  const [listHidden, setListHidden] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   // While a bulk approve+send is in flight, auto-refresh the list until this
   // timestamp so the user watches messages move draft -> invited/sent.
@@ -1005,19 +1010,43 @@ export default function LinkedIn() {
           <button
             key={tab.key || "all"}
             type="button"
-            onClick={() => setStatusFilter(tab.key)}
+            onClick={() => {
+              if (statusFilter === tab.key) {
+                // Same tab again: fold the list away, or bring it back.
+                setListHidden((v) => !v);
+              } else {
+                setStatusFilter(tab.key);
+                setListHidden(false);
+              }
+            }}
+            title={
+              statusFilter === tab.key
+                ? listHidden
+                  ? `Show ${tab.label.toLowerCase()} again`
+                  : `Hide ${tab.label.toLowerCase()}`
+                : undefined
+            }
             className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
               statusFilter === tab.key
-                ? "bg-slate-900 text-white"
+                ? listHidden
+                  ? "bg-slate-900 text-white opacity-60 ring-2 ring-slate-300"
+                  : "bg-slate-900 text-white"
                 : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
             }`}
           >
             {tab.label}
+            {statusFilter === tab.key && listHidden && " ▸"}
           </button>
         ))}
       </div>
 
-      {isLoading ? (
+      {listHidden ? (
+        <Card className="p-6 text-center text-sm text-slate-500">
+          {items.length} message{items.length === 1 ? "" : "s"} hidden — click{" "}
+          <b>{STATUS_TABS.find((t) => t.key === statusFilter)?.label ?? "All"}</b>{" "}
+          again to show them.
+        </Card>
+      ) : isLoading ? (
         <Loading />
       ) : items.length === 0 ? (
         <Card>
