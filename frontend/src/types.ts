@@ -1024,6 +1024,8 @@ export interface AnalyticsFollowers {
 export interface AnalyticsOut {
   days: number;
   since?: string | null;
+  /** Inclusive last day, present only for a custom range. */
+  until?: string | null;
   generated_at?: string | null;
   email: AnalyticsChannel;
   linkedin: AnalyticsChannel;
@@ -1036,6 +1038,9 @@ export interface AnalyticsOut {
 
 export interface AnalyticsQuery {
   days?: number;
+  /** Custom range, inclusive on both ends. Either one overrides `days`. */
+  start?: string;
+  end?: string;
   principal_id?: number;
   campaign_id?: number;
 }

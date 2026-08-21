@@ -62,6 +62,8 @@ export const getAnalytics = (query: AnalyticsQuery = {}) => {
   const params = new URLSearchParams();
   // days=0 is meaningful ("all time"), so check for undefined rather than falsy.
   if (query.days !== undefined) params.set("days", String(query.days));
+  if (query.start) params.set("start", query.start);
+  if (query.end) params.set("end", query.end);
   if (query.principal_id !== undefined)
     params.set("principal_id", String(query.principal_id));
   if (query.campaign_id !== undefined)

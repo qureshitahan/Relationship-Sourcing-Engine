@@ -813,6 +813,9 @@ class AnalyticsFollowers(BaseModel):
 class AnalyticsOut(BaseModel):
     days: int
     since: Optional[str] = None
+    # Present only for a custom range; the inclusive last day the caller asked
+    # for. A trailing preset has no upper bound, so it stays null there.
+    until: Optional[str] = None
     generated_at: Optional[str] = None
     email: AnalyticsChannel
     linkedin: AnalyticsChannel
