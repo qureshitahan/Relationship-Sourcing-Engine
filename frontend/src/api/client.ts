@@ -770,7 +770,9 @@ export interface FollowerJobStart {
 export const draftAllFollowers = (
   message: string,
   principalId: number,
-  limit?: number
+  limit?: number,
+  /** Draft until the campaign HOLDS this many, instead of adding `limit` more. */
+  target?: number
 ) =>
   api
     .post<FollowerJobStart>(
@@ -779,6 +781,7 @@ export const draftAllFollowers = (
         message,
         principal_id: principalId,
         limit: limit && limit > 0 ? limit : null,
+        target: target && target > 0 ? target : null,
       },
       { timeout: 60000 }
     )
