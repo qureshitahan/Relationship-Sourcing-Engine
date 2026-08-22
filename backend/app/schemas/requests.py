@@ -310,11 +310,17 @@ class FollowerDraftRequest(BaseModel):
     message: str
     principal_id: int
     account_id: Optional[str] = None
-    # Draft at most this many. Each draft is a model call while only
+    # Draft at most this many MORE. Each draft is a model call while only
     # ``linkedin_daily_send_cap`` can go out per day, so drafting the whole
     # follower list at once would spend a lot to produce drafts that sit unsent.
     # Omitted = every eligible follower (the original behaviour).
     limit: Optional[int] = None
+    # Draft until the campaign HOLDS this many, rather than adding this many.
+    # Pressing the same button twice was silently doubling the batch — 50 then
+    # 50 again meant 100 — so the headline control now names a total and a
+    # second click is a no-op. ``limit`` keeps its add-this-many meaning and is
+    # what the explicit "append" control sends, so nothing existing changes.
+    target: Optional[int] = None
 
 
 class FollowerActionRequest(BaseModel):

@@ -5,6 +5,7 @@ import {
   approveAllFollowers,
   createLinkedInConnectLink,
   deleteLinkedIn,
+  deleteLinkedInMessages,
   draftAllFollowers,
   getFollowersProgress,
   getFollowersStatus,
@@ -165,7 +166,18 @@ function CountRow({ stats }: { stats: FollowerStats }) {
   );
 }
 
-function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
+function FollowerCard({
+  row,
+  busy,
+  selected,
+  onSelect,
+}: {
+  row: FollowerRow;
+  busy: boolean;
+  /** Selection for the bulk delete. Absent for rows that cannot be removed. */
+  selected?: boolean;
+  onSelect?: (checked: boolean) => void;
+}) {
   const qc = useQueryClient();
   // Reuses the existing LinkedIn delete endpoint, which refuses to delete a
   // sent/invited message — so a delivered DM can never be erased from the record.
@@ -183,6 +195,15 @@ function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
+            {onSelect && (
+              <input
+                type="checkbox"
+                checked={!!selected}
+                onChange={(e) => onSelect(e.target.checked)}
+                aria-label={`Select ${row.name ?? "follower"}`}
+                className="h-4 w-4 cursor-pointer rounded border-slate-300"
+              />
+            )}
             <span className="font-medium text-slate-900">{row.name ?? row.provider_id}</span>
             {row.message_status ? (
               <StatusBadge status={row.message_status} />
@@ -255,6 +276,11 @@ function FollowerCard({ row, busy }: { row: FollowerRow; busy: boolean }) {
 export default function FollowersLinkedIn() {
   const qc = useQueryClient();
   const [note, setNote] = useState<string | null>(null);
+  // Clicking the tab that is already open folds its list away, so a long page
+  // of drafts can be collapsed without losing the tab. Deliberately NOT
+  // persisted: returning to the page should always show the messages, never an
+  // empty screen whose cause is a click from days ago.
+  const [listHidden, setListHidden] = useState(false);
   const [statusFilter, setStatusFilter] = usePersistedState<string>(
     "followers:statusFilter",
     ""
@@ -415,9 +441,45 @@ export default function FollowersLinkedIn() {
     return text;
   };
 
+  // Two controls, two meanings. The headline number is a TARGET: pressing it
+  // again tops up to that many rather than doubling the batch, which is what
+  // used to turn "50" into 100 on a second click. Append is the explicit
+  // "give me this many more" — the old add-N behaviour, kept but named.
+  const [appendCount, setAppendCount] = usePersistedState<string>(
+    "followers:appendCount",
+    ""
+  );
+
   const draftAll = useMutation({
     mutationFn: (text: string) =>
-      draftAllFollowers(text, resolvedPrincipalId!, Number(draftLimit) || undefined),
+      draftAllFollowers(
+        text,
+        resolvedPrincipalId!,
+        undefined,
+        Number(draftLimit) > 0 ? Number(draftLimit) : undefined
+      ),
+    onSuccess: (res) => {
+      setNote(res.message);
+      invalidate();
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
+        ?.detail;
+      setNote(String(detail ?? "Could not start drafting."));
+    },
+  });
+
+  // Ids only, and intersected with what is on screen before anything is sent —
+  // a tick that survived a tab change must never delete a row now out of view.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  const appendDrafts = useMutation({
+    mutationFn: (text: string) =>
+      draftAllFollowers(
+        text,
+        resolvedPrincipalId!,
+        Number(appendCount) > 0 ? Number(appendCount) : undefined
+      ),
     onSuccess: (res) => {
       setNote(res.message);
       invalidate();
@@ -453,6 +515,21 @@ export default function FollowersLinkedIn() {
         ?.detail;
       setNote(String(detail ?? "Could not start sending."));
     },
+  });
+
+  const bulkDelete = useMutation({
+    mutationFn: (ids: number[]) => deleteLinkedInMessages(ids),
+    onSuccess: (res) => {
+      setNote(
+        `Deleted ${res.deleted} draft${res.deleted === 1 ? "" : "s"}.` +
+          (res.skipped
+            ? ` ${res.skipped} kept — already sent, so they stay as the record of that contact.`
+            : "")
+      );
+      setSelectedIds(new Set());
+      invalidate();
+    },
+    onError: () => setNote("Could not delete the selected drafts."),
   });
 
   const stop = useMutation({
@@ -646,9 +723,53 @@ export default function FollowersLinkedIn() {
               draftAll.mutate(text);
             }}
             disabled={busy || !activeId}
-            title="Prepare your message for every follower who does not have it yet"
+            title={
+              Number(draftLimit) > 0
+                ? `Bring this message up to ${Number(draftLimit)} drafts. Pressing it again does nothing until you raise the number or use Append.`
+                : "Prepare your message for every follower who does not have it yet"
+            }
           >
-            {progress?.job === "draft" && running ? "Drafting…" : "Draft all"}
+            {progress?.job === "draft" && running
+              ? "Drafting…"
+              : Number(draftLimit) > 0
+                ? `Draft ${Number(draftLimit)}`
+                : stats
+                  ? `Draft all (${stats.eligible})`
+                  : "Draft all"}
+          </Button>
+
+          {/* The explicit "more" control. Separate box so the target above keeps
+              meaning a total — one number cannot mean both. */}
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-slate-500">Append</span>
+            <input
+              type="number"
+              min={1}
+              value={appendCount}
+              placeholder="0"
+              onChange={(e) => setAppendCount(e.target.value)}
+              className="w-20 rounded-md border border-slate-300 px-2 py-2 text-sm"
+              disabled={busy}
+              title="Draft this many MORE, on top of what already exists."
+            />
+          </label>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              const text = requireMessage();
+              if (!text) return;
+              if (!resolvedPrincipalId) {
+                setNote(
+                  "Add a principal on the Principals page first — drafts are filed against one."
+                );
+                return;
+              }
+              appendDrafts.mutate(text);
+            }}
+            disabled={busy || !activeId || !(Number(appendCount) > 0)}
+            title="Draft this many more, on top of the ones already prepared"
+          >
+            {Number(appendCount) > 0 ? `Append ${Number(appendCount)}` : "Append"}
           </Button>
           <Button
             variant="secondary"
@@ -659,7 +780,7 @@ export default function FollowersLinkedIn() {
             disabled={busy || !activeId}
             title="Approve every draft for this message"
           >
-            Approve all
+            {stats ? `Approve all (${stats.draft})` : "Approve all"}
           </Button>
           <Button
             variant="secondary"
@@ -670,8 +791,17 @@ export default function FollowersLinkedIn() {
             disabled={busy || !activeId}
             title="Approve and send every open DM for this message, paced and capped"
           >
-            {progress?.job === "send" && running ? "Sending…" : "Approve & send all"}
+            {progress?.job === "send" && running
+              ? "Sending…"
+              : stats
+                ? `Approve & send all (${stats.draft + stats.approved})`
+                : "Approve & send all"}
           </Button>
+          {stats && stats.draft + stats.approved > stats.remaining_today && (
+            <span className="text-xs text-amber-700">
+              only {stats.remaining_today} can go today
+            </span>
+          )}
           {running && (
             <Button
               variant="danger"
@@ -739,15 +869,32 @@ export default function FollowersLinkedIn() {
             <button
               key={tab.key}
               type="button"
-              onClick={() => setStatusFilter(tab.key)}
+              onClick={() => {
+                if (statusFilter === tab.key) {
+                  setListHidden((v) => !v);
+                } else {
+                  setStatusFilter(tab.key);
+                  setListHidden(false);
+                }
+              }}
+              title={
+                statusFilter === tab.key
+                  ? listHidden
+                    ? `Show ${tab.label.toLowerCase()} again`
+                    : `Hide ${tab.label.toLowerCase()}`
+                  : undefined
+              }
               className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
                 statusFilter === tab.key
-                  ? "bg-slate-900 text-white"
+                  ? listHidden
+                    ? "bg-slate-900 text-white opacity-60 ring-2 ring-slate-300"
+                    : "bg-slate-900 text-white"
                   : "bg-white text-slate-700 ring-1 ring-inset ring-slate-200 hover:bg-slate-50"
               }`}
             >
               {tab.label}
               {count !== null ? ` (${count})` : ""}
+              {statusFilter === tab.key && listHidden ? " ▸" : ""}
             </button>
           );
         })}
@@ -755,6 +902,12 @@ export default function FollowersLinkedIn() {
 
       {!activeId ? (
         <EmptyState message="Select a connected LinkedIn account to see its network." />
+      ) : listHidden ? (
+        <Card className="p-6 text-center text-sm text-slate-500">
+          {items.length} row{items.length === 1 ? "" : "s"} hidden — click{" "}
+          <b>{STATUS_TABS.find((t) => t.key === statusFilter)?.label ?? "All"}</b>{" "}
+          again to show them.
+        </Card>
       ) : isLoading ? (
         <Loading />
       ) : items.length === 0 ? (
@@ -769,9 +922,91 @@ export default function FollowersLinkedIn() {
         />
       ) : (
         <div className="space-y-3">
-          {items.map((row) => (
-            <FollowerCard key={row.id} row={row} busy={busy} />
-          ))}
+          {(() => {
+            const deletable = items.filter(
+              (r) =>
+                !!r.message_id &&
+                (r.message_status === "draft" || r.message_status === "approved")
+            );
+            const ids = new Set(deletable.map((r) => r.message_id as number));
+            const chosen = [...selectedIds].filter((id) => ids.has(id));
+            if (deletable.length === 0) return null;
+            return (
+              <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5">
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={chosen.length === deletable.length}
+                    onChange={(e) =>
+                      setSelectedIds(
+                        e.target.checked
+                          ? new Set(deletable.map((r) => r.message_id as number))
+                          : new Set()
+                      )
+                    }
+                    className="h-4 w-4 cursor-pointer rounded border-slate-300"
+                  />
+                  Select all on this page ({deletable.length})
+                </label>
+                {chosen.length > 0 && (
+                  <>
+                    <span className="text-sm text-slate-500">{chosen.length} selected</span>
+                    <Button
+                      variant="danger"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Delete ${chosen.length} draft${chosen.length === 1 ? "" : "s"}?
+
+` +
+                              "They become eligible again, so the next Draft or Append will " +
+                              "write them fresh. Nobody is removed from your network."
+                          )
+                        )
+                          bulkDelete.mutate(chosen);
+                      }}
+                      disabled={bulkDelete.isPending || busy}
+                    >
+                      {bulkDelete.isPending
+                        ? "Deleting…"
+                        : `Delete selected (${chosen.length})`}
+                    </Button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedIds(new Set())}
+                      className="text-xs font-medium text-blue-700 hover:underline"
+                    >
+                      Clear selection
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+          {items.map((row) => {
+            const selectable =
+              !!row.message_id &&
+              (row.message_status === "draft" || row.message_status === "approved");
+            return (
+              <FollowerCard
+                key={row.id}
+                row={row}
+                busy={busy}
+                selected={selectable ? selectedIds.has(row.message_id as number) : undefined}
+                onSelect={
+                  selectable
+                    ? (checked) =>
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (checked) next.add(row.message_id as number);
+                          else next.delete(row.message_id as number);
+                          return next;
+                        })
+                    : undefined
+                }
+              />
+            );
+          })}
           {followers && followers.total > items.length && (
             <div className="text-center text-xs text-slate-500">
               Showing {items.length} of {followers.total}. The bulk actions above cover all of

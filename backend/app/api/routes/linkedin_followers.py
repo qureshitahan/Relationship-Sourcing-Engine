@@ -178,6 +178,29 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
     account_id = _resolve_account(payload.account_id)
     campaign_key = _resolve_campaign(payload.message)
     limit = payload.limit if (payload.limit or 0) > 0 else None
+    # A target names how many the campaign should END UP with, so pressing the
+    # button again tops up rather than doubling. Already there? Nothing to do.
+    if (payload.target or 0) > 0:
+        existing = int(
+            db.execute(
+                select(func.count())
+                .select_from(LinkedInMessage)
+                .where(
+                    LinkedInMessage.follower_id.is_not(None),
+                    LinkedInMessage.follower_campaign_key == campaign_key,
+                )
+            ).scalar_one()
+        )
+        needed = max(0, int(payload.target) - existing)
+        if needed == 0:
+            return {
+                "started": False,
+                "candidates": 0,
+                "campaign_key": campaign_key,
+                "message": f"Already {existing} drafted for this message — "
+                "raise the number, or use Append to add more.",
+            }
+        limit = needed
     eligible = service.eligible_followers(
         db, account_id=account_id, campaign_key=campaign_key, limit=limit
     )
