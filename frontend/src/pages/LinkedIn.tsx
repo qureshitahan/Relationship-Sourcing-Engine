@@ -318,7 +318,11 @@ export default function LinkedIn() {
   // drafts can be folded away without losing the tab or the filter. Deliberately
   // NOT persisted: coming back to the page should always show the messages, not
   // an empty screen whose cause is a click from days ago.
-  const [listHidden, setListHidden] = useState(false);
+  // Starts collapsed. Opening the page used to dump every message on screen
+  // before any account or run was chosen, which is what made it read as "stuck
+  // on the last thing". The list appears when a tab is clicked, or on its own
+  // once a drafting run finishes and there is something new worth showing.
+  const [listHidden, setListHidden] = useState(true);
   const [note, setNote] = useState<string | null>(null);
   // While a bulk approve+send is in flight, auto-refresh the list until this
   // timestamp so the user watches messages move draft -> invited/sent.
@@ -349,13 +353,13 @@ export default function LinkedIn() {
     "linkedin:accountId",
     ""
   );
-  const serverActiveId = accountsData?.active_account_id ?? null;
-  // Fall back to the server's account, but only while this tab has made no
-  // choice of its own, and never to an account that is no longer connected.
+  // No account until this tab picks one. The server keeps a single active
+  // account shared by every browser, so a freshly opened tab used to arrive with
+  // whoever somebody else last selected already chosen — one distracted click
+  // away from sending as the wrong person. Nothing is pre-selected now; the
+  // choice is remembered per tab, so it is asked once, not every visit.
   const activeId =
-    (tabAccountId && accounts.some((a) => a.id === tabAccountId)
-      ? tabAccountId
-      : null) ?? serverActiveId;
+    tabAccountId && accounts.some((a) => a.id === tabAccountId) ? tabAccountId : null;
   const activeAccount = accounts.find((a) => a.id === activeId);
   const activeName = activeAccount?.name ?? null;
   const activeStatus = activeAccount?.status ?? (activeId ? "OK" : null);
@@ -518,6 +522,9 @@ export default function LinkedIn() {
       );
     }
     setAwaitingJob(false);
+    // A run just produced messages, so show them rather than leaving the page
+    // collapsed over the very thing the operator was waiting for.
+    setListHidden(false);
     qc.invalidateQueries({ queryKey: ["linkedin"] });
   }, [awaitingJob, runJob, qc]);
   // Drafting is run-anchored, so it reuses the existing run-level cancel that
@@ -774,7 +781,7 @@ export default function LinkedIn() {
                   if (id && id !== activeId) selectAccount.mutate(id);
                 }}
               >
-                {!activeId && <option value="">— Select an account —</option>}
+                {!activeId && <option value="">— Choose an account —</option>}
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name ?? a.id}
@@ -784,6 +791,11 @@ export default function LinkedIn() {
               </select>
             ) : (
               <span className="text-slate-900">{activeName ?? "Dalbir Bains"}</span>
+            )}
+            {!activeId && (
+              <span className="text-sm font-medium text-amber-700">
+                Choose an account before drafting or sending
+              </span>
             )}
             <Badge tone={activeStatus === "OK" ? "green" : "amber"}>
               {activeStatus === "OK" ? "Connected" : activeStatus || "Checking…"}
@@ -879,14 +891,14 @@ export default function LinkedIn() {
                   value={draftLimit}
                   placeholder="all"
                   onChange={(e) => setDraftLimit(e.target.value)}
-                  disabled={draftRun.isPending || draftJobRunning}
+                  disabled={draftRun.isPending || draftJobRunning || !activeId}
                   title="Blank prepares every remaining prospect. A number prepares only that many, so you can draft what you can actually send today."
                   className="w-20 rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
                 />
               </label>
               <Button
                 onClick={() => draftRun.mutate()}
-                disabled={draftRun.isPending || draftJobRunning}
+                disabled={draftRun.isPending || draftJobRunning || !activeId}
               >
                 {draftJobRunning
                   ? "Drafting…"
@@ -919,7 +931,7 @@ export default function LinkedIn() {
               )
                 bulkSend.mutate();
             }}
-            disabled={bulkSend.isPending || sendRunning}
+            disabled={bulkSend.isPending || sendRunning || !activeId}
             title="Approve every draft and send them in one go — paced and daily-capped to protect the account"
           >
             {bulkSend.isPending
