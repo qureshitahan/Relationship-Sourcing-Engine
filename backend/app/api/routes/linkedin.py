@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -989,7 +989,11 @@ def _set_scan_progress(
 
 
 def scan_linkedin_updates(
-    db: Session, *, track_progress: bool = False, account_id: Optional[str] = None
+    db: Session,
+    *,
+    track_progress: bool = False,
+    account_id: Optional[str] = None,
+    recent_days: Optional[int] = None,
 ) -> dict:
     """Poll: auto-DM accepted invites, and detect replies to sent messages.
 
@@ -1049,6 +1053,21 @@ def scan_linkedin_updates(
     if _scope is not None:
         _pending_q = _pending_q.where(_scope)
         _sent_q = _sent_q.where(_scope)
+    # Recency window (manual check only): re-poll just the invites/DMs from the
+    # last `recent_days` days. An un-replied message that old almost never gets a
+    # new reply, so skipping it keeps the on-demand check fast at high volume. The
+    # 15-min background poller passes None and still checks every message.
+    if recent_days and recent_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=int(recent_days))
+        _pending_q = _pending_q.where(
+            func.coalesce(
+                LinkedInMessage.invitation_sent_at, LinkedInMessage.created_at
+            )
+            >= cutoff
+        )
+        _sent_q = _sent_q.where(
+            func.coalesce(LinkedInMessage.sent_at, LinkedInMessage.created_at) >= cutoff
+        )
     pending = db.execute(_pending_q).scalars().all()
     sent_all = db.execute(_sent_q).scalars().all()
     sent = [m for m in sent_all if m.provider_chat_id]  # only these are pollable
@@ -1170,14 +1189,18 @@ def scan_linkedin_updates(
 _scan_lock = threading.Lock()
 
 
-def _scan_worker(account_id: Optional[str] = None) -> None:
+def _scan_worker(
+    account_id: Optional[str] = None, recent_days: Optional[int] = None
+) -> None:
     if not _scan_lock.acquire(blocking=False):
         logger.info("LinkedIn scan already running; skipping duplicate trigger")
         return
     try:
         db = SessionLocal()
         try:
-            scan_linkedin_updates(db, track_progress=True, account_id=account_id)
+            scan_linkedin_updates(
+                db, track_progress=True, account_id=account_id, recent_days=recent_days
+            )
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - never let the background scan crash silently
@@ -1186,9 +1209,14 @@ def _scan_worker(account_id: Optional[str] = None) -> None:
         _scan_lock.release()
 
 
-def launch_linkedin_scan(account_id: Optional[str] = None) -> None:
+def launch_linkedin_scan(
+    account_id: Optional[str] = None, recent_days: Optional[int] = None
+) -> None:
     threading.Thread(
-        target=_scan_worker, args=(account_id,), name="linkedin-scan", daemon=True
+        target=_scan_worker,
+        args=(account_id, recent_days),
+        name="linkedin-scan",
+        daemon=True,
     ).start()
 
 
@@ -1215,9 +1243,13 @@ def check_updates(account_id: Optional[str] = None):
         SCAN_PROGRESS_KEY,
         json.dumps({"status": "starting", "total": 0, "done": 0, "accepted": 0, "replied": 0}),
     )
-    # Scope to the account being viewed when the UI passes one, so the poll only
-    # hits that account's messages (fast) rather than every account's (~minutes).
-    launch_linkedin_scan((account_id or "").strip() or None)
+    # Scope to the account being viewed when the UI passes one, and only re-poll
+    # recent messages, so the on-demand check hits that account's recent DMs (fast)
+    # rather than every account's entire history (~minutes).
+    launch_linkedin_scan(
+        (account_id or "").strip() or None,
+        settings.linkedin_manual_check_recent_days,
+    )
     return {
         "started": True,
         "supported": True,
