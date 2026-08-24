@@ -69,6 +69,7 @@ def create_principal(payload: PrincipalRequest, db: Session = Depends(get_db)):
         phone=payload.phone,
         email_signature=(payload.email_signature or "").strip() or None,
         outreach_mailbox_id=_validated_mailbox_id(payload.outreach_mailbox_id),
+        linkedin_account_id=(payload.linkedin_account_id or "").strip() or None,
         objective=payload.objective,
         document_focus=payload.document_focus,
         bio=payload.bio,
@@ -121,6 +122,10 @@ def update_principal(
         data["email_signature"] = (data["email_signature"] or "").strip() or None
     if "outreach_mailbox_id" in data:
         data["outreach_mailbox_id"] = _validated_mailbox_id(data["outreach_mailbox_id"])
+    if "linkedin_account_id" in data:
+        # Blank clears the link rather than storing an empty string, so "unset"
+        # has one representation everywhere.
+        data["linkedin_account_id"] = (data["linkedin_account_id"] or "").strip() or None
     for field, value in data.items():
         setattr(principal, field, value)
     # Keep unsent drafts in sync when the sign-off changes so campaigns pick

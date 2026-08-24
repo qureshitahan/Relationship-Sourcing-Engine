@@ -60,6 +60,9 @@ class PrincipalOut(ORMModel):
     phone: Optional[str] = None
     email_signature: Optional[str] = None
     outreach_mailbox_id: Optional[str] = None
+    # The connected LinkedIn account that speaks for this principal. Empty until
+    # someone links one, which is exactly how every existing row starts.
+    linkedin_account_id: Optional[str] = None
     objective: Optional[str] = None
     document_focus: Optional[str] = None
     bio: Optional[str] = None

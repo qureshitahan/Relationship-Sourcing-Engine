@@ -31,6 +31,8 @@ export interface Principal {
   phone?: string | null;
   email_signature?: string | null;
   outreach_mailbox_id?: string | null;
+  /** Connected LinkedIn account (Unipile id) that speaks for this principal. */
+  linkedin_account_id?: string | null;
   objective?: string | null;
   document_focus?: string | null;
   bio?: string | null;

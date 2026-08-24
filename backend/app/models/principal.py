@@ -24,6 +24,16 @@ class Principal(Base, TimestampMixin):
     headline: Mapped[Optional[str]] = mapped_column(String(512))
     # Public LinkedIn profile URL — appended to outreach email signatures.
     linkedin_url: Mapped[Optional[str]] = mapped_column(String(512))
+    # Which connected LinkedIn account speaks for this principal (a Unipile
+    # account id). Nothing else records that pairing: a discovery run knows its
+    # principal, the accounts know only their own names, and matching the two by
+    # name is guesswork — "Farah Thawer" against "Farah T", and one Dalbir Bains
+    # account standing behind two principals. Stated once here, the app can tell
+    # whose run is whose instead of inferring it.
+    #
+    # Nullable, and empty on every existing row: unset simply means "not linked",
+    # which behaves exactly as the app did before this column existed.
+    linkedin_account_id: Mapped[Optional[str]] = mapped_column(String(64))
     # Contact phone for signature / scheduling (required for new principals).
     phone: Mapped[Optional[str]] = mapped_column(String(64))
     # Full email sign-off block used on every drafted/sent outreach email.

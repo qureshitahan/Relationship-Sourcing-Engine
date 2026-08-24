@@ -343,7 +343,23 @@ export default function LinkedIn() {
   });
 
   // Resolved up here because the progress query below is scoped to this account.
-  const accounts = accountsData?.accounts ?? [];
+  // The live listing comes back empty whenever the provider call fails, which
+  // used to collapse the picker into a plain line of text — and a hardcoded name
+  // at that. Fall back to the names already cached locally so an account can
+  // still be chosen while LinkedIn is unreachable.
+  const liveAccounts = accountsData?.accounts ?? [];
+  const accounts =
+    liveAccounts.length > 0
+      ? liveAccounts
+      : Object.entries(accountsData?.known_names ?? {})
+          .map(([id, v]) => ({ id, name: v.name, status: undefined }))
+          .filter(
+            (a) =>
+              !["muhammad usama", "faizan riaz"].includes(
+                (a.name ?? "").toLowerCase().replace(/\s+/g, " ").trim()
+              )
+          )
+          .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
   // The account THIS tab sends as. Kept per tab (sessionStorage) rather than read
   // from the server's single active-account row: that row is shared by every tab
   // and browser, so picking Scott in a second tab silently switched the tab that
@@ -372,6 +388,25 @@ export default function LinkedIn() {
     queryKey: ["principals", "active"],
     queryFn: () => listPrincipals({ active: true }),
   });
+
+  // Whose discovery run is selected? A run belongs to a principal, and a
+  // principal can now name the LinkedIn account that sends on their behalf, so
+  // the two together say whether the funnel below is even about the account
+  // picked above.
+  //
+  // Not knowing never warns. When the run is outside the fetched page, has no
+  // principal, or its principal has no account linked, ownership is simply
+  // unknown — and calling that "somebody else's" would put a warning on most
+  // runs. Only a definite mismatch, two linked accounts that differ, counts.
+  const runOwner = runId
+    ? principals?.items.find(
+        (p) => p.id === runs?.items.find((r) => r.id === runId)?.principal_id
+      )
+    : undefined;
+  const runBelongsToOther =
+    !!activeId &&
+    !!runOwner?.linkedin_account_id &&
+    runOwner.linkedin_account_id !== activeId;
   const { data, isLoading } = useQuery({
     queryKey: ["linkedin", statusFilter, runId],
     queryFn: () =>
@@ -388,8 +423,17 @@ export default function LinkedIn() {
   // change, acceptance/reply scan — refreshes these counts too, so they track
   // the message list without any extra wiring.
   const { data: inviteStats } = useQuery({
-    queryKey: ["linkedin", "stats", runId],
-    queryFn: () => getLinkedInStats(runId ? { discovery_run_id: runId } : {}),
+    queryKey: ["linkedin", "stats", runId, activeId],
+    queryFn: () =>
+      getLinkedInStats({
+        ...(runId ? { discovery_run_id: runId } : {}),
+        // Counted by the account that actually pressed send, not by the
+        // principal owning the run — a run can be worked by more than one
+        // account, and an acceptance rate belongs to whoever sent the invite.
+        // With no account selected the parameter is omitted and these are the
+        // tenant-wide totals, exactly as before.
+        ...(activeId ? { from_account: activeId } : {}),
+      }),
     refetchInterval: () => (Date.now() < sendingUntil ? 4000 : false),
   });
 
@@ -790,7 +834,9 @@ export default function LinkedIn() {
                 ))}
               </select>
             ) : (
-              <span className="text-slate-900">{activeName ?? "Dalbir Bains"}</span>
+              <span className="text-slate-500">
+                {activeName ?? "No connected accounts found"}
+              </span>
             )}
             {!activeId && (
               <span className="text-sm font-medium text-amber-700">
@@ -969,11 +1015,26 @@ export default function LinkedIn() {
         </div>
       </Card>
 
-      {inviteStats && (
+      {runBelongsToOther && (
+        <Card className="mb-4 p-4">
+          <div className="text-sm font-semibold text-slate-700">
+            Connection requests
+          </div>
+          <p className="mt-1.5 text-xs text-amber-700">
+            Discovery run #{runId} belongs to {runOwner?.name ?? "another principal"},
+            not {activeName ?? "the account selected above"}. Pick a discovery run of
+            your own &mdash; or &ldquo;All runs&rdquo; &mdash; to see this
+            account&apos;s connection requests.
+          </p>
+        </Card>
+      )}
+
+      {inviteStats && !runBelongsToOther && (
         <Card className="mb-4 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm font-semibold text-slate-700">
-              Connection requests{runId ? ` · run #${runId}` : ""}
+              Connection requests{activeName ? ` · ${activeName}` : ""}
+              {runId ? ` · run #${runId}` : ""}
             </div>
             <div className="flex flex-wrap items-baseline gap-5 text-sm text-slate-600">
               <span>
@@ -1012,7 +1073,9 @@ export default function LinkedIn() {
           <p className="mt-1.5 text-xs text-slate-500">
             {inviteStats.invites_sent > 0
               ? `${inviteStats.acceptance_rate}% accepted (${inviteStats.invites_accepted} of ${inviteStats.invites_sent}). An accepted invite auto-sends the queued message.`
-              : "No connection invitations sent yet. People you are already connected to are messaged directly, so they never appear here."}
+              : activeName
+                ? `No connection invitations sent from ${activeName} yet. People this account is already connected to are messaged directly, so they never appear here.`
+                : "No connection invitations sent yet. People you are already connected to are messaged directly, so they never appear here."}
           </p>
         </Card>
       )}

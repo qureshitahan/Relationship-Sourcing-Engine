@@ -341,6 +341,7 @@ def invite_stats(
     principal_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
     discovery_run_id: Optional[int] = None,
+    from_account: Optional[str] = None,
 ):
     """How many connection invitations went out, and how many were accepted.
 
@@ -349,6 +350,13 @@ def invite_stats(
     profile came back 1st-degree but the auto-DM itself failed (``connected``).
     Requiring ``invitation_sent_at`` keeps direct DMs to existing connections —
     which never needed an invitation — out of both numbers.
+
+    ``from_account`` narrows this to the invitations one connected account
+    actually sent, so an account's acceptance rate is its own rather than the
+    tenant-wide blend. It filters on the account stamped at send time, not on
+    the principal the run belongs to: a run can be worked by more than one
+    account, and performance belongs to whoever pressed send. Omitted — as
+    every existing caller omits it — the numbers are unchanged.
     """
     invited = LinkedInMessage.invitation_sent_at.is_not(None)
     accepted = and_(
@@ -367,6 +375,8 @@ def invite_stats(
         base = base.where(LinkedInMessage.principal_id == principal_id)
     if campaign_id is not None:
         base = base.where(LinkedInMessage.campaign_id == campaign_id)
+    if from_account:
+        base = base.where(LinkedInMessage.from_account == from_account)
 
     sent = db.execute(base.where(invited)).scalar_one()
     approved = db.execute(base.where(accepted)).scalar_one()
