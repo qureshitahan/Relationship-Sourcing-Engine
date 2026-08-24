@@ -227,6 +227,12 @@ class Settings(BaseSettings):
     # flagged. A run-level bulk LinkedIn send stops once today's total reaches this.
     # LinkedIn realistically tolerates well under this; 50 is an aggressive max.
     linkedin_daily_send_cap: int = 50
+    # Manual "Check for replies now" only re-polls DMs sent within this many days
+    # (replies to cold DMs almost always arrive within days). Keeps the on-demand
+    # check fast even when an account has sent thousands of messages. The 15-min
+    # background poller ignores this and still sweeps every message, so no reply is
+    # ever permanently missed. 0 = no window (re-check everything).
+    linkedin_manual_check_recent_days: int = 30
     # How many roster pages the Followers sync fetches at once. Purely read-only
     # listing (never sending), and 99% of a sync is waiting on the provider — one
     # page is a ~2s round-trip and a 7.5k network is 150+ pages, so sequential

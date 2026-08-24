@@ -41,17 +41,25 @@ export default function LinkedInResponses() {
     queryKey: ["linkedin-accounts"],
     queryFn: listLinkedInAccounts,
   });
-  const { data, isLoading } = useQuery({
-    queryKey: ["linkedin", "responses"],
-    queryFn: () => listLinkedInMessages({ limit: 1000 }),
-    refetchInterval: () => (Date.now() < refreshUntil ? 5000 : false),
-  });
 
   const accounts = accountsData?.accounts ?? [];
   const isUnipile = accountsData?.provider === "unipile";
   // Effective account being viewed: explicit filter, else the active account.
   const effectiveAccount =
     accountFilter ?? accountsData?.active_account_id ?? null;
+
+  // Fetch ONLY the selected account's messages (scoped server-side by
+  // from_account), so an account's replies are never dropped by an all-accounts
+  // row cap, and the payload stays small. Re-fetches when the account changes.
+  const { data, isLoading } = useQuery({
+    queryKey: ["linkedin", "responses", effectiveAccount],
+    queryFn: () =>
+      listLinkedInMessages({
+        ...(effectiveAccount ? { from_account: effectiveAccount } : {}),
+        limit: 1000,
+      }),
+    refetchInterval: () => (Date.now() < refreshUntil ? 5000 : false),
+  });
   // Messages with no stamped account predate per-account sending -> attribute
   // them to the env default account (historically the only sender).
   const accountOf = (m: LinkedInMessage): string | null =>
@@ -62,7 +70,7 @@ export default function LinkedInResponses() {
   };
 
   const poll = useMutation({
-    mutationFn: checkLinkedInUpdates,
+    mutationFn: () => checkLinkedInUpdates(effectiveAccount),
     onSuccess: (res) => {
       if (res.started) {
         setNote(null);

@@ -703,12 +703,12 @@ export const stopLinkedInSend = (accountId?: string) =>
       { params: accountId ? { account_id: accountId } : undefined }
     )
     .then((r) => r.data);
-export const checkLinkedInUpdates = () =>
+export const checkLinkedInUpdates = (accountId?: string | null) =>
   api
     .post<{ started: boolean; supported: boolean; message: string }>(
       "/api/linkedin/check-updates",
       {},
-      { timeout: 60000 }
+      { params: accountId ? { account_id: accountId } : {}, timeout: 60000 }
     )
     .then((r) => r.data);
 export interface LinkedInScanProgress {
