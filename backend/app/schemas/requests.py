@@ -25,6 +25,8 @@ class PrincipalRequest(BaseModel):
     email_signature: Optional[str] = None
     # Which configured mailbox this principal's outreach is sent FROM.
     outreach_mailbox_id: Optional[str] = None
+    # Connected LinkedIn account id (Unipile). Empty string clears the link.
+    linkedin_account_id: Optional[str] = None
     objective: Optional[str] = None  # deprecated — use Agent/Discover goal instead
     document_focus: Optional[str] = None
     bio: Optional[str] = None

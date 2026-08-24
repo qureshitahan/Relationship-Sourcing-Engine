@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  listLinkedInAccounts,
   createPrincipal,
   deletePrincipal,
   deletePrincipalDocument,
@@ -22,6 +23,7 @@ interface FormState {
   document_focus: string;
   email_signature: string;
   outreach_mailbox_id: string;
+  linkedin_account_id: string;
 }
 
 const EMPTY: FormState = {
@@ -31,6 +33,7 @@ const EMPTY: FormState = {
   document_focus: "",
   email_signature: "",
   outreach_mailbox_id: "",
+  linkedin_account_id: "",
 };
 
 function fromPrincipal(p: Principal): FormState {
@@ -41,6 +44,7 @@ function fromPrincipal(p: Principal): FormState {
     document_focus: p.document_focus ?? "",
     email_signature: p.email_signature ?? "",
     outreach_mailbox_id: p.outreach_mailbox_id ?? "",
+    linkedin_account_id: p.linkedin_account_id ?? "",
   };
 }
 
@@ -52,6 +56,7 @@ function toPayload(f: FormState): PrincipalPayload {
     document_focus: f.document_focus || undefined,
     email_signature: f.email_signature.trim() || null,
     outreach_mailbox_id: f.outreach_mailbox_id || null,
+    linkedin_account_id: f.linkedin_account_id || null,
   };
 }
 
@@ -478,6 +483,11 @@ function PrincipalProfile({
                   value={form.outreach_mailbox_id}
                   onChange={set("outreach_mailbox_id")}
                 />
+                <LinkedInAccountPicker
+                  value={form.linkedin_account_id}
+                  onChange={set("linkedin_account_id")}
+                  linkedinUrl={form.linkedin_url}
+                />
                 <Field
                   label="Email signature"
                   hint="Paste freely — we format it for drafts and style it as HTML when the email is sent (clickable LinkedIn/websites, Book a call button)."
@@ -861,6 +871,106 @@ function NewPrincipalForm({
         </Button>
       </div>
     </Card>
+  );
+}
+
+/**
+ * Which connected LinkedIn account speaks for this principal.
+ *
+ * Nothing else in the data records that pairing: a discovery run knows its
+ * principal, the accounts know only their own names, and matching the two by
+ * name is guesswork — "Farah Thawer" against "Farah T", and one Dalbir Bains
+ * account standing behind two principals. Asked once here, the rest of the app
+ * can tell whose run is whose instead of inferring it.
+ *
+ * Optional. Left blank, everything behaves exactly as it did before.
+ */
+function LinkedInAccountPicker({
+  value,
+  onChange,
+  linkedinUrl,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  linkedinUrl?: string;
+}) {
+  const { data } = useQuery({
+    queryKey: ["linkedin-accounts"],
+    queryFn: listLinkedInAccounts,
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
+  // The live listing is a call to the provider, and it comes back empty whenever
+  // that call fails — which would leave this picker with nothing to choose from
+  // for a reason that has nothing to do with the accounts existing. Fall back to
+  // the names already cached locally, which is what that cache is for.
+  const hidden = ["muhammad usama", "faizan riaz"];
+  const live = data?.accounts ?? [];
+  const accounts =
+    live.length > 0
+      ? live
+      : Object.entries(data?.known_names ?? {})
+          .map(([id, v]) => ({ id, name: v.name }))
+          .filter(
+            (a) => !hidden.includes((a.name ?? "").toLowerCase().replace(/\s+/g, " ").trim())
+          )
+          .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+
+  // A hint drawn from the principal's own profile link, not from their name:
+  // the handle is the one thing both sides can agree on.
+  const handle = (linkedinUrl ?? "")
+    .toLowerCase()
+    .replace(/\/+$/, "")
+    .split("/in/")[1]
+    ?.split(/[/?#]/)[0];
+  const suggestion =
+    handle && !value
+      ? accounts.find((a) => {
+          const name = (a.name ?? "").toLowerCase().replace(/[^a-z]/g, "");
+          const h = handle.replace(/[^a-z]/g, "");
+          return name && h && (h.includes(name) || name.includes(h.slice(0, 6)));
+        })
+      : undefined;
+
+  return (
+    <label className="block">
+      <span className="text-sm font-medium text-slate-700">LinkedIn account</span>
+      <p className="mt-0.5 text-xs text-slate-500">
+        Optional — which connected account sends as this principal. Leave blank and
+        nothing changes.
+      </p>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+      >
+        <option value="">— Not linked —</option>
+        {accounts.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name ?? a.id}
+          </option>
+        ))}
+      </select>
+      {suggestion && (
+        <button
+          type="button"
+          onClick={() => onChange(suggestion.id)}
+          className="mt-1 text-xs font-medium text-blue-700 hover:underline"
+        >
+          Use “{suggestion.name}” — matches this profile link
+        </button>
+      )}
+      {accounts.length === 0 && (
+        <p className="mt-1 text-xs text-slate-400">
+          No connected accounts found. Connect one on the LinkedIn page first.
+        </p>
+      )}
+      {live.length === 0 && accounts.length > 0 && (
+        <p className="mt-1 text-xs text-slate-400">
+          LinkedIn is not responding right now — showing the accounts last seen.
+        </p>
+      )}
+    </label>
   );
 }
 
