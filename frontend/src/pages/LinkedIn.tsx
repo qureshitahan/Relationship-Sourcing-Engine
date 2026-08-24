@@ -609,7 +609,9 @@ export default function LinkedIn() {
   });
 
   const poll = useMutation({
-    mutationFn: checkLinkedInUpdates,
+    // Unscoped here (checks every account) — this is the LinkedIn workflow page,
+    // not the per-account Responses tab.
+    mutationFn: () => checkLinkedInUpdates(),
     onSuccess: (res) => {
       if (res.started) {
         // Show the live progress bar and refresh the list as results land.

@@ -285,6 +285,23 @@ def select_account(payload: LinkedInSelectAccountRequest):
     return {"active_account_id": account_id}
 
 
+def _account_scope(account_id: Optional[str]):
+    """SQL condition selecting messages for ONE connected account, mirroring how
+    the UI attributes them: an exact ``from_account`` match, PLUS legacy rows with
+    no stamped account when the DEFAULT (env ``UNIPILE_ACCOUNT_ID``) account is the
+    one selected. Returns None when no account is given (i.e. no scoping)."""
+    acct = (account_id or "").strip()
+    if not acct:
+        return None
+    default = (settings.unipile_account_id or "").strip()
+    if acct == default:
+        return or_(
+            LinkedInMessage.from_account == acct,
+            LinkedInMessage.from_account.is_(None),
+        )
+    return LinkedInMessage.from_account == acct
+
+
 @router.get("", response_model=Page[LinkedInMessageOut])
 def list_messages(
     db: Session = Depends(get_db),
@@ -293,6 +310,7 @@ def list_messages(
     principal_id: Optional[int] = None,
     campaign_id: Optional[int] = None,
     discovery_run_id: Optional[int] = None,
+    from_account: Optional[str] = None,
     limit: int = Query(50, le=1000),
     offset: int = 0,
 ):
@@ -326,6 +344,10 @@ def list_messages(
     if campaign_id is not None:
         query = query.where(LinkedInMessage.campaign_id == campaign_id)
         count_query = count_query.where(LinkedInMessage.campaign_id == campaign_id)
+    _scope = _account_scope(from_account)
+    if _scope is not None:
+        query = query.where(_scope)
+        count_query = count_query.where(_scope)
     query = query.order_by(LinkedInMessage.created_at.desc()).limit(limit).offset(offset)
     items = db.execute(query).scalars().all()
     total = db.execute(count_query).scalar_one()
@@ -966,7 +988,9 @@ def _set_scan_progress(
     db.commit()
 
 
-def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
+def scan_linkedin_updates(
+    db: Session, *, track_progress: bool = False, account_id: Optional[str] = None
+) -> dict:
     """Poll: auto-DM accepted invites, and detect replies to sent messages.
 
     Shared by the /check-updates route and the background poller. Degrades
@@ -1010,12 +1034,23 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
     def _account_key(msg) -> str:
         return (getattr(msg, "from_account", None) or "default").strip() or "default"
 
-    pending = db.execute(
-        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.INVITE_SENT)
-    ).scalars().all()
-    sent_all = db.execute(
-        select(LinkedInMessage).where(LinkedInMessage.status == LinkedInStatus.SENT)
-    ).scalars().all()
+    # Optional account scoping: the manual "Check for replies" button passes the
+    # account currently being viewed, so we poll only THAT account's messages
+    # (one account's invites + sent DMs) instead of every account's — far fewer
+    # Unipile round-trips. Left None (the 15-min background poller), every
+    # account is scanned exactly as before.
+    _scope = _account_scope(account_id)
+    _pending_q = select(LinkedInMessage).where(
+        LinkedInMessage.status == LinkedInStatus.INVITE_SENT
+    )
+    _sent_q = select(LinkedInMessage).where(
+        LinkedInMessage.status == LinkedInStatus.SENT
+    )
+    if _scope is not None:
+        _pending_q = _pending_q.where(_scope)
+        _sent_q = _sent_q.where(_scope)
+    pending = db.execute(_pending_q).scalars().all()
+    sent_all = db.execute(_sent_q).scalars().all()
     sent = [m for m in sent_all if m.provider_chat_id]  # only these are pollable
     total = len(pending) + len(sent)
     done = 0
@@ -1135,14 +1170,14 @@ def scan_linkedin_updates(db: Session, *, track_progress: bool = False) -> dict:
 _scan_lock = threading.Lock()
 
 
-def _scan_worker() -> None:
+def _scan_worker(account_id: Optional[str] = None) -> None:
     if not _scan_lock.acquire(blocking=False):
         logger.info("LinkedIn scan already running; skipping duplicate trigger")
         return
     try:
         db = SessionLocal()
         try:
-            scan_linkedin_updates(db, track_progress=True)
+            scan_linkedin_updates(db, track_progress=True, account_id=account_id)
         finally:
             db.close()
     except Exception:  # noqa: BLE001 - never let the background scan crash silently
@@ -1151,12 +1186,14 @@ def _scan_worker() -> None:
         _scan_lock.release()
 
 
-def launch_linkedin_scan() -> None:
-    threading.Thread(target=_scan_worker, name="linkedin-scan", daemon=True).start()
+def launch_linkedin_scan(account_id: Optional[str] = None) -> None:
+    threading.Thread(
+        target=_scan_worker, args=(account_id,), name="linkedin-scan", daemon=True
+    ).start()
 
 
 @router.post("/check-updates")
-def check_updates():
+def check_updates(account_id: Optional[str] = None):
     """Kick off a poll for accepted invitations and new replies, in the background.
 
     Polling hits Unipile once per pending message; with many messages that runs
@@ -1178,7 +1215,9 @@ def check_updates():
         SCAN_PROGRESS_KEY,
         json.dumps({"status": "starting", "total": 0, "done": 0, "accepted": 0, "replied": 0}),
     )
-    launch_linkedin_scan()
+    # Scope to the account being viewed when the UI passes one, so the poll only
+    # hits that account's messages (fast) rather than every account's (~minutes).
+    launch_linkedin_scan((account_id or "").strip() or None)
     return {
         "started": True,
         "supported": True,
