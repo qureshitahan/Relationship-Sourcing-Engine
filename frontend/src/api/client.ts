@@ -100,6 +100,7 @@ export interface PrincipalPayload {
   phone: string;
   email_signature?: string | null;
   outreach_mailbox_id?: string | null;
+  linkedin_account_id?: string | null;
   document_focus?: string;
   bio?: string;
   background?: string;
@@ -539,6 +540,9 @@ export type LinkedInFilters = {
   contact_id?: number;
   principal_id?: number;
   discovery_run_id?: number;
+  /** Connected account that sent the message, as stamped at send time. Scopes
+   *  the invitation funnel to one account's own performance. */
+  from_account?: string;
   limit?: number;
   offset?: number;
 };
