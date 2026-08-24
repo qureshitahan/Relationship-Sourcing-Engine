@@ -125,6 +125,17 @@ export default function LinkedInResponses() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [all, effectiveAccount, accountsData]);
 
+  // Label the reply-check button with the account being viewed, e.g.
+  // "Check for replies now for Dalbir Bains".
+  const selectedAccountName =
+    accounts.find((a) => a.id === effectiveAccount)?.name || null;
+  const checkLabel = selectedAccountName
+    ? `Check for replies now for ${selectedAccountName}`
+    : "Check for replies now";
+  const checkingLabel = selectedAccountName
+    ? `Checking ${selectedAccountName}…`
+    : "Checking…";
+
   if (isLoading) return <Loading />;
 
   return (
@@ -139,7 +150,7 @@ export default function LinkedInResponses() {
             disabled={poll.isPending}
             title="Poll LinkedIn now for newly accepted invites and new replies"
           >
-            {poll.isPending ? "Checking…" : "Check for replies now"}
+            {poll.isPending ? checkingLabel : checkLabel}
           </Button>
         }
       />
