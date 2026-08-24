@@ -191,14 +191,32 @@ def run(payload: DiscoveryRunRequest, db: Session = Depends(get_db)):
 def list_runs(
     db: Session = Depends(get_db),
     principal_id: Optional[int] = None,
+    principal_ids: Optional[str] = None,
     limit: int = Query(25, le=200),
     offset: int = 0,
 ):
+    """Discovery runs, newest first.
+
+    ``principal_ids`` is a comma-separated list, and exists because one LinkedIn
+    account can speak for several principals — the same person kept under two
+    records, say — so narrowing to "this account's runs" needs a set rather than
+    the single ``principal_id`` above, which stays as it was for its own callers.
+    A value that parses to nothing is ignored rather than matching nothing: an
+    empty picker reads as broken, where the full list merely reads as unfiltered.
+    """
     query = select(DiscoveryRun)
     count_query = select(func.count()).select_from(DiscoveryRun)
     if principal_id is not None:
         query = query.where(DiscoveryRun.principal_id == principal_id)
         count_query = count_query.where(DiscoveryRun.principal_id == principal_id)
+    wanted = [
+        int(part)
+        for part in (principal_ids or "").split(",")
+        if part.strip().lstrip("-").isdigit()
+    ]
+    if wanted:
+        query = query.where(DiscoveryRun.principal_id.in_(wanted))
+        count_query = count_query.where(DiscoveryRun.principal_id.in_(wanted))
     query = query.order_by(DiscoveryRun.created_at.desc()).limit(limit).offset(offset)
     items = db.execute(query).scalars().all()
     total = db.execute(count_query).scalar_one()

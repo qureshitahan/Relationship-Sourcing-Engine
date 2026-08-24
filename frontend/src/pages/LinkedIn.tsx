@@ -380,33 +380,39 @@ export default function LinkedIn() {
   const activeName = activeAccount?.name ?? null;
   const activeStatus = activeAccount?.status ?? (activeId ? "OK" : null);
 
-  const { data: runs } = useQuery({
-    queryKey: ["discovery-runs"],
-    queryFn: () => listDiscoveryRuns({ limit: 25 }),
-  });
+  // Declared before the runs query because that query is now scoped by it.
   const { data: principals } = useQuery({
     queryKey: ["principals", "active"],
     queryFn: () => listPrincipals({ active: true }),
   });
 
-  // Whose discovery run is selected? A run belongs to a principal, and a
-  // principal can now name the LinkedIn account that sends on their behalf, so
-  // the two together say whether the funnel below is even about the account
-  // picked above.
-  //
-  // Not knowing never warns. When the run is outside the fetched page, has no
-  // principal, or its principal has no account linked, ownership is simply
-  // unknown — and calling that "somebody else's" would put a warning on most
-  // runs. Only a definite mismatch, two linked accounts that differ, counts.
-  const runOwner = runId
-    ? principals?.items.find(
-        (p) => p.id === runs?.items.find((r) => r.id === runId)?.principal_id
-      )
-    : undefined;
-  const runBelongsToOther =
-    !!activeId &&
-    !!runOwner?.linkedin_account_id &&
-    runOwner.linkedin_account_id !== activeId;
+  // Runs belong to principals, and a principal now names the LinkedIn account
+  // that speaks for them, so the account selected above picks out whose runs
+  // these are. A list rather than a single id: one account can stand behind
+  // several principals — the same person kept under two records, say.
+  const accountPrincipalIds = activeId
+    ? (principals?.items ?? [])
+        .filter((p) => p.linkedin_account_id === activeId)
+        .map((p) => p.id)
+    : [];
+
+  const { data: runs } = useQuery({
+    // No account chosen, or one nobody has been linked to yet, falls back to
+    // every run. The link starts empty on every existing row, so a deployment
+    // where nobody has linked anyone would otherwise open to an empty picker
+    // and read as broken — unfiltered is a far better wrong answer than empty.
+    queryKey: ["discovery-runs", accountPrincipalIds.join(",")],
+    queryFn: () =>
+      listDiscoveryRuns({
+        // 25 was a display cap rather than a real one: older runs simply fell
+        // off the end of the picker with nothing to say they had. Narrowed to
+        // one account, 200 — what the endpoint allows — is the whole history.
+        limit: 200,
+        ...(accountPrincipalIds.length > 0
+          ? { principal_ids: accountPrincipalIds.join(",") }
+          : {}),
+      }),
+  });
   const { data, isLoading } = useQuery({
     queryKey: ["linkedin", statusFilter, runId],
     queryFn: () =>
@@ -478,6 +484,26 @@ export default function LinkedIn() {
     runJob?.job_kind === "draft_linkedin" && runJob?.job_status === "running";
 
   const currentRun = runs?.items.find((r) => r.id === runId);
+
+  // Whose discovery run is selected? A run belongs to a principal, and a
+  // principal now names the LinkedIn account that speaks for them, so the two
+  // together say whether the funnel below is about the account picked above.
+  //
+  // Read from runJob, which is fetched by id, rather than from the picker's
+  // list: that list is scoped to this account now, so a run belonging to
+  // somebody else — arrived at by a link, or by a ?run= this tab remembered —
+  // is absent from it, and the very mismatch this exists to catch would go
+  // unmentioned.
+  //
+  // Not knowing never warns. A run with no principal, or whose principal has no
+  // account linked, is simply unknown, and calling that "somebody else's" would
+  // put a warning on most runs. Only two linked accounts that differ count.
+  const runPrincipalId = runJob?.principal_id ?? currentRun?.principal_id;
+  const runOwner = principals?.items.find((p) => p.id === runPrincipalId);
+  const runBelongsToOther =
+    !!activeId &&
+    !!runOwner?.linkedin_account_id &&
+    runOwner.linkedin_account_id !== activeId;
 
   // How many to prepare this time. Blank keeps the original behaviour of
   // drafting the whole run; a number prepares only what can realistically be
@@ -887,6 +913,12 @@ export default function LinkedIn() {
             onChange={(e) => setRunFilter(e.target.value)}
           >
             <option value="">All runs</option>
+            {runId && !runs?.items.some((r) => r.id === runId) && (
+              <option value={runId}>
+                Discovery run #{runId}
+                {runOwner ? ` · ${runOwner.name}` : ""}
+              </option>
+            )}
             {runs?.items.map((r) => (
               // Named "Discovery run" rather than "Run": the campaign page labels
               // its own agent runs "Run #" too, and the two numbering schemes are
@@ -914,13 +946,13 @@ export default function LinkedIn() {
                   Run&apos;s own principal
                   {(() => {
                     const own = principals?.items.find(
-                      (p) => p.id === currentRun?.principal_id
+                      (p) => p.id === runPrincipalId
                     );
                     return own ? ` (${own.name})` : "";
                   })()}
                 </option>
                 {(principals?.items ?? [])
-                  .filter((p) => p.id !== currentRun?.principal_id)
+                  .filter((p) => p.id !== runPrincipalId)
                   .map((p) => (
                     <option key={p.id} value={String(p.id)}>
                       {p.name}
