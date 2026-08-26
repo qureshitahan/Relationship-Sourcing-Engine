@@ -8,7 +8,7 @@ from typing import Any, Callable, TypeVar
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.models.agent_config import AgentConfig
 from app.models.agent_playbook import AgentPlaybook
@@ -468,6 +468,39 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
             )
         ).scalar_one()
     )
+    # Follow-ups actually sent, counted from the drafts rather than from
+    # ``AgentRun.followups_sent``. That counter only ever increments on the
+    # auto-send branch of the follow-up stage, so a campaign that waits for
+    # approval — "nothing is sent automatically" — reported 0 no matter how many
+    # nudges the team approved and sent by hand. The number sat at zero while
+    # Send climbed, which left the extra emails looking unaccounted for.
+    #
+    # An email is a follow-up when the same prospect already had one sent
+    # earlier in this campaign: the first email is the outreach, everything
+    # after it is a nudge. That holds whoever pressed send.
+    _prior = aliased(EmailDraft)
+    earlier_send = (
+        select(func.count())
+        .select_from(_prior)
+        .where(
+            _prior.campaign_id == campaign_id,
+            _prior.contact_id == EmailDraft.contact_id,
+            _prior.sent_at.isnot(None),
+            _prior.sent_at < EmailDraft.sent_at,
+        )
+        .scalar_subquery()
+    )
+    followups_total = int(
+        db.execute(
+            select(func.count(EmailDraft.id)).where(
+                EmailDraft.campaign_id == campaign_id,
+                EmailDraft.contact_id.isnot(None),
+                EmailDraft.sent_at.isnot(None),
+                EmailDraft.sent_at >= since,
+                earlier_send > 0,
+            )
+        ).scalar_one()
+    )
     # Drafts sitting in review (awaiting human approval before they can send).
     pending_drafts = int(
         db.execute(
@@ -510,7 +543,7 @@ def campaign_detail(db: Session, campaign_id: int, *, days: int = 14) -> dict[st
         "rejected": _campaign_rejected_count(db, campaign_id, config),
         "drafted": drafts_total,
         "sent": sent_total,
-        "followups_sent": sum(r.followups_sent or 0 for r in runs),
+        "followups_sent": followups_total,
         "replies": replies_total,
         "runs": len(runs),
     }
