@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -97,6 +97,11 @@ _IDLE: dict = {
     "sent": 0,
     "skipped": 0,
     "failed": 0,
+    # Already contacted under this message, and whatever the daily cap left for
+    # the next run. Both were reported only inside the finish sentence, which the
+    # UI cannot break apart to show a tidy summary.
+    "duplicates": 0,
+    "held": 0,
     "imported": 0,
     "stop_requested": False,
     "message": None,
@@ -795,6 +800,34 @@ def send_one(
     return "failed"
 
 
+def _retry_attempts(
+    db: Session, *, account_id: str, campaign_key: str
+) -> dict[int, int]:
+    """How many times each follower has already been tried for this message.
+
+    Only retryable checkpoints count (FAILED / SKIPPED). A settled one is filtered
+    out of the queue entirely, so it never needs an attempt number.
+
+    Keyed by ``LinkedInFollower.id`` so a queued message's ``follower_id`` reads
+    straight off it, and absent means never tried.
+    """
+    rows = db.execute(
+        select(LinkedInFollower.id, LinkedInFollowerSend.attempts).join(
+            LinkedInFollowerSend,
+            and_(
+                LinkedInFollowerSend.account_id == LinkedInFollower.account_id,
+                LinkedInFollowerSend.follower_provider_id
+                == LinkedInFollower.provider_id,
+            ),
+        ).where(
+            LinkedInFollower.account_id == account_id,
+            LinkedInFollowerSend.campaign_key == campaign_key,
+            LinkedInFollowerSend.status.in_(FollowerSendStatus.RETRYABLE),
+        )
+    ).all()
+    return {fid: int(n or 0) for fid, n in rows if fid is not None}
+
+
 def send_all(
     db: Session,
     *,
@@ -851,24 +884,57 @@ def send_all(
     cap = max(0, int(settings.linkedin_daily_send_cap))
     sent_today = linkedin_sent_today(db, account_id)
     remaining = max(0, cap - sent_today)
-    queue = messages[:remaining]
-    held = len(messages) - len(queue)
 
-    start_progress("send", total=len(queue), campaign_key=campaign_key)
-    write_progress(message=f"{held} held for the next run." if held else None)
+    # Least-tried followers first. A follower LinkedIn refuses to resolve (a
+    # locked or restricted profile) is left RETRYABLE on purpose, so it comes
+    # back in every run — and with the queue ordered by message id, that block of
+    # old failures sat at the FRONT and was retried ahead of everyone else, day
+    # after day. Ordering by attempt count puts anyone never tried first, so a
+    # run reaches new people before re-trying known problems. Nothing is dropped:
+    # the previously-tried ones still follow, just behind.
+    attempts_by_follower = _retry_attempts(
+        db, account_id=account_id, campaign_key=campaign_key
+    )
+    messages.sort(key=lambda m: (attempts_by_follower.get(m.follower_id, 0), m.id))
+
+    # The cap counts DELIVERIES, not attempts. This used to slice the queue to
+    # ``remaining`` and attempt exactly that many, so every failure, skip and
+    # duplicate spent one of the day's places and delivered nothing — a run
+    # allowed 50 sends could finish having sent 15, with the rest of the
+    # allowance unusable until tomorrow. The loop below instead runs until
+    # ``remaining`` messages have actually left (or the list is exhausted), so a
+    # non-delivery costs an attempt rather than a send.
+    target = min(remaining, len(messages))
+
+    start_progress("send", total=target, campaign_key=campaign_key)
+    # How many will not be reached today is no longer knowable up front: it
+    # depends on how many attempts deliver. The exact figure is reported in the
+    # finish message once the run is over.
+    write_progress(
+        message=(
+            f"{len(messages) - target} or more held for the next run."
+            if len(messages) > target
+            else None
+        )
+    )
 
     delay = max(0.0, float(settings.bulk_linkedin_send_delay_seconds))
     sent = skipped = failed = duplicates = 0
+    attempted = 0
     stopped = False
 
-    for index, msg in enumerate(queue, start=1):
+    for msg in messages:
+        # Deliveries, not attempts — the whole point of the change above.
+        if sent >= remaining:
+            break
         if stop_requested():
             stopped = True
             break
+        attempted += 1
         follower = db.get(LinkedInFollower, msg.follower_id)
         if follower is None:
             failed += 1
-            write_progress(done=index, failed=failed)
+            write_progress(done=sent, failed=failed)
             continue
         try:
             outcome = send_one(
@@ -891,14 +957,24 @@ def send_all(
             duplicates += 1
         else:
             failed += 1
+        # ``done`` follows deliveries so the bar agrees with its own "N of M"
+        # label, which already reads from ``sent``. Counting attempts here would
+        # fill the bar while nothing was actually being delivered.
         write_progress(
-            done=index, sent=sent, skipped=skipped, failed=failed
+            done=sent, sent=sent, skipped=skipped, failed=failed
         )
         # Pace only between real sends; a skip cost the account nothing.
-        if outcome == "sent" and index < len(queue) and delay:
+        if outcome == "sent" and sent < remaining and delay:
             if sleep_unless_stopped(delay):
                 stopped = True
                 break
+
+    # Now exact rather than an estimate: whatever was never reached today.
+    held = max(0, len(messages) - attempted)
+    # Written before finishing so the completed record carries the full picture:
+    # the page shows this summary after the run, and it must not have to re-read
+    # the sentence below to find the numbers.
+    write_progress(duplicates=duplicates, held=held)
 
     finish_progress(
         stopped=stopped,
@@ -912,7 +988,11 @@ def send_all(
         ),
     )
     return {
-        "queued": len(queue),
+        "queued": target,
+        # Attempts made to reach ``sent`` deliveries. Larger than ``queued``
+        # whenever profiles could not be reached, which is exactly what the old
+        # queue slice hid.
+        "attempted": attempted,
         "sent": sent,
         "skipped": skipped,
         "failed": failed,

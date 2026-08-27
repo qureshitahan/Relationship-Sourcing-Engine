@@ -497,6 +497,10 @@ export interface FollowersProgress {
   sent: number;
   skipped: number;
   failed: number;
+  // Already contacted under this message, and what the daily cap left over for
+  // the next run. Optional so a record written before these existed still fits.
+  duplicates?: number;
+  held?: number;
   imported: number;
   stop_requested: boolean;
   message?: string | null;
