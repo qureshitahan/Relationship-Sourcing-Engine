@@ -55,13 +55,77 @@ const REACH_LABEL: Record<string, string> = {
 /** Live bar for the running sync / draft / send job. */
 function JobBar({ progress }: { progress: FollowersProgress }) {
   const { job, status, total, done } = progress;
-  if (status !== "running" && status !== "failed") return null;
+  // Dismissal is keyed by the summary text, not a plain boolean: closing one
+  // run's result must not hide the next one's, and the next run writes a
+  // different summary.
+  const [dismissed, setDismissed] = useState<string | null>(null);
+
   if (status === "failed")
     return (
       <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-900">
         {progress.message ?? "The job failed — check backend logs."}
       </div>
     );
+
+  // A finished job used to vanish the instant it ended, taking its result with
+  // it: the run recorded "Sent 15 DM(s)" and nothing ever showed it, so there
+  // was no way to tell how many actually went out. The count now stays on screen
+  // until it is dismissed or the next job replaces it.
+  if (status === "done" || status === "stopped") {
+    const count =
+      job === "send"
+        ? progress.sent
+        : job === "draft"
+          ? progress.drafted
+          : progress.imported;
+    const noun =
+      job === "send"
+        ? `DM${count === 1 ? "" : "s"} sent`
+        : job === "draft"
+          ? `DM${count === 1 ? "" : "s"} written`
+          : `new follower${count === 1 ? "" : "s"} found`;
+    const key = `${job}:${status}:${progress.message ?? ""}:${count}`;
+    if (dismissed === key) return null;
+    // Built from the record's own counters rather than the finish sentence, so
+    // each outcome reads as its own fact instead of one run-on line.
+    const details = [
+      progress.skipped > 0 ? `${progress.skipped} not reachable` : null,
+      progress.failed > 0 ? `${progress.failed} failed` : null,
+      progress.duplicates ? `${progress.duplicates} already contacted` : null,
+      progress.held ? `${progress.held} left for the next run` : null,
+      status === "stopped" ? "stopped early" : null,
+    ].filter(Boolean);
+    const halted = status === "stopped";
+    return (
+      <div
+        className={`mb-4 flex items-start justify-between gap-4 rounded-lg border px-4 py-3 ${
+          halted
+            ? "border-amber-200 bg-amber-50 text-amber-900"
+            : "border-emerald-200 bg-emerald-50 text-emerald-900"
+        }`}
+      >
+        <div>
+          <div className="text-sm font-semibold">
+            {count} {noun}
+          </div>
+          {details.length > 0 && (
+            <div className="mt-0.5 text-xs opacity-90">
+              {details.join(" · ")}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setDismissed(key)}
+          className="shrink-0 text-xs font-medium underline-offset-2 hover:underline"
+        >
+          Dismiss
+        </button>
+      </div>
+    );
+  }
+
+  if (status !== "running") return null;
 
   // A sync has no known total until the first page lands, so it shows an
   // indeterminate label rather than a misleading 0%.
