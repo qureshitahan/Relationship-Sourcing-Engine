@@ -800,6 +800,44 @@ def send_one(
     return "failed"
 
 
+def unsettled_follower_filter(account_id: str, campaign_key: str):
+    """Excludes drafts whose follower is already settled for this message.
+
+    A follower with a SENT checkpoint has had this message; one CLAIMED is
+    awaiting review and is deliberately never auto-retried. Either way ``_claim``
+    will refuse the send, so a draft pointing at them can NEVER go out.
+
+    Such a row is left behind whenever a follower ended up with more than one
+    draft for the same message: one row sent and moved on, the duplicate stayed
+    APPROVED forever. Counting those as work still to do is what made the page
+    offer "Approve & send all (97)" while the queue could only ever attempt 3.
+    """
+    settled = select(LinkedInFollowerSend.follower_provider_id).where(
+        LinkedInFollowerSend.account_id == account_id,
+        LinkedInFollowerSend.campaign_key == campaign_key,
+        LinkedInFollowerSend.status.not_in(FollowerSendStatus.RETRYABLE),
+    )
+    settled_followers = select(LinkedInFollower.id).where(
+        LinkedInFollower.account_id == account_id,
+        LinkedInFollower.provider_id.in_(settled),
+    )
+    return LinkedInMessage.follower_id.not_in(settled_followers)
+
+
+def open_message_conditions(account_id: str, campaign_key: str) -> list:
+    """Every condition for "an open follower DM that can still be sent".
+
+    One definition shared by the send queue, the tab counts and the list, so the
+    three can no longer disagree about how much work is left.
+    """
+    return [
+        LinkedInMessage.follower_id.is_not(None),
+        LinkedInMessage.follower_campaign_key == campaign_key,
+        LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]),
+        unsettled_follower_filter(account_id, campaign_key),
+    ]
+
+
 def _retry_attempts(
     db: Session, *, account_id: str, campaign_key: str
 ) -> dict[int, int]:
@@ -845,38 +883,13 @@ def send_all(
     if approve_first:
         approve_all(db, campaign_key=campaign_key)
 
-    # Followers whose checkpoint would refuse a claim anyway — SENT (already
-    # delivered) or CLAIMED (outcome unknown, deliberately never auto-retried).
-    # Mirrors ``_claim`` exactly: FAILED and SKIPPED stay out of this set, so a
-    # retryable follower is still queued and retried as before.
-    settled = select(LinkedInFollowerSend.follower_provider_id).where(
-        LinkedInFollowerSend.account_id == account_id,
-        LinkedInFollowerSend.campaign_key == campaign_key,
-        LinkedInFollowerSend.status.not_in(FollowerSendStatus.RETRYABLE),
-    )
-    settled_followers = select(LinkedInFollower.id).where(
-        LinkedInFollower.account_id == account_id,
-        LinkedInFollower.provider_id.in_(settled),
-    )
-
+    # Settled followers are kept out of the queue rather than discovered one by
+    # one inside it. This is a pre-filter only — every send still passes through
+    # ``_claim``, which remains the actual duplicate guarantee.
     messages = list(
         db.execute(
             select(LinkedInMessage)
-            .where(
-                LinkedInMessage.follower_id.is_not(None),
-                LinkedInMessage.follower_campaign_key == campaign_key,
-                LinkedInMessage.status.in_(
-                    [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
-                ),
-                # Keep the settled ones out of the queue rather than discovering
-                # them one by one inside it. They were skipped correctly, but the
-                # queue is capped per day and ordered by id, so a block of old
-                # already-contacted drafts at the front consumed an entire run's
-                # allowance and delivered nothing. This is a pre-filter only —
-                # every send still passes through ``_claim``, which remains the
-                # actual duplicate guarantee.
-                LinkedInMessage.follower_id.not_in(settled_followers),
-            )
+            .where(*open_message_conditions(account_id, campaign_key))
             .order_by(LinkedInMessage.id)
         ).scalars().all()
     )
@@ -1174,6 +1187,7 @@ def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
     )
     cap = max(0, int(settings.linkedin_daily_send_cap))
     sent_today = linkedin_sent_today(db, account_id)
+    _unsettled = unsettled_follower_filter(account_id, campaign_key)
     return {
         "followers_total": followers_total,
         "contacted_all_time": contacted_all_time,
@@ -1182,8 +1196,15 @@ def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
             db, account_id=account_id, campaign_key=campaign_key
         ),
         "all": _count(),
-        "draft": _count(LinkedInMessage.status == LinkedInStatus.DRAFT),
-        "approved": _count(LinkedInMessage.status == LinkedInStatus.APPROVED),
+        # Sendable only. A draft for a follower already settled under this
+        # message can never leave, so counting it here promised work the send
+        # queue would then refuse to do.
+        "draft": _count(
+            LinkedInMessage.status == LinkedInStatus.DRAFT, _unsettled
+        ),
+        "approved": _count(
+            LinkedInMessage.status == LinkedInStatus.APPROVED, _unsettled
+        ),
         "sent": _count(LinkedInMessage.status == LinkedInStatus.SENT),
         "replied": _count(LinkedInMessage.status == LinkedInStatus.REPLIED),
         # Checkpoint truth, which outlives any message edit.

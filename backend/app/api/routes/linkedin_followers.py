@@ -253,17 +253,14 @@ def send_all(payload: FollowerActionRequest, db: Session = Depends(get_db)):
     """
     account_id = _resolve_account(payload.account_id)
     campaign_key = _resolve_campaign(payload.message)
+    # Counted with the SAME rule the send queue applies. Without the settled
+    # filter this counted drafts the queue would refuse, so the page announced
+    # "Sending up to 97 DM(s)" for a run that could only ever attempt 3.
     open_count = int(
         db.execute(
             select(func.count())
             .select_from(LinkedInMessage)
-            .where(
-                LinkedInMessage.follower_id.is_not(None),
-                LinkedInMessage.follower_campaign_key == campaign_key,
-                LinkedInMessage.status.in_(
-                    [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
-                ),
-            )
+            .where(*service.open_message_conditions(account_id, campaign_key))
         ).scalar_one()
     )
     if not open_count:
@@ -313,6 +310,22 @@ def stop(db: Session = Depends(get_db)):
     }
 
 
+#: How far along a message row is, for picking one row per follower when a
+#: follower ended up with several. Anything unlisted (failed, not interested)
+#: ranks lowest: it says least about what the follower actually received.
+_PROGRESS_RANK = {
+    LinkedInStatus.REPLIED: 4,
+    LinkedInStatus.SENT: 3,
+    LinkedInStatus.APPROVED: 2,
+    LinkedInStatus.DRAFT: 1,
+}
+
+
+def _progress_rank(msg: LinkedInMessage) -> tuple[int, int]:
+    """Rank, then id, so two rows at the same stage resolve to the newer one."""
+    return (_PROGRESS_RANK.get(msg.status, 0), msg.id or 0)
+
+
 @router.get("", response_model=Page[FollowerOut])
 def list_followers(
     db: Session = Depends(get_db),
@@ -341,7 +354,16 @@ def list_followers(
                 LinkedInMessage.follower_campaign_key == campaign_key,
             )
         ).scalars().all():
-            if msg.follower_id is not None:
+            if msg.follower_id is None:
+                continue
+            # A follower can hold more than one draft for the same message (the
+            # leftover duplicates above). Keeping whichever arrived last let a
+            # stale APPROVED row outrank the row that actually sent, so someone
+            # already messaged showed up under Approved and vanished from Sent.
+            # Keep the furthest-along row instead — what happened outranks what
+            # was merely queued.
+            current = messages.get(msg.follower_id)
+            if current is None or _progress_rank(msg) > _progress_rank(current):
                 messages[msg.follower_id] = msg
         for row in db.execute(
             select(LinkedInFollowerSend).where(
@@ -359,13 +381,27 @@ def list_followers(
         ).scalars().all()
     )
 
+    # Followers this message has already settled with: sent, or claimed and
+    # awaiting review. Read from the checkpoints already loaded above.
+    settled_ids = {
+        pid
+        for pid, row in sends.items()
+        if row.status not in FollowerSendStatus.RETRYABLE
+    }
+
     def _matches(follower: LinkedInFollower) -> bool:
         if not status:
             return True
         msg = messages.get(follower.id)
         if status == "pending":
             return msg is None
-        return msg is not None and msg.status == status
+        if msg is None or msg.status != status:
+            return False
+        # A leftover draft for someone already settled can never be sent, and its
+        # tab count no longer includes it, so the list must not show it either.
+        if status in (LinkedInStatus.DRAFT, LinkedInStatus.APPROVED):
+            return follower.provider_id not in settled_ids
+        return True
 
     filtered = [f for f in followers if _matches(f)]
     total = len(filtered)
