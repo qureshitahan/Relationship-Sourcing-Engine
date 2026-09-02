@@ -762,7 +762,8 @@ export default function FollowersLinkedIn() {
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Draft how many
+              Draft how many{" "}
+              <span className="normal-case text-slate-400">(total)</span>
             </label>
             <input
               type="number"
@@ -876,6 +877,20 @@ export default function FollowersLinkedIn() {
             </Button>
           )}
         </div>
+
+        {/* The number above is a target TOTAL, which reads like "add this many"
+            right up until it quietly does nothing. Say the arithmetic out loud
+            under the button rather than leaving it to a tooltip. */}
+        {Number(draftLimit) > 0 && stats && (
+          <p className="mt-2 text-xs text-slate-500">
+            &ldquo;Draft {Number(draftLimit)}&rdquo; means finish with{" "}
+            {Number(draftLimit)} draft(s) in total for this message, not{" "}
+            {Number(draftLimit)} more.{" "}
+            {stats.all >= Number(draftLimit)
+              ? `You already have ${stats.all}, so it will do nothing — use Append to add more on top.`
+              : `You have ${stats.all}, so it will draft ${Number(draftLimit) - stats.all} more.`}
+          </p>
+        )}
 
         {/* Replaces the old "Send as" picker. Shown, not editable: it never
             changed the message or the sender, so a control invited the mistake

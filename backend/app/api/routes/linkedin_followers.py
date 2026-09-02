@@ -205,6 +205,25 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
         db, account_id=account_id, campaign_key=campaign_key, limit=limit
     )
     if not eligible:
+        # "Everyone is drafted" and "nobody is synced" both surface as an empty
+        # candidate list, and the first wording sent people hunting for drafts
+        # that were never possible. Separate them: an account whose roster has
+        # not been pulled yet needs a network refresh, not a bigger number.
+        synced = int(
+            db.execute(
+                select(func.count())
+                .select_from(LinkedInFollower)
+                .where(LinkedInFollower.account_id == account_id)
+            ).scalar_one()
+        )
+        if synced == 0:
+            return {
+                "started": False,
+                "candidates": 0,
+                "campaign_key": campaign_key,
+                "message": "Nothing synced yet for this account — "
+                'click "Refresh network" first.',
+            }
         return {
             "started": False,
             "candidates": 0,
