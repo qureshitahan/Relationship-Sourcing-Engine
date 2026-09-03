@@ -91,16 +91,25 @@ def _resolve_campaign(message: str) -> str:
 
 
 @router.get("/status")
-def followers_status(db: Session = Depends(get_db), message: Optional[str] = None):
+def followers_status(
+    db: Session = Depends(get_db),
+    message: Optional[str] = None,
+    account_id: Optional[str] = None,
+):
     """Connection status + roster/campaign counts for the page header.
 
     Safe to call with no message and no account: it reports what is missing
     instead of failing, so the page can render its own setup state.
+
+    ``account_id`` omitted keeps the old answer — the app-wide selected account.
+    A caller that names one gets counts for THAT account, which is what lets a
+    tab report on the account it is showing even after someone else switches the
+    shared selection (the list endpoint has always accepted this).
     """
     provider = get_linkedin_provider()
     lister = getattr(provider, "list_accounts", None)
     accounts = lister() if lister else []
-    account_id = service.active_account_id()
+    account_id = (account_id or "").strip() or service.active_account_id()
     active = next((a for a in accounts if a.get("id") == account_id), None)
 
     payload: dict = {
@@ -149,7 +158,11 @@ def followers_status(db: Session = Depends(get_db), message: Optional[str] = Non
 @router.get("/progress")
 def followers_progress():
     """Live state of the running sync/draft/send job (poll this for the bar)."""
-    return service.read_progress()
+    state = service.read_progress()
+    # A job whose process died leaves "running" in the row for good. Report that
+    # honestly here — this is what the bar and every disabled button read — rather
+    # than in read_progress(), so a live worker's own writes are never rewritten.
+    return service.stale_progress(state) or state
 
 
 @router.post("/sync")
@@ -314,6 +327,15 @@ def stop(db: Session = Depends(get_db)):
     row is resolved before the worker looks at the stop flag again.
     """
     if not service.request_stop():
+        # Nothing to ask, but the record may still be claiming to run with no
+        # worker behind it — the one case where Stop could previously do nothing
+        # at all, forever. Retiring it here is what frees the page.
+        if service.clear_stale_progress():
+            return {
+                "stopped": True,
+                "message": "That job had already stopped when the server "
+                "restarted — cleared it. Anything it saved is kept.",
+            }
         return {"stopped": False, "message": "No followers job is running."}
     log_action(
         db,

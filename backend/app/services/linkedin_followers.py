@@ -30,7 +30,7 @@ import logging
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import and_, func, or_, select
@@ -68,6 +68,14 @@ PROGRESS_KEY = "linkedin_followers_progress"
 #: connections (151 pages, roughly 4 minutes) with room to spare.
 MAX_SYNC_PAGES = 300
 
+#: A job whose thread died leaves ``running`` in the progress row forever: the
+#: row lives in the database, the worker lives in the process, and a restart ends
+#: one without touching the other. Every progress write stamps a heartbeat, so a
+#: ``running`` record older than this is reported as failed rather than believed.
+#: Generous on purpose — the send job paces ~20s per DM, and a sync batch can sit
+#: on the provider for the full 30s request timeout.
+STALE_JOB_AFTER = timedelta(minutes=10)
+
 STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -103,6 +111,9 @@ _IDLE: dict = {
     "duplicates": 0,
     "held": 0,
     "imported": 0,
+    # When the worker last said anything. A record still claiming to be running
+    # long after its last beat is a job whose process is gone. See STALE_JOB_AFTER.
+    "heartbeat": None,
     "stop_requested": False,
     "message": None,
     "campaign_key": None,
@@ -165,9 +176,51 @@ def read_progress() -> dict:
 
 
 def write_progress(**changes) -> dict:
-    state = {**read_progress(), **changes}
+    # Stamped on every write, so "when did the worker last speak" needs no extra
+    # call site. Deliberately NOT applied when reading: a live worker that went
+    # quiet for a while must be able to write again and still count as running.
+    state = {**read_progress(), "heartbeat": datetime.utcnow().isoformat(), **changes}
     set_setting(PROGRESS_KEY, json.dumps(state))
     return state
+
+
+def stale_progress(state: Optional[dict] = None) -> Optional[dict]:
+    """The record with a dead ``running`` corrected to failed, or None if live.
+
+    A restart, a deploy or a recycled worker ends the thread without touching the
+    row it was writing, which then claims to be running forever: the page shows a
+    frozen bar and Stop cannot help, because the flag it sets has no reader left.
+    A record with no heartbeat at all predates this stamping, so it belongs to a
+    process that is certainly gone.
+    """
+    state = read_progress() if state is None else state
+    if state.get("status") != STATUS_RUNNING:
+        return None
+    beat = state.get("heartbeat")
+    if beat:
+        try:
+            if datetime.utcnow() - datetime.fromisoformat(beat) < STALE_JOB_AFTER:
+                return None
+        except (TypeError, ValueError):
+            return None  # unreadable stamp: leave the record alone
+    return {
+        **state,
+        "status": STATUS_FAILED,
+        "stop_requested": False,
+        "message": state.get("message")
+        or f"The {state.get('job') or 'followers'} job stopped without finishing "
+        "(the server restarted). Whatever it had already saved is kept — "
+        "start it again to carry on.",
+    }
+
+
+def clear_stale_progress() -> bool:
+    """Persist that correction. True when a dead record was actually cleared."""
+    corrected = stale_progress()
+    if corrected is None:
+        return False
+    set_setting(PROGRESS_KEY, json.dumps(corrected))
+    return True
 
 
 def start_progress(job: str, *, total: int, campaign_key: Optional[str] = None) -> None:
@@ -182,6 +235,7 @@ def start_progress(job: str, *, total: int, campaign_key: Optional[str] = None) 
                 "status": STATUS_RUNNING,
                 "total": total,
                 "campaign_key": campaign_key,
+                "heartbeat": datetime.utcnow().isoformat(),
             }
         ),
     )
@@ -254,32 +308,41 @@ def sync_followers(
     # 1 restores the original strictly-sequential paging.
     workers = max(1, int(getattr(settings, "linkedin_sync_concurrency", 1)))
 
+    # The roster this account already holds, keyed by provider id, fetched ONCE.
+    # The per-record lookup below used to be a SELECT of its own, so a 7,400-person
+    # network spent 7,400 round trips on a database that answers in milliseconds
+    # but is not on this machine — minutes of pure waiting before a single page of
+    # LinkedIn data was even asked for. One query returns the same rows, and every
+    # insert is added to the map so a provider id repeated within one sync still
+    # resolves to the row just created rather than inserting it twice.
+    known: dict[str, LinkedInFollower] = {
+        row.provider_id: row
+        for row in db.execute(
+            select(LinkedInFollower).where(LinkedInFollower.account_id == account_id)
+        ).scalars().all()
+    }
+
     def upsert(record) -> None:
         """Insert or refresh one person. Runs on THIS thread only — the Session
         is not thread-safe, so only the HTTP fetches are parallelised."""
         nonlocal imported, updated
-        existing = db.execute(
-            select(LinkedInFollower).where(
-                LinkedInFollower.account_id == account_id,
-                LinkedInFollower.provider_id == record.provider_id,
-            )
-        ).scalars().first()
+        existing = known.get(record.provider_id)
         public_id = public_identifier_from_url(record.profile_url or "") or None
         if existing is None:
-            db.add(
-                LinkedInFollower(
-                    account_id=account_id,
-                    provider_id=record.provider_id,
-                    urn=record.urn,
-                    public_identifier=public_id,
-                    name=record.name,
-                    headline=record.headline,
-                    profile_url=record.profile_url,
-                    picture_url=record.picture_url,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                )
+            fresh = LinkedInFollower(
+                account_id=account_id,
+                provider_id=record.provider_id,
+                urn=record.urn,
+                public_identifier=public_id,
+                name=record.name,
+                headline=record.headline,
+                profile_url=record.profile_url,
+                picture_url=record.picture_url,
+                first_seen_at=now,
+                last_seen_at=now,
             )
+            db.add(fresh)
+            known[record.provider_id] = fresh
             imported += 1
         else:
             # Refresh the display fields; never overwrite a good value with a
