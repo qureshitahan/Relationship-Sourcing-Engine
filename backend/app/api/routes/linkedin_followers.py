@@ -91,16 +91,25 @@ def _resolve_campaign(message: str) -> str:
 
 
 @router.get("/status")
-def followers_status(db: Session = Depends(get_db), message: Optional[str] = None):
+def followers_status(
+    db: Session = Depends(get_db),
+    message: Optional[str] = None,
+    account_id: Optional[str] = None,
+):
     """Connection status + roster/campaign counts for the page header.
 
     Safe to call with no message and no account: it reports what is missing
     instead of failing, so the page can render its own setup state.
+
+    ``account_id`` omitted keeps the old answer — the app-wide selected account.
+    A caller that names one gets counts for THAT account, which is what lets a
+    tab report on the account it is showing even after someone else switches the
+    shared selection (the list endpoint has always accepted this).
     """
     provider = get_linkedin_provider()
     lister = getattr(provider, "list_accounts", None)
     accounts = lister() if lister else []
-    account_id = service.active_account_id()
+    account_id = (account_id or "").strip() or service.active_account_id()
     active = next((a for a in accounts if a.get("id") == account_id), None)
 
     payload: dict = {
@@ -149,7 +158,11 @@ def followers_status(db: Session = Depends(get_db), message: Optional[str] = Non
 @router.get("/progress")
 def followers_progress():
     """Live state of the running sync/draft/send job (poll this for the bar)."""
-    return service.read_progress()
+    state = service.read_progress()
+    # A job whose process died leaves "running" in the row for good. Report that
+    # honestly here — this is what the bar and every disabled button read — rather
+    # than in read_progress(), so a live worker's own writes are never rewritten.
+    return service.stale_progress(state) or state
 
 
 @router.post("/sync")
@@ -205,6 +218,25 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
         db, account_id=account_id, campaign_key=campaign_key, limit=limit
     )
     if not eligible:
+        # "Everyone is drafted" and "nobody is synced" both surface as an empty
+        # candidate list, and the first wording sent people hunting for drafts
+        # that were never possible. Separate them: an account whose roster has
+        # not been pulled yet needs a network refresh, not a bigger number.
+        synced = int(
+            db.execute(
+                select(func.count())
+                .select_from(LinkedInFollower)
+                .where(LinkedInFollower.account_id == account_id)
+            ).scalar_one()
+        )
+        if synced == 0:
+            return {
+                "started": False,
+                "candidates": 0,
+                "campaign_key": campaign_key,
+                "message": "Nothing synced yet for this account — "
+                'click "Refresh network" first.',
+            }
         return {
             "started": False,
             "candidates": 0,
@@ -253,17 +285,14 @@ def send_all(payload: FollowerActionRequest, db: Session = Depends(get_db)):
     """
     account_id = _resolve_account(payload.account_id)
     campaign_key = _resolve_campaign(payload.message)
+    # Counted with the SAME rule the send queue applies. Without the settled
+    # filter this counted drafts the queue would refuse, so the page announced
+    # "Sending up to 97 DM(s)" for a run that could only ever attempt 3.
     open_count = int(
         db.execute(
             select(func.count())
             .select_from(LinkedInMessage)
-            .where(
-                LinkedInMessage.follower_id.is_not(None),
-                LinkedInMessage.follower_campaign_key == campaign_key,
-                LinkedInMessage.status.in_(
-                    [LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]
-                ),
-            )
+            .where(*service.open_message_conditions(account_id, campaign_key))
         ).scalar_one()
     )
     if not open_count:
@@ -298,6 +327,15 @@ def stop(db: Session = Depends(get_db)):
     row is resolved before the worker looks at the stop flag again.
     """
     if not service.request_stop():
+        # Nothing to ask, but the record may still be claiming to run with no
+        # worker behind it — the one case where Stop could previously do nothing
+        # at all, forever. Retiring it here is what frees the page.
+        if service.clear_stale_progress():
+            return {
+                "stopped": True,
+                "message": "That job had already stopped when the server "
+                "restarted — cleared it. Anything it saved is kept.",
+            }
         return {"stopped": False, "message": "No followers job is running."}
     log_action(
         db,
@@ -311,6 +349,22 @@ def stop(db: Session = Depends(get_db)):
         "stopped": True,
         "message": "Stopping — the message in flight finishes, then it halts.",
     }
+
+
+#: How far along a message row is, for picking one row per follower when a
+#: follower ended up with several. Anything unlisted (failed, not interested)
+#: ranks lowest: it says least about what the follower actually received.
+_PROGRESS_RANK = {
+    LinkedInStatus.REPLIED: 4,
+    LinkedInStatus.SENT: 3,
+    LinkedInStatus.APPROVED: 2,
+    LinkedInStatus.DRAFT: 1,
+}
+
+
+def _progress_rank(msg: LinkedInMessage) -> tuple[int, int]:
+    """Rank, then id, so two rows at the same stage resolve to the newer one."""
+    return (_PROGRESS_RANK.get(msg.status, 0), msg.id or 0)
 
 
 @router.get("", response_model=Page[FollowerOut])
@@ -341,7 +395,16 @@ def list_followers(
                 LinkedInMessage.follower_campaign_key == campaign_key,
             )
         ).scalars().all():
-            if msg.follower_id is not None:
+            if msg.follower_id is None:
+                continue
+            # A follower can hold more than one draft for the same message (the
+            # leftover duplicates above). Keeping whichever arrived last let a
+            # stale APPROVED row outrank the row that actually sent, so someone
+            # already messaged showed up under Approved and vanished from Sent.
+            # Keep the furthest-along row instead — what happened outranks what
+            # was merely queued.
+            current = messages.get(msg.follower_id)
+            if current is None or _progress_rank(msg) > _progress_rank(current):
                 messages[msg.follower_id] = msg
         for row in db.execute(
             select(LinkedInFollowerSend).where(
@@ -359,13 +422,27 @@ def list_followers(
         ).scalars().all()
     )
 
+    # Followers this message has already settled with: sent, or claimed and
+    # awaiting review. Read from the checkpoints already loaded above.
+    settled_ids = {
+        pid
+        for pid, row in sends.items()
+        if row.status not in FollowerSendStatus.RETRYABLE
+    }
+
     def _matches(follower: LinkedInFollower) -> bool:
         if not status:
             return True
         msg = messages.get(follower.id)
         if status == "pending":
             return msg is None
-        return msg is not None and msg.status == status
+        if msg is None or msg.status != status:
+            return False
+        # A leftover draft for someone already settled can never be sent, and its
+        # tab count no longer includes it, so the list must not show it either.
+        if status in (LinkedInStatus.DRAFT, LinkedInStatus.APPROVED):
+            return follower.provider_id not in settled_ids
+        return True
 
     filtered = [f for f in followers if _matches(f)]
     total = len(filtered)

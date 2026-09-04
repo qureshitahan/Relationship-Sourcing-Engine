@@ -371,6 +371,18 @@ export default function FollowersLinkedIn() {
     "followers:draftLimit",
     "50"
   );
+  // The account THIS tab is working with. The server keeps ONE active-account
+  // row shared by every tab, browser and person, so someone selecting a
+  // different account on the LinkedIn page silently moved this page onto their
+  // account — roster, counts and the next send with it. Remembering the choice
+  // per tab (sessionStorage) pins it here. Empty means "follow the server's
+  // choice", which is exactly what this page did before, so nothing changes
+  // until someone actually picks an account here. The LinkedIn page solves the
+  // same problem the same way; see its linkedin:accountId.
+  const [tabAccountId, setTabAccountId] = usePersistedState<string>(
+    "followers:accountId",
+    ""
+  );
 
   // Declared before the others because both of them key their polling off it.
   const { data: progress } = useQuery({
@@ -384,8 +396,8 @@ export default function FollowersLinkedIn() {
   const running = progress?.status === "running";
 
   const { data: status, isLoading: statusLoading } = useQuery({
-    queryKey: ["followers", "status", activeMessage],
-    queryFn: () => getFollowersStatus(activeMessage || undefined),
+    queryKey: ["followers", "status", activeMessage, tabAccountId],
+    queryFn: () => getFollowersStatus(activeMessage || undefined, tabAccountId || undefined),
     // The counters and tab counts live here. A mutation only reports that the
     // background job STARTED, so without polling the tiles kept showing
     // "0 created" after drafting had finished and the list below already
@@ -413,12 +425,13 @@ export default function FollowersLinkedIn() {
   }, [running, qc]);
 
   const { data: followers, isLoading } = useQuery({
-    queryKey: ["followers", "list", activeMessage, statusFilter],
+    queryKey: ["followers", "list", activeMessage, statusFilter, tabAccountId],
     queryFn: () =>
       listFollowers({
         limit: 500,
         ...(activeMessage ? { message: activeMessage } : {}),
         ...(statusFilter ? { status: statusFilter } : {}),
+        ...(tabAccountId ? { account_id: tabAccountId } : {}),
       }),
     enabled: !!status?.active_account_id,
     // While a job runs, keep the list and the counters moving in step with it.
@@ -430,6 +443,12 @@ export default function FollowersLinkedIn() {
 
   const accounts = status?.accounts ?? [];
   const activeId = status?.active_account_id ?? null;
+  useEffect(() => {
+    const list = status?.accounts ?? [];
+    if (tabAccountId && list.length > 0 && !list.some((a) => a.id === tabAccountId)) {
+      setTabAccountId("");
+    }
+  }, [tabAccountId, status, setTabAccountId]);
   const stats = status?.stats ?? null;
   // Which principal each draft is filed under. Derived from the connected
   // LinkedIn account by name, because that account is what actually sends — so
@@ -459,7 +478,13 @@ export default function FollowersLinkedIn() {
   }, [status, statusLoading, activeId]);
 
   const selectAccount = useMutation({
-    mutationFn: (accountId: string) => selectLinkedInAccount(accountId),
+    mutationFn: (accountId: string) => {
+      // Recorded for this tab FIRST, so the choice holds here even if another
+      // tab moves the shared row a moment later. The server is still told,
+      // because background work with no tab behind it reads that row.
+      setTabAccountId(accountId);
+      return selectLinkedInAccount(accountId);
+    },
     onSuccess: (res) => {
       // Shared with the LinkedIn page on purpose: one active account app-wide.
       qc.invalidateQueries({ queryKey: ["followers"] });
@@ -482,7 +507,7 @@ export default function FollowersLinkedIn() {
   });
 
   const sync = useMutation({
-    mutationFn: syncFollowers,
+    mutationFn: () => syncFollowers(activeId ?? undefined),
     onSuccess: (res) => {
       setNote(res.message);
       invalidate();
@@ -520,7 +545,8 @@ export default function FollowersLinkedIn() {
         text,
         resolvedPrincipalId!,
         undefined,
-        Number(draftLimit) > 0 ? Number(draftLimit) : undefined
+        Number(draftLimit) > 0 ? Number(draftLimit) : undefined,
+        activeId ?? undefined
       ),
     onSuccess: (res) => {
       setNote(res.message);
@@ -542,7 +568,9 @@ export default function FollowersLinkedIn() {
       draftAllFollowers(
         text,
         resolvedPrincipalId!,
-        Number(appendCount) > 0 ? Number(appendCount) : undefined
+        Number(appendCount) > 0 ? Number(appendCount) : undefined,
+        undefined,
+        activeId ?? undefined
       ),
     onSuccess: (res) => {
       setNote(res.message);
@@ -556,7 +584,7 @@ export default function FollowersLinkedIn() {
   });
 
   const approveAll = useMutation({
-    mutationFn: (text: string) => approveAllFollowers(text),
+    mutationFn: (text: string) => approveAllFollowers(text, activeId ?? undefined),
     onSuccess: (res) => {
       setNote(
         res.approved
@@ -569,7 +597,7 @@ export default function FollowersLinkedIn() {
   });
 
   const sendAll = useMutation({
-    mutationFn: (text: string) => sendAllFollowers(text),
+    mutationFn: (text: string) => sendAllFollowers(text, activeId ?? undefined),
     onSuccess: (res) => {
       setNote(res.message);
       invalidate();
@@ -704,7 +732,12 @@ export default function FollowersLinkedIn() {
               disabled={busy || !activeId || !status?.supports_followers}
               title="Pull your latest connections from LinkedIn"
             >
-              {sync.isPending || progress?.job === "sync" ? "Refreshing…" : "Refresh network"}
+              {/* `job` stays "sync" after the run finishes, so this used to
+                  read "Refreshing…" for good once a sync had completed —
+                  the page looked stuck on a job that was already done. */}
+              {sync.isPending || (running && progress?.job === "sync")
+                ? "Refreshing…"
+                : "Refresh network"}
             </Button>
             <Button
               variant="ghost"
@@ -762,7 +795,8 @@ export default function FollowersLinkedIn() {
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Draft how many
+              Draft how many{" "}
+              <span className="normal-case text-slate-400">(total)</span>
             </label>
             <input
               type="number"
@@ -876,6 +910,20 @@ export default function FollowersLinkedIn() {
             </Button>
           )}
         </div>
+
+        {/* The number above is a target TOTAL, which reads like "add this many"
+            right up until it quietly does nothing. Say the arithmetic out loud
+            under the button rather than leaving it to a tooltip. */}
+        {Number(draftLimit) > 0 && stats && (
+          <p className="mt-2 text-xs text-slate-500">
+            &ldquo;Draft {Number(draftLimit)}&rdquo; means finish with{" "}
+            {Number(draftLimit)} draft(s) in total for this message, not{" "}
+            {Number(draftLimit)} more.{" "}
+            {stats.all >= Number(draftLimit)
+              ? `You already have ${stats.all}, so it will do nothing — use Append to add more on top.`
+              : `You have ${stats.all}, so it will draft ${Number(draftLimit) - stats.all} more.`}
+          </p>
+        )}
 
         {/* Replaces the old "Send as" picker. Shown, not editable: it never
             changed the message or the sender, so a control invited the mistake

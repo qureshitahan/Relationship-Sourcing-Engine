@@ -727,10 +727,10 @@ export const getLinkedInScanProgress = () =>
 // notion of "the active account" app-wide.
 
 /** Header state: connection status, account list, and counts for one message. */
-export const getFollowersStatus = (message?: string) =>
+export const getFollowersStatus = (message?: string, accountId?: string) =>
   api
     .get<FollowersStatus>("/api/linkedin-followers/status", {
-      params: { message: message || undefined },
+      params: { message: message || undefined, account_id: accountId || undefined },
     })
     .then((r) => r.data);
 
@@ -743,6 +743,8 @@ export interface FollowerFilters {
   message?: string;
   /** draft | approved | sent | replied | pending */
   status?: string;
+  /** Whose roster to list. Omitted = the app-wide selected account. */
+  account_id?: string;
   limit?: number;
   offset?: number;
 }
@@ -752,11 +754,11 @@ export const listFollowers = (params: FollowerFilters = {}) =>
     .then((r) => r.data);
 
 /** Refresh the follower roster from LinkedIn, in the background. */
-export const syncFollowers = () =>
+export const syncFollowers = (accountId?: string) =>
   api
     .post<{ started: boolean; account_id?: string; message: string }>(
       "/api/linkedin-followers/sync",
-      {},
+      { account_id: accountId || null },
       { timeout: 60000 }
     )
     .then((r) => r.data);
@@ -776,7 +778,8 @@ export const draftAllFollowers = (
   principalId: number,
   limit?: number,
   /** Draft until the campaign HOLDS this many, instead of adding `limit` more. */
-  target?: number
+  target?: number,
+  accountId?: string
 ) =>
   api
     .post<FollowerJobStart>(
@@ -786,26 +789,27 @@ export const draftAllFollowers = (
         principal_id: principalId,
         limit: limit && limit > 0 ? limit : null,
         target: target && target > 0 ? target : null,
+        account_id: accountId || null,
       },
       { timeout: 60000 }
     )
     .then((r) => r.data);
 
-export const approveAllFollowers = (message: string) =>
+export const approveAllFollowers = (message: string, accountId?: string) =>
   api
     .post<{ approved: number; campaign_key: string }>(
       "/api/linkedin-followers/approve-all",
-      { message },
+      { message, account_id: accountId || null },
       { timeout: 60000 }
     )
     .then((r) => r.data);
 
 /** Approve + send every open DM for this message — paced, capped, checkpointed. */
-export const sendAllFollowers = (message: string) =>
+export const sendAllFollowers = (message: string, accountId?: string) =>
   api
     .post<FollowerJobStart>(
       "/api/linkedin-followers/send-all",
-      { message },
+      { message, account_id: accountId || null },
       { timeout: 60000 }
     )
     .then((r) => r.data);
