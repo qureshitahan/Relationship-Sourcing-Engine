@@ -194,16 +194,10 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
     # A target names how many the campaign should END UP with, so pressing the
     # button again tops up rather than doubling. Already there? Nothing to do.
     if (payload.target or 0) > 0:
-        existing = int(
-            db.execute(
-                select(func.count())
-                .select_from(LinkedInMessage)
-                .where(
-                    LinkedInMessage.follower_id.is_not(None),
-                    LinkedInMessage.follower_campaign_key == campaign_key,
-                )
-            ).scalar_one()
-        )
+        # Followers, not message rows. A follower can hold several rows for the
+        # same message, so the row count overstated how many PEOPLE were drafted
+        # and the target silently went dead early ("already 654" over 507 people).
+        existing = service.campaign_people_drafted(db, campaign_key=campaign_key)
         needed = max(0, int(payload.target) - existing)
         if needed == 0:
             return {
@@ -288,9 +282,12 @@ def send_all(payload: FollowerActionRequest, db: Session = Depends(get_db)):
     # Counted with the SAME rule the send queue applies. Without the settled
     # filter this counted drafts the queue would refuse, so the page announced
     # "Sending up to 97 DM(s)" for a run that could only ever attempt 3.
+    # Distinct followers: duplicate rows for one follower are not extra DMs --
+    # the second is refused by the checkpoint -- so counting rows here promised
+    # more sends than could ever land, the same unit mismatch as the tab counts.
     open_count = int(
         db.execute(
-            select(func.count())
+            select(func.count(func.distinct(LinkedInMessage.follower_id)))
             .select_from(LinkedInMessage)
             .where(*service.open_message_conditions(account_id, campaign_key))
         ).scalar_one()
@@ -352,14 +349,11 @@ def stop(db: Session = Depends(get_db)):
 
 
 #: How far along a message row is, for picking one row per follower when a
-#: follower ended up with several. Anything unlisted (failed, not interested)
-#: ranks lowest: it says least about what the follower actually received.
-_PROGRESS_RANK = {
-    LinkedInStatus.REPLIED: 4,
-    LinkedInStatus.SENT: 3,
-    LinkedInStatus.APPROVED: 2,
-    LinkedInStatus.DRAFT: 1,
-}
+#: follower ended up with several. Defined in the service and reused here so the
+#: tab counts and the rows this list returns can never rank a follower
+#: differently -- that disagreement is exactly what made Sent read 597 over 503
+#: people.
+_PROGRESS_RANK = service.PROGRESS_RANK
 
 
 def _progress_rank(msg: LinkedInMessage) -> tuple[int, int]:
