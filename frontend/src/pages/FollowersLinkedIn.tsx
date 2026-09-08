@@ -203,14 +203,18 @@ function RosterProgress({
   );
 }
 
-/** The created / approved / sent counters, read from the database. */
+/** The created / approved / sent counters, read from the database.
+ *
+ *  Every cell counts PEOPLE, not message rows — a follower who ended up with two
+ *  drafts of the same message is one person here. Counting rows is what made
+ *  Sent read 597 while only 503 people had been messaged. */
 function CountRow({ stats }: { stats: FollowerStats }) {
   const cells: { label: string; value: number; hint: string }[] = [
     { label: "In network", value: stats.followers_total, hint: "People in your synced roster" },
-    { label: "Created", value: stats.all, hint: "DMs drafted for this message" },
-    { label: "Approved", value: stats.approved, hint: "Approved, not yet sent" },
-    { label: "Sent", value: stats.sent, hint: "Delivered DMs" },
-    { label: "Replied", value: stats.replied, hint: "They wrote back" },
+    { label: "Created", value: stats.all, hint: "People this message is drafted for" },
+    { label: "Approved", value: stats.approved, hint: "People approved, not yet sent" },
+    { label: "Sent", value: stats.sent, hint: "People who received this message" },
+    { label: "Replied", value: stats.replied, hint: "People who wrote back" },
   ];
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">

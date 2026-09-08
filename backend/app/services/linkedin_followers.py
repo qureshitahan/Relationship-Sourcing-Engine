@@ -1191,22 +1191,105 @@ def launch_send(*, account_id: str, campaign_key: str, message: str) -> bool:
 # --------------------------------------------------------------------------
 
 
-def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
-    """Tab counts for one follower campaign, straight from the database."""
+#: How far along a follower is under one message, used to pick ONE row when a
+#: follower ended up with several. Anything unlisted (failed, not interested)
+#: ranks lowest: it says least about what the follower actually received. The
+#: list applies the same order, so the tab counts and the rows underneath them
+#: can no longer disagree.
+PROGRESS_RANK = {
+    LinkedInStatus.REPLIED: 4,
+    LinkedInStatus.SENT: 3,
+    LinkedInStatus.APPROVED: 2,
+    LinkedInStatus.DRAFT: 1,
+}
 
-    def _count(*conditions) -> int:
-        return int(
-            db.execute(
-                select(func.count())
-                .select_from(LinkedInMessage)
-                .where(
-                    LinkedInMessage.follower_id.is_not(None),
-                    LinkedInMessage.follower_campaign_key == campaign_key,
-                    *conditions,
-                )
-            ).scalar_one()
+
+def campaign_status_counts(db: Session, *, account_id: str, campaign_key: str) -> dict:
+    """Per-status counts for one campaign, counting PEOPLE and not message rows.
+
+    These used to be row counts, and a follower can hold several message rows for
+    the same message (see ``unsettled_follower_filter``). Live data on 2026-09-08:
+    654 rows over 507 followers, so the Sent tab read 597 while the checkpoint --
+    and the rows the list actually rendered, deduped by the same rank -- said 503.
+    Nothing was wrong with the sending; the page simply counted in two different
+    units. Counting followers makes every number here mean the same thing.
+
+    A follower's status is the furthest-along of their rows, so a leftover
+    APPROVED duplicate never outranks the row that really sent.
+    """
+    rows = db.execute(
+        select(
+            LinkedInMessage.follower_id,
+            LinkedInMessage.status,
+            LinkedInMessage.id,
+        ).where(
+            LinkedInMessage.follower_id.is_not(None),
+            LinkedInMessage.follower_campaign_key == campaign_key,
         )
+    ).all()
 
+    best: dict[int, tuple[tuple[int, int], str]] = {}
+    for follower_id, status, message_id in rows:
+        rank = (PROGRESS_RANK.get(status, 0), message_id or 0)
+        current = best.get(follower_id)
+        if current is None or rank > current[0]:
+            best[follower_id] = (rank, status)
+
+    # A draft for a follower this message has already settled with can never be
+    # sent, so it is not work waiting. Same exclusion the send queue and the list
+    # already apply -- expressed here over ids we have already loaded.
+    settled = set(
+        db.execute(
+            select(LinkedInFollower.id).where(
+                LinkedInFollower.account_id == account_id,
+                LinkedInFollower.provider_id.in_(
+                    select(LinkedInFollowerSend.follower_provider_id).where(
+                        LinkedInFollowerSend.account_id == account_id,
+                        LinkedInFollowerSend.campaign_key == campaign_key,
+                        LinkedInFollowerSend.status.not_in(
+                            FollowerSendStatus.RETRYABLE
+                        ),
+                    )
+                ),
+            )
+        ).scalars().all()
+    )
+
+    counts = {"all": 0, "draft": 0, "approved": 0, "sent": 0, "replied": 0}
+    for follower_id, (_rank, status) in best.items():
+        counts["all"] += 1
+        if status in (LinkedInStatus.DRAFT, LinkedInStatus.APPROVED) and (
+            follower_id in settled
+        ):
+            continue
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def campaign_people_drafted(db: Session, *, campaign_key: str) -> int:
+    """How many FOLLOWERS have this message drafted -- not how many rows exist.
+
+    What the "Draft how many (total)" target is measured against, so the target
+    counts the same unit the page reports back ("Already N drafted").
+    """
+    return int(
+        db.execute(
+            select(func.count(func.distinct(LinkedInMessage.follower_id))).where(
+                LinkedInMessage.follower_id.is_not(None),
+                LinkedInMessage.follower_campaign_key == campaign_key,
+            )
+        ).scalar_one()
+    )
+
+
+def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
+    """Tab counts for one follower campaign, straight from the database.
+
+    The per-status counts come from ``campaign_status_counts`` -- the local
+    ``_count`` helper that used to build them here counted message ROWS, which is
+    the miscount this function no longer makes.
+    """
     followers_total = int(
         db.execute(
             select(func.count())
@@ -1250,7 +1333,12 @@ def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
     )
     cap = max(0, int(settings.linkedin_daily_send_cap))
     sent_today = linkedin_sent_today(db, account_id)
-    _unsettled = unsettled_follower_filter(account_id, campaign_key)
+    # People, not message rows -- and the settled exclusion that used to be a
+    # separate SQL filter here now lives inside these counts, applied to the one
+    # row that represents each follower.
+    people = campaign_status_counts(
+        db, account_id=account_id, campaign_key=campaign_key
+    )
     return {
         "followers_total": followers_total,
         "contacted_all_time": contacted_all_time,
@@ -1258,18 +1346,14 @@ def campaign_stats(db: Session, *, account_id: str, campaign_key: str) -> dict:
         "eligible": count_eligible_followers(
             db, account_id=account_id, campaign_key=campaign_key
         ),
-        "all": _count(),
+        "all": people["all"],
         # Sendable only. A draft for a follower already settled under this
         # message can never leave, so counting it here promised work the send
         # queue would then refuse to do.
-        "draft": _count(
-            LinkedInMessage.status == LinkedInStatus.DRAFT, _unsettled
-        ),
-        "approved": _count(
-            LinkedInMessage.status == LinkedInStatus.APPROVED, _unsettled
-        ),
-        "sent": _count(LinkedInMessage.status == LinkedInStatus.SENT),
-        "replied": _count(LinkedInMessage.status == LinkedInStatus.REPLIED),
+        "draft": people["draft"],
+        "approved": people["approved"],
+        "sent": people["sent"],
+        "replied": people["replied"],
         # Checkpoint truth, which outlives any message edit.
         "contacted_ever": sent_rows,
         "not_reachable": skipped_rows,
