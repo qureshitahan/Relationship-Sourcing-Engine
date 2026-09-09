@@ -197,7 +197,9 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
         # Followers, not message rows. A follower can hold several rows for the
         # same message, so the row count overstated how many PEOPLE were drafted
         # and the target silently went dead early ("already 654" over 507 people).
-        existing = service.campaign_people_drafted(db, campaign_key=campaign_key)
+        existing = service.campaign_people_drafted(
+            db, account_id=account_id, campaign_key=campaign_key
+        )
         needed = max(0, int(payload.target) - existing)
         if needed == 0:
             return {
@@ -263,9 +265,11 @@ def draft_all(payload: FollowerDraftRequest, db: Session = Depends(get_db)):
 @router.post("/approve-all")
 def approve_all(payload: FollowerActionRequest, db: Session = Depends(get_db)):
     """Approve every drafted DM for this message campaign (no provider calls)."""
-    _resolve_account(payload.account_id)
+    account_id = _resolve_account(payload.account_id)
     campaign_key = _resolve_campaign(payload.message)
-    approved = service.approve_all(db, campaign_key=campaign_key)
+    approved = service.approve_all(
+        db, account_id=account_id, campaign_key=campaign_key
+    )
     return {"approved": approved, "campaign_key": campaign_key}
 
 

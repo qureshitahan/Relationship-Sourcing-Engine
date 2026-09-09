@@ -642,11 +642,17 @@ def draft_followers(
     return {"drafted": drafted, "failed": failed, "errors": errors, "stopped": stopped}
 
 
-def approve_all(db: Session, *, campaign_key: str, approved_by: str = "user") -> int:
-    """Approve every drafted follower DM in this campaign.
+def approve_all(
+    db: Session, *, account_id: str, campaign_key: str, approved_by: str = "user"
+) -> int:
+    """Approve every drafted follower DM in this campaign, for THIS account.
 
     Plain status updates, no provider calls, so this stays a fast inline request
     exactly like the existing per-message approve.
+
+    ``account_id`` is not optional: this used to approve every draft carrying the
+    campaign key, which meant approving another connected account's drafts from
+    a page that was only ever showing one account.
     """
     drafts = list(
         db.execute(
@@ -654,6 +660,7 @@ def approve_all(db: Session, *, campaign_key: str, approved_by: str = "user") ->
                 LinkedInMessage.follower_id.is_not(None),
                 LinkedInMessage.follower_campaign_key == campaign_key,
                 LinkedInMessage.status == LinkedInStatus.DRAFT,
+                account_follower_filter(account_id),
             )
         ).scalars().all()
     )
@@ -863,6 +870,24 @@ def send_one(
     return "failed"
 
 
+def account_follower_filter(account_id: str):
+    """Restrict follower messages to the followers OF THIS ACCOUNT.
+
+    ``linkedin_messages`` carries no account of its own -- ``from_account`` is
+    stamped at send time, so a draft has none -- and the campaign key is only a
+    hash of the message text. Two connected accounts running the same message
+    therefore shared one pool of drafts: with Taha picked, the page showed
+    Dalbir's 701 created / 613 sent beside Taha's own "0 in network", and
+    "Approve & send all" would have queued Dalbir's followers to be DM'd from
+    Taha's account. The follower is the only thing that knows whose it is.
+    """
+    return LinkedInMessage.follower_id.in_(
+        select(LinkedInFollower.id).where(
+            LinkedInFollower.account_id == account_id
+        )
+    )
+
+
 def unsettled_follower_filter(account_id: str, campaign_key: str):
     """Excludes drafts whose follower is already settled for this message.
 
@@ -897,6 +922,8 @@ def open_message_conditions(account_id: str, campaign_key: str) -> list:
         LinkedInMessage.follower_id.is_not(None),
         LinkedInMessage.follower_campaign_key == campaign_key,
         LinkedInMessage.status.in_([LinkedInStatus.DRAFT, LinkedInStatus.APPROVED]),
+        # Whose followers these are. Without it the queue reached across accounts.
+        account_follower_filter(account_id),
         unsettled_follower_filter(account_id, campaign_key),
     ]
 
@@ -944,7 +971,7 @@ def send_all(
     module spent it. The overflow is reported as ``held`` and goes out next run.
     """
     if approve_first:
-        approve_all(db, campaign_key=campaign_key)
+        approve_all(db, account_id=account_id, campaign_key=campaign_key)
 
     # Settled followers are kept out of the queue rather than discovered one by
     # one inside it. This is a pre-filter only — every send still passes through
@@ -1225,6 +1252,7 @@ def campaign_status_counts(db: Session, *, account_id: str, campaign_key: str) -
         ).where(
             LinkedInMessage.follower_id.is_not(None),
             LinkedInMessage.follower_campaign_key == campaign_key,
+            account_follower_filter(account_id),
         )
     ).all()
 
@@ -1267,7 +1295,7 @@ def campaign_status_counts(db: Session, *, account_id: str, campaign_key: str) -
     return counts
 
 
-def campaign_people_drafted(db: Session, *, campaign_key: str) -> int:
+def campaign_people_drafted(db: Session, *, account_id: str, campaign_key: str) -> int:
     """How many FOLLOWERS have this message drafted -- not how many rows exist.
 
     What the "Draft how many (total)" target is measured against, so the target
@@ -1278,6 +1306,7 @@ def campaign_people_drafted(db: Session, *, campaign_key: str) -> int:
             select(func.count(func.distinct(LinkedInMessage.follower_id))).where(
                 LinkedInMessage.follower_id.is_not(None),
                 LinkedInMessage.follower_campaign_key == campaign_key,
+                account_follower_filter(account_id),
             )
         ).scalar_one()
     )
