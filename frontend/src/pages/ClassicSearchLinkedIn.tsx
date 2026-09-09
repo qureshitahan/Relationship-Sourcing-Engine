@@ -382,18 +382,32 @@ export default function ClassicSearchLinkedIn() {
   const [draftLimit, setDraftLimit] = usePersistedState<string>("search:draftLimit", "50");
   const [appendCount, setAppendCount] = usePersistedState<string>("search:append", "");
 
+  const salesNav = api === "sales_navigator";
+
+  /** Location and industry ids belong to whichever API resolved them, so a mode
+   *  change drops them rather than quietly sending ids the other API does not
+   *  know. Seniority and headcount are kept: they are plain labels, and classic
+   *  simply does not send them. */
+  const lastApi = useRef(api);
+  useEffect(() => {
+    if (lastApi.current === api) return;
+    lastApi.current = api;
+    setLocation([]);
+    setIndustry([]);
+  }, [api, setLocation, setIndustry]);
+
   /** Exactly what gets hashed into the search key, server-side and here. */
   const filters: SearchFilters = useMemo(() => {
     const out: SearchFilters = {};
     if (keywords.trim()) out.keywords = keywords.trim();
     if (jobTitle.trim()) out.job_title = jobTitle.trim();
-    if (seniority.length) out.seniority = seniority;
-    if (headcount.length) out.company_headcount = headcount;
+    if (salesNav && seniority.length) out.seniority = seniority;
+    if (salesNav && headcount.length) out.company_headcount = headcount;
     if (degrees.length) out.network_distance = degrees;
     if (industry.length) out.industry = industry.map((o) => o.id);
     if (location.length) out.location = location.map((o) => o.id);
     return out;
-  }, [keywords, jobTitle, seniority, headcount, degrees, industry, location]);
+  }, [keywords, jobTitle, seniority, headcount, degrees, industry, location, salesNav]);
 
   const hasFilters = Object.keys(filters).length > 0;
 
@@ -700,9 +714,13 @@ export default function ClassicSearchLinkedIn() {
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
             />
           </div>
+          {/* The id namespaces differ per API — classic resolves LOCATION and
+              INDUSTRY, Sales Navigator resolves REGION and SALES_INDUSTRY — so
+              the picker asks for the right type and the selections are cleared
+              when the mode changes. Reusing an id across modes finds nobody. */}
           <IdPicker
             label="Location"
-            kind="LOCATION"
+            kind={salesNav ? "REGION" : "LOCATION"}
             accountId={tabAccountId || activeId || undefined}
             selected={location}
             onChange={setLocation}
@@ -710,7 +728,7 @@ export default function ClassicSearchLinkedIn() {
           />
           <IdPicker
             label="Industry"
-            kind="INDUSTRY"
+            kind={salesNav ? "SALES_INDUSTRY" : "INDUSTRY"}
             accountId={tabAccountId || activeId || undefined}
             selected={industry}
             onChange={setIndustry}
@@ -719,26 +737,39 @@ export default function ClassicSearchLinkedIn() {
         </div>
 
         <div className="mt-3 space-y-3">
-          <div>
+          {/* LinkedIn's classic search has no seniority or headcount filter at
+              all. Showing them as usable there would have been a lie: the
+              request is rejected outright rather than ignoring the field. */}
+          <div className={salesNav ? "" : "opacity-50"}>
             <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
               Seniority
+              {!salesNav && (
+                <span className="ml-1 normal-case text-slate-400">
+                  — Sales Navigator only
+                </span>
+              )}
             </div>
             <ChipGroup
               options={SENIORITY.map((s) => ({ value: s, label: s }))}
               selected={seniority}
               onChange={setSeniority}
-              disabled={busy}
+              disabled={busy || !salesNav}
             />
           </div>
-          <div>
+          <div className={salesNav ? "" : "opacity-50"}>
             <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
               Company headcount
+              {!salesNav && (
+                <span className="ml-1 normal-case text-slate-400">
+                  — Sales Navigator only
+                </span>
+              )}
             </div>
             <ChipGroup
               options={HEADCOUNT.map((h) => ({ value: h, label: h }))}
               selected={headcount}
               onChange={setHeadcount}
-              disabled={busy}
+              disabled={busy || !salesNav}
             />
           </div>
           <div>
