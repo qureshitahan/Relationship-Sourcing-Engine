@@ -35,6 +35,9 @@ from app.services.linkedin_providers.base import (
     LinkedInProfile,
     LinkedInProvider,
     ReplyResult,
+    SearchLeadRecord,
+    SearchPage,
+    SearchParameterOption,
     SendResult,
     public_identifier_from_url,
 )
@@ -48,6 +51,31 @@ REQUEST_TIMEOUT = 30.0
 # 400 errors/limit_too_high (measured against api28: 60/80/90/100 all fail, 50
 # succeeds). Sending 100 made every sync fail with zero followers imported.
 FOLLOWERS_PAGE_LIMIT = 50
+
+#: LinkedIn search pages more slowly than a simple list, and Sales Navigator
+#: pages slowest of all, so it gets its own longer timeout.
+SEARCH_TIMEOUT = 60.0
+#: Unipile's own per-page ceiling for search.
+SEARCH_PAGE_LIMIT = 50
+
+
+def _distance_text(raw) -> Optional[str]:
+    """Normalise LinkedIn's connection degree to "1" / "2" / "3".
+
+    It arrives as a number, or as "DISTANCE_1" / "FIRST_DEGREE" depending on the
+    search API, and the only thing the rest of the app asks is "is this a 1st".
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return str(int(raw))
+    text = str(raw).strip().upper()
+    if not text:
+        return None
+    for digit, words in (("1", ("1", "FIRST")), ("2", ("2", "SECOND")), ("3", ("3", "THIRD"))):
+        if any(word in text for word in words):
+            return digit
+    return text[:30]
 
 
 def cursor_for_offset(offset: int, limit: int = FOLLOWERS_PAGE_LIMIT) -> str:
@@ -507,6 +535,142 @@ class UnipileLinkedInProvider(LinkedInProvider):
         return (resp.json() or {}).get("url"), None
 
     # --- reply tracking ---
+
+    # --- search (Classic Search LinkedIn tab) ---
+
+    def supports_search(self) -> bool:
+        return bool(self._configured())
+
+    def search_people(
+        self,
+        *,
+        filters: dict,
+        api: str = "classic",
+        cursor: Optional[str] = None,
+        limit: int = 50,
+    ) -> SearchPage:
+        """One page of people from LinkedIn's own search.
+
+        The body is ``{api, category: "people", ...filters}``. Empty filters are
+        dropped rather than sent as nulls: LinkedIn rejects the whole request for
+        an unknown-shaped value, and a blank box must mean "no filter", not
+        "match nothing".
+        """
+        if not self._configured():
+            return SearchPage(supported=False, error="Unipile not configured.")
+        body: dict = {
+            "api": "sales_navigator" if api == "sales_navigator" else "classic",
+            "category": "people",
+        }
+        for key, value in (filters or {}).items():
+            if value in (None, "", [], {}):
+                continue
+            body[key] = value
+        params: dict = {
+            "account_id": self.account_id,
+            "limit": max(1, min(int(limit), SEARCH_PAGE_LIMIT)),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            with httpx.Client(timeout=SEARCH_TIMEOUT, trust_env=False) as client:
+                resp = client.post(
+                    f"{self.base_url}/linkedin/search",
+                    headers=self._headers(json=True),
+                    params=params,
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Unipile search_people network error: %s", exc)
+            return SearchPage(error=str(exc), network_error=True)
+        if resp.status_code >= 400:
+            logger.warning(
+                "Unipile search_people failed (%s): %s", resp.status_code, resp.text[:300]
+            )
+            return SearchPage(error=f"Unipile {resp.status_code}: {resp.text[:300]}")
+        data = resp.json() or {}
+        leads: list[SearchLeadRecord] = []
+        for item in data.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            provider_id = str(item.get("id") or "").strip()
+            if not provider_id:
+                # Without a member id there is nobody to address the message to.
+                continue
+            company = title = None
+            positions = item.get("current_positions") or []
+            if isinstance(positions, list) and positions:
+                first = positions[0]
+                if isinstance(first, dict):
+                    company = (first.get("company") or "").strip() or None
+                    title = (first.get("role") or "").strip() or None
+            distance = item.get("network_distance")
+            leads.append(
+                SearchLeadRecord(
+                    provider_id=provider_id,
+                    name=(item.get("name") or "").strip() or None,
+                    first_name=(item.get("first_name") or "").strip() or None,
+                    headline=(item.get("headline") or "").strip() or None,
+                    location=(item.get("location") or "").strip() or None,
+                    company=company,
+                    job_title=title,
+                    public_identifier=(item.get("public_identifier") or "").strip() or None,
+                    profile_url=item.get("public_profile_url") or item.get("profile_url"),
+                    picture_url=item.get("profile_picture_url"),
+                    network_distance=_distance_text(distance),
+                )
+            )
+        paging = data.get("paging") or {}
+        total = paging.get("total_count")
+        return SearchPage(
+            leads=leads,
+            cursor=data.get("cursor") or None,
+            total=int(total) if isinstance(total, int) else None,
+        )
+
+    def search_parameters(
+        self, *, kind: str, keywords: str, limit: int = 10
+    ) -> list[SearchParameterOption]:
+        """Type-ahead for the filters LinkedIn takes as ids, not text."""
+        if not self._configured() or not (keywords or "").strip():
+            return []
+        params = {
+            "account_id": self.account_id,
+            "type": (kind or "").strip().upper(),
+            "keywords": keywords.strip(),
+            "limit": max(1, min(int(limit), 25)),
+        }
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
+                resp = client.get(
+                    f"{self.base_url}/linkedin/search/parameters",
+                    headers=self._headers(),
+                    params=params,
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("Unipile search_parameters network error: %s", exc)
+            return []
+        if resp.status_code >= 400:
+            logger.warning(
+                "Unipile search_parameters failed (%s): %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return []
+        out: list[SearchParameterOption] = []
+        for item in (resp.json() or {}).get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            ident = str(item.get("id") or "").strip()
+            if not ident:
+                continue
+            out.append(
+                SearchParameterOption(
+                    id=ident,
+                    title=(item.get("title") or item.get("name") or ident).strip(),
+                )
+            )
+        return out
 
     def supports_tracking(self) -> bool:
         return self._configured()

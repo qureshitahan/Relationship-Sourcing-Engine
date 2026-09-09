@@ -60,6 +60,11 @@ const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
         label: "Followers LinkedIn",
         hint: "DM your 1st-degree connections",
       },
+      {
+        to: "/classic-search-linkedin",
+        label: "Classic Search LinkedIn",
+        hint: "Find people on LinkedIn, then message them",
+      },
       { to: "/outreach", label: "5. Conversations", hint: "Replies & follow-ups" },
     ],
   },

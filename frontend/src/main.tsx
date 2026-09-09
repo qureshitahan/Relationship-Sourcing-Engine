@@ -17,6 +17,7 @@ import LinkedIn from "./pages/LinkedIn";
 import Analytics from "./pages/Analytics";
 import LinkedInResponses from "./pages/LinkedInResponses";
 import FollowersLinkedIn from "./pages/FollowersLinkedIn";
+import ClassicSearchLinkedIn from "./pages/ClassicSearchLinkedIn";
 import Conversations from "./pages/Conversations";
 import Agent from "./pages/Agent";
 import BulkEmails from "./pages/BulkEmails";
@@ -70,6 +71,10 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="analytics" element={<Analytics />} />
             <Route path="linkedin-responses" element={<LinkedInResponses />} />
             <Route path="followers-linkedin" element={<FollowersLinkedIn />} />
+            <Route
+              path="classic-search-linkedin"
+              element={<ClassicSearchLinkedIn />}
+            />
             <Route path="calls" element={<Calls />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

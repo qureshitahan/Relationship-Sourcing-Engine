@@ -77,6 +77,45 @@ class FollowerPage:
 
 
 @dataclass
+class SearchLeadRecord:
+    """One person returned by a LinkedIn Classic / Sales Navigator search."""
+
+    #: LinkedIn member id, directly usable as a message recipient.
+    provider_id: str
+    name: Optional[str] = None
+    first_name: Optional[str] = None
+    headline: Optional[str] = None
+    location: Optional[str] = None
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+    public_identifier: Optional[str] = None
+    profile_url: Optional[str] = None
+    picture_url: Optional[str] = None
+    #: "1" / "2" / "3" as LinkedIn reports it. "1" means a DM can go directly.
+    network_distance: Optional[str] = None
+
+
+@dataclass
+class SearchPage:
+    """One page of search results. ``cursor`` is None on the last page."""
+
+    leads: list["SearchLeadRecord"] = field(default_factory=list)
+    cursor: Optional[str] = None
+    total: Optional[int] = None
+    supported: bool = True
+    error: Optional[str] = None
+    network_error: bool = False
+
+
+@dataclass
+class SearchParameterOption:
+    """One resolved id for a filter LinkedIn will not accept as free text."""
+
+    id: str
+    title: str
+
+
+@dataclass
 class InviteResult:
     sent: bool
     provider: str
@@ -171,6 +210,39 @@ class LinkedInProvider(ABC):
             supported=False,
             error="Listing connections is not supported by this provider.",
         )
+
+    def supports_search(self) -> bool:
+        """True when this provider can run LinkedIn's own people search."""
+        return False
+
+    def search_people(
+        self,
+        *,
+        filters: dict,
+        api: str = "classic",
+        cursor: Optional[str] = None,
+        limit: int = 50,
+    ) -> SearchPage:
+        """One page of people matching ``filters``.
+
+        ``filters`` is passed through to LinkedIn's search almost verbatim, so
+        the caller owns which fields it sends; see the Unipile implementation for
+        the ones supported. ``api`` picks "classic" or "sales_navigator".
+        """
+        return SearchPage(
+            supported=False, error="LinkedIn search is not supported by this provider."
+        )
+
+    def search_parameters(
+        self, *, kind: str, keywords: str, limit: int = 10
+    ) -> list[SearchParameterOption]:
+        """Resolve a typed filter value to the ids LinkedIn requires.
+
+        Location, industry, company and skill filters are not free text on
+        LinkedIn's side — they take ids. ``kind`` is the parameter type
+        (LOCATION, INDUSTRY, COMPANY, ...).
+        """
+        return []
 
     def check_reply(
         self, *, chat_id: Optional[str], provider_id: str, since: datetime
