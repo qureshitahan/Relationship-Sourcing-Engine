@@ -337,7 +337,12 @@ def _linkedin_filters(principal_id: Optional[int], campaign_id: Optional[int]) -
     # Prospect outreach only, matching how the LinkedIn module scopes its own
     # lists and counts. Follower DMs belong to the Followers module and are
     # reported there; folding a bulk blast in here would swamp these rates.
-    where = [LinkedInMessage.follower_id.is_(None)]
+    # Search-sourced outreach is excluded for the same reason: the Classic
+    # Search LinkedIn tab owns it and reports it there.
+    where = [
+        LinkedInMessage.follower_id.is_(None),
+        LinkedInMessage.search_lead_id.is_(None),
+    ]
     if principal_id is not None:
         where.append(LinkedInMessage.principal_id == principal_id)
     if campaign_id is not None:

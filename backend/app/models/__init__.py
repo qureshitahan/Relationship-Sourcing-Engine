@@ -19,6 +19,11 @@ from app.models.linkedin_follower import (
     LinkedInFollowerSend,
 )
 from app.models.linkedin_message import LinkedInMessage
+from app.models.linkedin_search_lead import (
+    LinkedInSearchLead,
+    LinkedInSearchSend,
+    SearchSendStatus,
+)
 from app.models.principal import Principal
 from app.models.principal_document import PrincipalDocument
 from app.models.relevance_insight import RelevanceInsight
@@ -42,6 +47,9 @@ __all__ = [
     "Contact",
     "DiscoveryRun",
     "EmailDraft",
+    "LinkedInSearchLead",
+    "LinkedInSearchSend",
+    "SearchSendStatus",
     "FollowerSendStatus",
     "LinkedInFollower",
     "LinkedInFollowerSend",

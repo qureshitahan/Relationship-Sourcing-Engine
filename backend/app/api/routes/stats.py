@@ -5,7 +5,7 @@ import logging
 from typing import Callable, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -79,7 +79,10 @@ def _linkedin_by_account(db: Session) -> list[LinkedInAccountStats]:
     ``account_id`` and are reported as a separate column, never merged into the
     prospect reply rate.
     """
-    prospect_dm = LinkedInMessage.follower_id.is_(None)
+    prospect_dm = and_(
+        LinkedInMessage.follower_id.is_(None),
+        LinkedInMessage.search_lead_id.is_(None),
+    )
     sent_from = LinkedInMessage.from_account.is_not(None)
 
     def _grouped(*where) -> dict[str, int]:
@@ -181,7 +184,10 @@ def dashboard_stats(db: Session = Depends(get_db)):
     # it keeps these totals equal to what the LinkedIn page lists. Follower DMs
     # are counted separately further down rather than folded in here: a bulk
     # follower blast would otherwise swamp the prospect funnel.
-    prospect_dm = LinkedInMessage.follower_id.is_(None)
+    prospect_dm = and_(
+        LinkedInMessage.follower_id.is_(None),
+        LinkedInMessage.search_lead_id.is_(None),
+    )
 
     def _linkedin_counts() -> dict:
         return {

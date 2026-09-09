@@ -66,6 +66,18 @@ class LinkedInMessage(Base, TimestampMixin):
     # scope to one campaign without touching prospect messages.
     follower_campaign_key: Mapped[Optional[str]] = mapped_column(String(64), index=True)
 
+    # --- Classic Search LinkedIn module ---
+    # Set only for outreach to someone found through a LinkedIn search (see
+    # models/linkedin_search_lead.py). NULL on every prospect-driven message and
+    # on every follower DM, which is how the other two modules keep their lists
+    # and counts unchanged: their queries filter search_lead_id IS NULL.
+    search_lead_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("linkedin_search_leads.id"), index=True
+    )
+    # Which message text this belongs to, so the search tab can scope to one
+    # campaign without touching prospect or follower messages.
+    search_campaign_key: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+
     # Unipile ids captured on send, used to match replies.
     provider_chat_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     provider_message_id: Mapped[Optional[str]] = mapped_column(String(255))

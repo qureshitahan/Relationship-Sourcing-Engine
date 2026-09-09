@@ -507,6 +507,108 @@ export interface FollowersProgress {
   campaign_key?: string | null;
 }
 
+// --- Classic Search LinkedIn ---
+
+/** The LinkedIn people-search filters the Classic Search tab exposes.
+ *
+ *  These are LinkedIn's own filters, not Apollo's — that is the whole point of
+ *  the tab. `industry` and `location` are ids resolved through
+ *  `/linkedin-search/parameters`, because LinkedIn silently ignores free text
+ *  for those. */
+export interface SearchFilters {
+  keywords?: string;
+  job_title?: string;
+  seniority?: string[];
+  company_headcount?: string[];
+  industry?: string[];
+  location?: string[];
+  /** 1 / 2 / 3. Empty = every degree, exactly as LinkedIn defaults. */
+  network_distance?: number[];
+}
+
+export interface SearchLeadRow {
+  id: number;
+  account_id: string;
+  provider_id: string;
+  name?: string | null;
+  headline?: string | null;
+  location?: string | null;
+  company?: string | null;
+  job_title?: string | null;
+  /** "1" means a DM goes straight out; anything else gets an invitation. */
+  network_distance?: string | null;
+  profile_url?: string | null;
+  picture_url?: string | null;
+  message_id?: number | null;
+  message_status?: string | null;
+  body?: string | null;
+  /** Checkpoint state: claimed | invited | sent | failed | skipped. */
+  send_status?: string | null;
+  /** How they were reached: dm | invite. */
+  reach?: string | null;
+  sent_at?: string | null;
+  error?: string | null;
+}
+
+/** DB-derived counts for one search + message — never reset by a refresh. */
+export interface SearchStats {
+  /** People stored for this search (or every search when none is pinned). */
+  leads_total: number;
+  /** Leads with no message yet for this text. */
+  eligible: number;
+  all: number;
+  draft: number;
+  approved: number;
+  /** Invitation sent; the message follows when they accept. */
+  invite_sent: number;
+  sent: number;
+  replied: number;
+  /** Checkpoint truth: how many were ever reached under this message. */
+  contacted_ever: number;
+  /** Claims left by a worker that died mid-send; never auto-retried. */
+  needs_review: number;
+  cap: number;
+  sent_today: number;
+  remaining_today: number;
+}
+
+export interface SearchStatus {
+  provider: string;
+  configured: boolean;
+  supports_search: boolean;
+  active_account_id?: string | null;
+  active_account_name?: string | null;
+  active_account_status?: string | null;
+  accounts: { id: string; name?: string | null; status?: string | null }[];
+  campaign_key?: string | null;
+  stats?: SearchStats | null;
+}
+
+/** Live state of the running search / draft / send job. */
+export interface SearchProgress {
+  job: "search" | "draft" | "send" | null;
+  status: "idle" | "running" | "done" | "stopped" | "failed";
+  total: number;
+  done: number;
+  sent: number;
+  /** Connection invitations that went out this run. */
+  invited: number;
+  skipped: number;
+  failed: number;
+  duplicates?: number;
+  held?: number;
+  imported: number;
+  stop_requested: boolean;
+  message?: string | null;
+  campaign_key?: string | null;
+}
+
+/** One resolved id for a filter LinkedIn will not take as free text. */
+export interface SearchParameterOption {
+  id: string;
+  title: string;
+}
+
 /** Connection-invitation funnel shown above the LinkedIn message list. */
 export interface LinkedInInviteStats {
   invites_sent: number;

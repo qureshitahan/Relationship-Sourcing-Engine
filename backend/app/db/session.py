@@ -285,6 +285,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         # LinkedIn queries filter on that to stay unchanged.
         "follower_id": "INTEGER",
         "follower_campaign_key": "VARCHAR(64)",
+        "search_lead_id": "INTEGER",
+        "search_campaign_key": "VARCHAR(64)",
     },
 }
 

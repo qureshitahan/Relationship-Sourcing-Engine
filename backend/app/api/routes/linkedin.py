@@ -317,11 +317,17 @@ def list_messages(
     # Prospect-driven messages only. Follower DMs live in the same table but are
     # owned by the Followers module and have their own page, tabs and counts —
     # excluding them here is what keeps this list byte-for-byte what it was.
-    query = select(LinkedInMessage).where(LinkedInMessage.follower_id.is_(None))
+    # The Classic Search LinkedIn tab is excluded on the same grounds: its
+    # messages have their own page, tabs and counts.
+    prospect_only = (
+        LinkedInMessage.follower_id.is_(None),
+        LinkedInMessage.search_lead_id.is_(None),
+    )
+    query = select(LinkedInMessage).where(*prospect_only)
     count_query = (
         select(func.count())
         .select_from(LinkedInMessage)
-        .where(LinkedInMessage.follower_id.is_(None))
+        .where(*prospect_only)
     )
     if discovery_run_id is not None:
         run_filter = Contact.discovery_run_id == discovery_run_id
@@ -833,6 +839,9 @@ def send_open(payload: LinkedInSendOpenRequest, db: Session = Depends(get_db)):
         # DMs only and checkpoints every send; routing one through here would send
         # a connection invitation instead and bypass that checkpoint entirely.
         LinkedInMessage.follower_id.is_(None),
+        # Nor search-sourced ones: those are sent by the Classic Search
+        # LinkedIn module, which keeps its own checkpoint per lead.
+        LinkedInMessage.search_lead_id.is_(None),
     )
     if payload.discovery_run_id is not None:
         query = query.join(Contact, LinkedInMessage.contact_id == Contact.id).where(

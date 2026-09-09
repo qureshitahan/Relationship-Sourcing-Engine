@@ -334,6 +334,72 @@ class FollowerActionRequest(BaseModel):
     approve_first: bool = True
 
 
+class SearchFilters(BaseModel):
+    """The LinkedIn people-search filters the Classic Search tab exposes.
+
+    These map onto LinkedIn's own search, not Apollo's: the point of the tab is
+    that the audience comes from LinkedIn. Location, industry and company are ids
+    on LinkedIn's side rather than free text, which is why they arrive here as
+    lists of ids resolved through ``/search-parameters``.
+    """
+
+    keywords: Optional[str] = None
+    #: Job titles, sent as LinkedIn's ``role`` filter.
+    job_title: Optional[str] = None
+    #: LinkedIn seniority buckets, e.g. ["Owner", "CXO", "VP", "Director"].
+    seniority: Optional[list[str]] = None
+    #: Headcount bands, e.g. ["11-50", "51-200"].
+    company_headcount: Optional[list[str]] = None
+    industry: Optional[list[str]] = None
+    location: Optional[list[str]] = None
+    #: 1 / 2 / 3. Empty = every degree, exactly as LinkedIn defaults.
+    network_distance: Optional[list[int]] = None
+
+
+class SearchRunRequest(BaseModel):
+    """Run a LinkedIn people search and store the results as leads."""
+
+    filters: SearchFilters
+    #: "classic" or "sales_navigator". Sales Navigator supports more filters and
+    #: needs the subscription; classic works on any connected account.
+    api: str = "classic"
+    account_id: Optional[str] = None
+    #: How many pages of 50 to pull in this run. Kept small by default so one
+    #: click is a quick, predictable amount of work.
+    pages: int = 1
+
+
+class SearchDraftRequest(BaseModel):
+    """Draft messages for the leads of one search.
+
+    ``message`` is used verbatim with only ``Hi <first name>,`` prepended — no
+    model rewrites it — and hashed it is the campaign half of the
+    duplicate-prevention key, so editing it starts a new campaign.
+    """
+
+    filters: SearchFilters
+    message: str
+    principal_id: int
+    #: The <=300 character note carried by a connection invitation. Blank falls
+    #: back to the message itself, which is what the LinkedIn tab already does.
+    invitation_note: Optional[str] = None
+    account_id: Optional[str] = None
+    #: Draft at most this many more. Omitted = every eligible lead.
+    limit: Optional[int] = None
+    #: Draft until the search HOLDS this many, rather than adding this many.
+    target: Optional[int] = None
+
+
+class SearchActionRequest(BaseModel):
+    """Approve / send all search messages for one message campaign."""
+
+    filters: SearchFilters
+    message: str
+    account_id: Optional[str] = None
+    #: False approves nothing and sends only what is already approved.
+    approve_first: bool = True
+
+
 class AgentRunRequest(BaseModel):
     """Trigger an autonomous agent run now for a principal."""
 

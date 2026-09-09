@@ -1,0 +1,1068 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { usePersistedState } from "../hooks/usePersistedState";
+import {
+  approveAllSearchLeads,
+  draftAllSearchLeads,
+  getSearchParameters,
+  getSearchProgress,
+  getSearchStatus,
+  listPrincipals,
+  listSearchLeads,
+  runLinkedInSearch,
+  selectLinkedInAccount,
+  sendAllSearchLeads,
+  stopSearchJob,
+} from "../api/client";
+import type {
+  SearchFilters,
+  SearchLeadRow,
+  SearchParameterOption,
+  SearchProgress,
+  SearchStats,
+} from "../types";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  Loading,
+  PageHeader,
+  StatusBadge,
+} from "../components/ui";
+
+/** Tabs over the leads list. `pending` is "found, but no message written yet". */
+const STATUS_TABS = [
+  { key: "", label: "All" },
+  { key: "pending", label: "Not drafted" },
+  { key: "draft", label: "Draft" },
+  { key: "approved", label: "Approved" },
+  { key: "invite_sent", label: "Invited" },
+  { key: "sent", label: "Sent" },
+  { key: "replied", label: "Replied" },
+] as const;
+
+/** LinkedIn's own seniority buckets, spelled the way its search expects. */
+const SENIORITY = [
+  "Owner",
+  "Partner",
+  "CXO",
+  "Vice President",
+  "Director",
+  "Manager",
+  "Senior",
+  "Entry",
+] as const;
+
+/** LinkedIn's own headcount bands. */
+const HEADCOUNT = [
+  "1-10",
+  "11-50",
+  "51-200",
+  "201-500",
+  "501-1000",
+  "1001-5000",
+  "5001-10000",
+  "10001+",
+] as const;
+
+const DEGREES = [
+  { value: 1, label: "1st" },
+  { value: 2, label: "2nd" },
+  { value: 3, label: "3rd" },
+] as const;
+
+/** Mirrors the backend's `first_name_of` exactly, so the preview is not a guess. */
+function firstNameOf(name?: string | null): string {
+  const token = (name ?? "").trim().split(" ")[0]?.replace(/,+$/, "") ?? "";
+  const cleaned = token.replace(/[^A-Za-z\-']/g, "");
+  return cleaned || "there";
+}
+
+/** A checkbox row that toggles one value in and out of a string/number list. */
+function ChipGroup<T extends string | number>({
+  options,
+  selected,
+  onChange,
+  disabled,
+}: {
+  options: readonly { value: T; label: string }[];
+  selected: T[];
+  onChange: (next: T[]) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const on = selected.includes(opt.value);
+        return (
+          <button
+            key={String(opt.value)}
+            type="button"
+            disabled={disabled}
+            onClick={() =>
+              onChange(
+                on
+                  ? selected.filter((v) => v !== opt.value)
+                  : [...selected, opt.value]
+              )
+            }
+            className={`rounded-full border px-2.5 py-1 text-xs font-medium disabled:opacity-50 ${
+              on
+                ? "border-slate-900 bg-slate-900 text-white"
+                : "border-slate-300 bg-white text-slate-600 hover:border-slate-400"
+            }`}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * A filter LinkedIn will not accept as free text.
+ *
+ * Location and industry are ids on LinkedIn's side. Typing "Toronto" into a
+ * plain text box would look like it worked and then quietly match nothing, so
+ * this resolves what you type into real ids and only sends the ones you picked.
+ */
+function IdPicker({
+  label,
+  kind,
+  accountId,
+  selected,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  kind: string;
+  accountId?: string;
+  selected: SearchParameterOption[];
+  onChange: (next: SearchParameterOption[]) => void;
+  disabled?: boolean;
+}) {
+  const [term, setTerm] = useState("");
+  const [open, setOpen] = useState(false);
+  const { data: options, isFetching } = useQuery({
+    queryKey: ["linkedin-search", "parameters", kind, term, accountId],
+    queryFn: () => getSearchParameters(kind, term, accountId),
+    // Only ask once there is something to resolve; LinkedIn returns nothing
+    // useful for one or two characters anyway.
+    enabled: term.trim().length >= 2 && open,
+  });
+
+  return (
+    <div className="relative">
+      <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </label>
+      {selected.length > 0 && (
+        <div className="mb-1 mt-1 flex flex-wrap gap-1">
+          {selected.map((opt) => (
+            <span
+              key={opt.id}
+              className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700"
+            >
+              {opt.title}
+              <button
+                type="button"
+                className="text-slate-400 hover:text-slate-700"
+                onClick={() => onChange(selected.filter((s) => s.id !== opt.id))}
+                disabled={disabled}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        value={term}
+        onChange={(e) => {
+          setTerm(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        // A blur that fires before the click would close the list first and eat
+        // the selection, so closing is deferred a tick.
+        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        placeholder="Type to search…"
+        disabled={disabled}
+        className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+      />
+      {open && term.trim().length >= 2 && (
+        <div className="absolute z-20 mt-1 max-h-48 w-full overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
+          {isFetching && (
+            <div className="px-3 py-2 text-xs text-slate-500">Looking up…</div>
+          )}
+          {!isFetching && (options ?? []).length === 0 && (
+            <div className="px-3 py-2 text-xs text-slate-500">
+              Nothing matched — LinkedIn only accepts values from its own list.
+            </div>
+          )}
+          {(options ?? []).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"
+              onClick={() => {
+                if (!selected.some((s) => s.id === opt.id)) {
+                  onChange([...selected, opt]);
+                }
+                setTerm("");
+              }}
+            >
+              {opt.title}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProgressBar({ progress }: { progress: SearchProgress }) {
+  const total = Math.max(0, progress.total);
+  const done = Math.max(0, progress.done);
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const label =
+    progress.job === "search"
+      ? "Searching LinkedIn…"
+      : progress.job === "draft"
+        ? "Writing messages…"
+        : "Reaching people…";
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="flex items-center justify-between text-sm">
+        <span className="font-medium text-slate-800">{label}</span>
+        <span className="text-slate-500">
+          {progress.job === "search"
+            ? `${progress.imported} found`
+            : `${done} of ${total}`}
+        </span>
+      </div>
+      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+        <div
+          className="h-full rounded-full bg-emerald-500 transition-all"
+          style={{ width: `${progress.job === "search" ? 100 : pct}%` }}
+        />
+      </div>
+      {progress.message && (
+        <div className="mt-1 text-[11px] text-slate-500">{progress.message}</div>
+      )}
+    </div>
+  );
+}
+
+function CountRow({ stats }: { stats: SearchStats }) {
+  // Every cell counts PEOPLE, not message rows — the same lesson the followers
+  // page had to learn, where counting rows made Sent read 597 for 503 people.
+  const cells = [
+    { label: "Found", value: stats.leads_total, hint: "People this search stored" },
+    { label: "Created", value: stats.all, hint: "People this message is drafted for" },
+    { label: "Approved", value: stats.approved, hint: "Approved, not yet sent" },
+    { label: "Invited", value: stats.invite_sent, hint: "Connection request sent" },
+    { label: "Sent", value: stats.sent, hint: "Message delivered" },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+      {cells.map((c) => (
+        <div
+          key={c.label}
+          title={c.hint}
+          className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+        >
+          <div className="text-lg font-semibold text-slate-900">{c.value}</div>
+          <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+            {c.label}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LeadRow({ row }: { row: SearchLeadRow }) {
+  return (
+    <tr className="border-b border-slate-100 align-top">
+      <td className="px-3 py-2">
+        <div className="text-sm font-medium text-slate-900">
+          {row.profile_url ? (
+            <a
+              className="hover:underline"
+              href={row.profile_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {row.name ?? row.provider_id}
+            </a>
+          ) : (
+            row.name ?? row.provider_id
+          )}
+        </div>
+        <div className="text-xs text-slate-500">{row.headline}</div>
+        <div className="mt-0.5 text-[11px] text-slate-400">
+          {[row.job_title, row.company, row.location].filter(Boolean).join(" · ")}
+        </div>
+      </td>
+      <td className="px-3 py-2">
+        {row.network_distance && (
+          <Badge tone={row.network_distance === "1" ? "green" : "slate"}>
+            {row.network_distance === "1"
+              ? "1st — direct message"
+              : `${row.network_distance}${
+                  row.network_distance === "2" ? "nd" : "rd"
+                } — invitation`}
+          </Badge>
+        )}
+      </td>
+      <td className="px-3 py-2">
+        {row.message_status ? <StatusBadge status={row.message_status} /> : null}
+        {row.send_status === "claimed" && <Badge tone="amber">needs review</Badge>}
+        {row.error && (
+          <div className="mt-1 max-w-xs text-[11px] text-rose-600">{row.error}</div>
+        )}
+      </td>
+      <td className="px-3 py-2">
+        <pre className="max-w-md whitespace-pre-wrap text-xs text-slate-600">
+          {row.body}
+        </pre>
+      </td>
+    </tr>
+  );
+}
+
+export default function ClassicSearchLinkedIn() {
+  const qc = useQueryClient();
+  const [note, setNote] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = usePersistedState<string>(
+    "search:statusFilter",
+    ""
+  );
+
+  // The account THIS browser tab is working with. The server keeps ONE active
+  // account row shared by every tab, so without pinning it here, someone picking
+  // a different account on the LinkedIn page would silently move this page onto
+  // their account. Empty = follow the server's choice, which is the same
+  // behaviour as having no pin at all. Same approach as the LinkedIn and
+  // Followers pages.
+  const [tabAccountId, setTabAccountId] = usePersistedState<string>(
+    "search:accountId",
+    ""
+  );
+
+  // --- filters -----------------------------------------------------------
+  const [api, setApi] = usePersistedState<string>("search:api", "classic");
+  const [keywords, setKeywords] = usePersistedState<string>("search:keywords", "");
+  const [jobTitle, setJobTitle] = usePersistedState<string>("search:jobTitle", "");
+  const [seniority, setSeniority] = usePersistedState<string[]>("search:seniority", []);
+  const [headcount, setHeadcount] = usePersistedState<string[]>("search:headcount", []);
+  const [degrees, setDegrees] = usePersistedState<number[]>("search:degrees", []);
+  const [industry, setIndustry] = usePersistedState<SearchParameterOption[]>(
+    "search:industry",
+    []
+  );
+  const [location, setLocation] = usePersistedState<SearchParameterOption[]>(
+    "search:location",
+    []
+  );
+  const [pages, setPages] = usePersistedState<string>("search:pages", "1");
+
+  // --- message -----------------------------------------------------------
+  // The message IS the campaign: its text decides which people belong together
+  // and who has already been contacted, so it must survive a refresh.
+  const [message, setMessage] = usePersistedState<string>("search:message", "");
+  const [activeMessage, setActiveMessage] = usePersistedState<string>(
+    "search:activeMessage",
+    ""
+  );
+  const [inviteNote, setInviteNote] = usePersistedState<string>("search:inviteNote", "");
+  const [draftLimit, setDraftLimit] = usePersistedState<string>("search:draftLimit", "50");
+  const [appendCount, setAppendCount] = usePersistedState<string>("search:append", "");
+
+  /** Exactly what gets hashed into the search key, server-side and here. */
+  const filters: SearchFilters = useMemo(() => {
+    const out: SearchFilters = {};
+    if (keywords.trim()) out.keywords = keywords.trim();
+    if (jobTitle.trim()) out.job_title = jobTitle.trim();
+    if (seniority.length) out.seniority = seniority;
+    if (headcount.length) out.company_headcount = headcount;
+    if (degrees.length) out.network_distance = degrees;
+    if (industry.length) out.industry = industry.map((o) => o.id);
+    if (location.length) out.location = location.map((o) => o.id);
+    return out;
+  }, [keywords, jobTitle, seniority, headcount, degrees, industry, location]);
+
+  const hasFilters = Object.keys(filters).length > 0;
+
+  // Declared first because the other queries key their polling off it.
+  const { data: progress } = useQuery({
+    queryKey: ["linkedin-search", "progress"],
+    queryFn: getSearchProgress,
+    refetchInterval: (q) =>
+      (q.state.data as SearchProgress | undefined)?.status === "running" ? 2000 : false,
+  });
+  const running = progress?.status === "running";
+
+  // The search key the server assigned to the last run, so the counts and the
+  // list scope to the filters actually searched rather than to whatever is
+  // currently typed in the boxes.
+  const [searchKey, setSearchKey] = usePersistedState<string>("search:key", "");
+
+  const { data: status, isLoading: statusLoading } = useQuery({
+    queryKey: ["linkedin-search", "status", activeMessage, tabAccountId, searchKey],
+    queryFn: () =>
+      getSearchStatus({
+        message: activeMessage || undefined,
+        accountId: tabAccountId || undefined,
+        searchKey: searchKey || undefined,
+      }),
+    // A mutation only reports that the background job STARTED, so without
+    // polling the tiles would sit at zero while the job filled the database.
+    refetchInterval: running ? 3000 : false,
+  });
+  const { data: principals } = useQuery({
+    queryKey: ["principals", "active"],
+    queryFn: () => listPrincipals({ active: true }),
+  });
+
+  // A job's last few results land after its final poll, so refresh once more on
+  // the running -> finished edge; nothing polls the tiles once it is done.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (running) {
+      wasRunning.current = true;
+      return;
+    }
+    if (wasRunning.current) {
+      wasRunning.current = false;
+      qc.invalidateQueries({ queryKey: ["linkedin-search"] });
+    }
+  }, [running, qc]);
+
+  const { data: leads, isLoading } = useQuery({
+    queryKey: [
+      "linkedin-search",
+      "list",
+      activeMessage,
+      statusFilter,
+      tabAccountId,
+      searchKey,
+    ],
+    queryFn: () =>
+      listSearchLeads({
+        limit: 500,
+        ...(activeMessage ? { message: activeMessage } : {}),
+        ...(statusFilter ? { status: statusFilter } : {}),
+        ...(tabAccountId ? { account_id: tabAccountId } : {}),
+        ...(searchKey ? { search_key: searchKey } : {}),
+      }),
+    enabled: !!status?.active_account_id,
+    refetchInterval: running ? 4000 : false,
+  });
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["linkedin-search"] });
+
+  const accounts = status?.accounts ?? [];
+  const activeId = status?.active_account_id ?? null;
+  useEffect(() => {
+    // A pin naming an account that is no longer connected clears itself, rather
+    // than leaving the page pointed at nothing.
+    const list = status?.accounts ?? [];
+    if (tabAccountId && list.length > 0 && !list.some((a) => a.id === tabAccountId)) {
+      setTabAccountId("");
+    }
+  }, [tabAccountId, status, setTabAccountId]);
+  const stats = status?.stats ?? null;
+
+  // Which principal each draft is filed under. Derived from the connected
+  // LinkedIn account by name, because that account is what actually sends.
+  const attributedPrincipal = useMemo(() => {
+    const list = principals?.items ?? [];
+    if (list.length === 0) return undefined;
+    const accountName = (status?.active_account_name ?? "").trim().toLowerCase();
+    const match = accountName
+      ? list.find((p) => (p.name ?? "").trim().toLowerCase() === accountName)
+      : undefined;
+    return match ?? list[0];
+  }, [principals, status?.active_account_name]);
+
+  const previewName = leads?.items?.[0]?.name ?? null;
+
+  const selectAccount = useMutation({
+    mutationFn: (id: string) => selectLinkedInAccount(id),
+    onSuccess: (_d, id) => {
+      setTabAccountId(id);
+      invalidate();
+    },
+  });
+
+  const search = useMutation({
+    mutationFn: () =>
+      runLinkedInSearch({
+        filters,
+        api,
+        pages: Math.max(1, Number(pages) || 1),
+        accountId: tabAccountId || undefined,
+      }),
+    onSuccess: (data) => {
+      if (data.search_key) setSearchKey(data.search_key);
+      setNote(data.message);
+      invalidate();
+    },
+    onError: () => setNote("Could not start the search."),
+  });
+
+  const requireMessage = (): string | null => {
+    const text = message.trim();
+    if (!text) {
+      setNote("Write the message first — it is what gets sent.");
+      return null;
+    }
+    // Committing the text is what keys the campaign; typing must not re-key it
+    // on every keystroke.
+    setActiveMessage(text);
+    return text;
+  };
+
+  const draft = useMutation({
+    mutationFn: ({ text, append }: { text: string; append?: number }) =>
+      draftAllSearchLeads({
+        filters,
+        message: text,
+        principalId: attributedPrincipal?.id as number,
+        invitationNote: inviteNote.trim() || undefined,
+        accountId: tabAccountId || undefined,
+        ...(append ? { limit: append } : {}),
+        ...(!append && Number(draftLimit) > 0 ? { target: Number(draftLimit) } : {}),
+      }),
+    onSuccess: (data) => {
+      setNote(data.message);
+      invalidate();
+    },
+    onError: () => setNote("Could not start drafting."),
+  });
+
+  const approve = useMutation({
+    mutationFn: (text: string) =>
+      approveAllSearchLeads({
+        filters,
+        message: text,
+        accountId: tabAccountId || undefined,
+      }),
+    onSuccess: (data) => {
+      setNote(`Approved ${data.approved} message(s).`);
+      invalidate();
+    },
+    onError: () => setNote("Could not approve."),
+  });
+
+  const send = useMutation({
+    mutationFn: (text: string) =>
+      sendAllSearchLeads({
+        filters,
+        message: text,
+        accountId: tabAccountId || undefined,
+      }),
+    onSuccess: (data) => {
+      setNote(data.message);
+      invalidate();
+    },
+    onError: () => setNote("Could not start sending."),
+  });
+
+  const stop = useMutation({
+    mutationFn: stopSearchJob,
+    onSuccess: (data) => {
+      setNote(data.message);
+      invalidate();
+    },
+  });
+
+  const busy =
+    running ||
+    search.isPending ||
+    draft.isPending ||
+    approve.isPending ||
+    send.isPending;
+
+  if (statusLoading) return <Loading />;
+
+  return (
+    <div className="space-y-4">
+      <PageHeader
+        title="Classic Search LinkedIn"
+        subtitle={
+          "Find people with LinkedIn's own search instead of Apollo, then reach " +
+          "them the way the LinkedIn tab already does — a direct message if you " +
+          "are already connected, otherwise a connection request carrying your " +
+          "note. Nothing sends until you press Send."
+        }
+      />
+
+      {note && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-900">
+          {note}
+        </div>
+      )}
+
+      {progress && running && <ProgressBar progress={progress} />}
+      {progress && !running && progress.message && (
+        <div className="flex items-start justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+          <span>{progress.message}</span>
+        </div>
+      )}
+
+      {/* --- Account --- */}
+      <Card>
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+              LinkedIn account
+            </label>
+            <select
+              value={activeId ?? ""}
+              onChange={(e) => e.target.value && selectAccount.mutate(e.target.value)}
+              className="mt-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
+              disabled={busy}
+            >
+              <option value="">Select an account…</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name ?? a.id}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="text-xs text-slate-500">
+            {status?.supports_search ? (
+              <Badge tone="green">Search available</Badge>
+            ) : (
+              <Badge tone="amber">
+                This account cannot search — connect it through Unipile first
+              </Badge>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      {/* --- Search --- */}
+      <Card>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-slate-900">1. Find people</h2>
+          <div className="flex gap-1.5">
+            {(["classic", "sales_navigator"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={busy}
+                onClick={() => setApi(mode)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                  api === mode
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                }`}
+              >
+                {mode === "classic" ? "Classic search" : "Sales Navigator"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Sales Navigator supports more filters and needs that subscription on the
+          selected account. Classic search works on any connected account.
+        </p>
+
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+              Keywords
+            </label>
+            <input
+              value={keywords}
+              onChange={(e) => setKeywords(e.target.value)}
+              disabled={busy}
+              placeholder="e.g. healthcare AI"
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+              Job title
+            </label>
+            <input
+              value={jobTitle}
+              onChange={(e) => setJobTitle(e.target.value)}
+              disabled={busy}
+              placeholder="e.g. Chief Executive Officer"
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <IdPicker
+            label="Location"
+            kind="LOCATION"
+            accountId={tabAccountId || activeId || undefined}
+            selected={location}
+            onChange={setLocation}
+            disabled={busy}
+          />
+          <IdPicker
+            label="Industry"
+            kind="INDUSTRY"
+            accountId={tabAccountId || activeId || undefined}
+            selected={industry}
+            onChange={setIndustry}
+            disabled={busy}
+          />
+        </div>
+
+        <div className="mt-3 space-y-3">
+          <div>
+            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+              Seniority
+            </div>
+            <ChipGroup
+              options={SENIORITY.map((s) => ({ value: s, label: s }))}
+              selected={seniority}
+              onChange={setSeniority}
+              disabled={busy}
+            />
+          </div>
+          <div>
+            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+              Company headcount
+            </div>
+            <ChipGroup
+              options={HEADCOUNT.map((h) => ({ value: h, label: h }))}
+              selected={headcount}
+              onChange={setHeadcount}
+              disabled={busy}
+            />
+          </div>
+          <div>
+            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">
+              Connection degree
+            </div>
+            <ChipGroup
+              options={DEGREES.map((d) => ({ value: d.value, label: d.label }))}
+              selected={degrees}
+              onChange={setDegrees}
+              disabled={busy}
+            />
+            <p className="mt-1 text-[11px] text-slate-500">
+              Leave empty for every degree. 1st-degree people get a direct
+              message; everyone else gets a connection request first.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+              Pages <span className="normal-case text-slate-400">(50 each)</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={pages}
+              onChange={(e) => setPages(e.target.value)}
+              disabled={busy}
+              className="mt-1 w-20 rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <Button
+            onClick={() => search.mutate()}
+            disabled={busy || !activeId || !hasFilters}
+            title={
+              hasFilters
+                ? "Run this search and store what it finds"
+                : "Fill in at least one filter first"
+            }
+          >
+            {progress?.job === "search" && running ? "Searching…" : "Search LinkedIn"}
+          </Button>
+          {stats && (
+            <span className="text-xs text-slate-500">
+              {stats.leads_total} stored for these filters
+            </span>
+          )}
+        </div>
+      </Card>
+
+      {/* --- Message --- */}
+      <Card>
+        <h2 className="text-sm font-semibold text-slate-900">2. Write the message</h2>
+        <textarea
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          rows={5}
+          disabled={busy}
+          className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+          placeholder="Sent exactly as written, with only 'Hi <first name>,' added at the top."
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          Sent exactly as written — nothing rewrites or personalises it. The text
+          also identifies the campaign: change it and you start a new one, so the
+          same people become eligible again.
+        </p>
+
+        <div className="mt-3">
+          <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+            Invitation note{" "}
+            <span className="normal-case text-slate-400">
+              (optional, max 300 characters)
+            </span>
+          </label>
+          <textarea
+            value={inviteNote}
+            onChange={(e) => setInviteNote(e.target.value)}
+            rows={2}
+            disabled={busy}
+            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Carried by the connection request. Blank = the message above, trimmed."
+          />
+        </div>
+
+        {message.trim() && (
+          <div className="mt-3">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+              Preview{previewName ? ` — as ${previewName} will see it` : ""}
+            </div>
+            <pre className="mt-1 whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+              {`Hi ${firstNameOf(previewName)},\n\n${message.trim()}`}
+            </pre>
+          </div>
+        )}
+      </Card>
+
+      {/* --- Draft / approve / send --- */}
+      <Card>
+        <h2 className="text-sm font-semibold text-slate-900">
+          3. Draft, approve, send
+        </h2>
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+              Draft how many{" "}
+              <span className="normal-case text-slate-400">(total)</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={draftLimit}
+              onChange={(e) => setDraftLimit(e.target.value)}
+              disabled={busy}
+              className="mt-1 w-24 rounded-md border border-slate-300 px-3 py-2 text-sm"
+              title="How many people to prepare this message for, in total. Blank = everyone found."
+            />
+          </div>
+          <Button
+            onClick={() => {
+              const text = requireMessage();
+              if (!text) return;
+              if (!attributedPrincipal) {
+                setNote(
+                  "Add a principal on the Principals page first — drafts are filed against one."
+                );
+                return;
+              }
+              draft.mutate({ text });
+            }}
+            disabled={busy || !activeId || !hasFilters}
+          >
+            {progress?.job === "draft" && running
+              ? "Drafting…"
+              : Number(draftLimit) > 0
+                ? `Draft ${Number(draftLimit)}`
+                : stats
+                  ? `Draft all (${stats.eligible})`
+                  : "Draft all"}
+          </Button>
+
+          {/* The explicit "more" control, separate so the box above keeps
+              meaning a total — one number cannot mean both. */}
+          <label className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-slate-500">Append</span>
+            <input
+              type="number"
+              min={1}
+              value={appendCount}
+              placeholder="0"
+              onChange={(e) => setAppendCount(e.target.value)}
+              disabled={busy}
+              className="w-20 rounded-md border border-slate-300 px-2 py-2 text-sm"
+              title="Draft this many MORE, on top of what already exists."
+            />
+          </label>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              const text = requireMessage();
+              if (!text) return;
+              if (!attributedPrincipal) {
+                setNote("Add a principal on the Principals page first.");
+                return;
+              }
+              draft.mutate({ text, append: Number(appendCount) });
+            }}
+            disabled={busy || !activeId || !(Number(appendCount) > 0)}
+          >
+            {Number(appendCount) > 0 ? `Append ${Number(appendCount)}` : "Append"}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              const text = requireMessage();
+              if (text) approve.mutate(text);
+            }}
+            disabled={busy || !activeId}
+          >
+            {stats ? `Approve all (${stats.draft})` : "Approve all"}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              const text = requireMessage();
+              if (text) send.mutate(text);
+            }}
+            disabled={busy || !activeId}
+            title="Approve and send everything open for this message, paced and capped"
+          >
+            {progress?.job === "send" && running
+              ? "Sending…"
+              : stats
+                ? `Approve & send all (${stats.draft + stats.approved})`
+                : "Approve & send all"}
+          </Button>
+          {stats && stats.draft + stats.approved > stats.remaining_today && (
+            <span className="text-xs text-amber-700">
+              only {stats.remaining_today} can go today
+            </span>
+          )}
+          {running && (
+            <Button
+              variant="danger"
+              onClick={() => stop.mutate()}
+              disabled={stop.isPending || progress?.stop_requested}
+            >
+              {progress?.stop_requested ? "Stopping…" : "Stop"}
+            </Button>
+          )}
+        </div>
+
+        {/* The number above is a target TOTAL, which reads like "add this many"
+            right up until it quietly does nothing. Say the arithmetic out loud
+            rather than leaving it to a tooltip. */}
+        {Number(draftLimit) > 0 && stats && (
+          <p className="mt-2 text-xs text-slate-500">
+            &ldquo;Draft {Number(draftLimit)}&rdquo; means finish with{" "}
+            {Number(draftLimit)} in total for this message, not {Number(draftLimit)}{" "}
+            more.{" "}
+            {stats.all >= Number(draftLimit)
+              ? `You already have ${stats.all}, so it will do nothing — use Append to add more on top.`
+              : `You have ${stats.all}, so it will draft ${
+                  Number(draftLimit) - stats.all
+                } more.`}
+          </p>
+        )}
+
+        {attributedPrincipal && (
+          <p className="mt-2 text-xs text-slate-500">
+            Sent from{" "}
+            <span className="font-medium text-slate-700">
+              {status?.active_account_name ?? "the selected LinkedIn account"}
+            </span>
+            , recorded against{" "}
+            <span className="font-medium text-slate-700">
+              {attributedPrincipal.name}
+            </span>
+            .
+          </p>
+        )}
+
+        {stats && (
+          <div className="mt-3 space-y-3">
+            <CountRow stats={stats} />
+            <div className="flex flex-wrap gap-4 text-xs text-slate-500">
+              <span>
+                {stats.remaining_today} of {stats.cap} sends left today for this
+                account
+                {stats.sent_today > 0 ? ` (${stats.sent_today} used)` : ""}
+              </span>
+              <span>{stats.eligible} still to draft</span>
+              {stats.contacted_ever > 0 && (
+                <span>{stats.contacted_ever} already contacted with this message</span>
+              )}
+              {stats.needs_review > 0 && (
+                <span className="text-amber-700">{stats.needs_review} needs review</span>
+              )}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* --- Tabs + list --- */}
+      <div className="mb-3 flex flex-wrap gap-2">
+        {STATUS_TABS.map((tab) => {
+          const count = stats
+            ? tab.key === ""
+              ? stats.all
+              : tab.key === "pending"
+                ? stats.eligible
+                : (stats[tab.key as keyof SearchStats] as number)
+            : null;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setStatusFilter(tab.key)}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                statusFilter === tab.key
+                  ? "bg-slate-900 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              {tab.label}
+              {count != null ? ` (${count})` : ""}
+            </button>
+          );
+        })}
+      </div>
+
+      <Card>
+        {isLoading ? (
+          <Loading />
+        ) : (leads?.items ?? []).length === 0 ? (
+          <EmptyState
+            message={
+              hasFilters
+                ? 'Nothing here yet — press "Search LinkedIn" to find people.'
+                : "Fill in at least one filter above, then search."
+            }
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-[11px] uppercase tracking-wide text-slate-500">
+                  <th className="px-3 py-2">Person</th>
+                  <th className="px-3 py-2">How they get reached</th>
+                  <th className="px-3 py-2">State</th>
+                  <th className="px-3 py-2">Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(leads?.items ?? []).map((row) => (
+                  <LeadRow key={row.id} row={row} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}

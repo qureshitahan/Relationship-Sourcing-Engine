@@ -30,6 +30,11 @@ import type {
   FollowerRow,
   FollowersProgress,
   FollowersStatus,
+  SearchLeadRow,
+  SearchParameterOption,
+  SearchProgress,
+  SearchStatus,
+  SearchFilters,
   LinkedInAccount,
   LinkedInAccountsResponse,
   LinkedInInviteStats,
@@ -1027,3 +1032,139 @@ export const placeCall = (id: number) =>
   api.post<Call>(`/api/calls/${id}/place`).then((r) => r.data);
 export const getCallConfig = () =>
   api.get<CallConfig>("/api/calls/config").then((r) => r.data);
+
+// --- Classic Search LinkedIn ---
+// A third lane, alongside the prospect-driven calls and the followers ones. It
+// sources its audience from LinkedIn's OWN people search instead of Apollo, and
+// reuses the same account picker so "the active account" has one meaning.
+
+/** Header state: connection status, account list, and counts for one message. */
+export const getSearchStatus = (params: {
+  message?: string;
+  accountId?: string;
+  searchKey?: string;
+} = {}) =>
+  api
+    .get<SearchStatus>("/api/linkedin-search/status", {
+      params: {
+        message: params.message || undefined,
+        account_id: params.accountId || undefined,
+        search_key: params.searchKey || undefined,
+      },
+    })
+    .then((r) => r.data);
+
+/** Live progress of the running search/draft/send job (poll while running). */
+export const getSearchProgress = () =>
+  api.get<SearchProgress>("/api/linkedin-search/progress").then((r) => r.data);
+
+/** Type-ahead for filters LinkedIn takes as ids rather than free text. */
+export const getSearchParameters = (
+  kind: string,
+  keywords: string,
+  accountId?: string
+) =>
+  api
+    .get<{ items: SearchParameterOption[] }>("/api/linkedin-search/parameters", {
+      params: { kind, keywords, account_id: accountId || undefined },
+    })
+    .then((r) => r.data.items);
+
+export interface SearchLeadListFilters {
+  /** The exact message text; hashed server-side into the campaign key. */
+  message?: string;
+  /** Which saved search to show; omitted = every lead of this account. */
+  search_key?: string;
+  /** draft | approved | invite_sent | sent | replied | pending */
+  status?: string;
+  account_id?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listSearchLeads = (params: SearchLeadListFilters = {}) =>
+  api
+    .get<Page<SearchLeadRow>>("/api/linkedin-search", { params })
+    .then((r) => r.data);
+
+/** Run the LinkedIn people search and store the results, in the background. */
+export const runLinkedInSearch = (payload: {
+  filters: SearchFilters;
+  api?: string;
+  pages?: number;
+  accountId?: string;
+}) =>
+  api
+    .post<{
+      started: boolean;
+      search_key?: string;
+      message: string;
+    }>("/api/linkedin-search/run", {
+      filters: payload.filters,
+      api: payload.api ?? "classic",
+      pages: payload.pages ?? 1,
+      account_id: payload.accountId || undefined,
+    })
+    .then((r) => r.data);
+
+/** Draft messages for search results not yet drafted for this text.
+ *
+ *  `target` means "finish with this many in total"; `limit` means "add this
+ *  many more" — the same two meanings the followers tab uses. */
+export const draftAllSearchLeads = (payload: {
+  filters: SearchFilters;
+  message: string;
+  principalId: number;
+  invitationNote?: string;
+  accountId?: string;
+  limit?: number;
+  target?: number;
+}) =>
+  api
+    .post<{
+      started: boolean;
+      candidates: number;
+      message: string;
+    }>("/api/linkedin-search/draft-all", {
+      filters: payload.filters,
+      message: payload.message,
+      principal_id: payload.principalId,
+      invitation_note: payload.invitationNote || undefined,
+      account_id: payload.accountId || undefined,
+      limit: payload.limit,
+      target: payload.target,
+    })
+    .then((r) => r.data);
+
+export const approveAllSearchLeads = (payload: {
+  filters: SearchFilters;
+  message: string;
+  accountId?: string;
+}) =>
+  api
+    .post<{ approved: number }>("/api/linkedin-search/approve-all", {
+      filters: payload.filters,
+      message: payload.message,
+      account_id: payload.accountId || undefined,
+    })
+    .then((r) => r.data);
+
+export const sendAllSearchLeads = (payload: {
+  filters: SearchFilters;
+  message: string;
+  accountId?: string;
+}) =>
+  api
+    .post<{ started: boolean; matched: number; message: string }>(
+      "/api/linkedin-search/send-all",
+      {
+        filters: payload.filters,
+        message: payload.message,
+        account_id: payload.accountId || undefined,
+      }
+    )
+    .then((r) => r.data);
+
+export const stopSearchJob = () =>
+  api
+    .post<{ stopped: boolean; message: string }>("/api/linkedin-search/stop")
+    .then((r) => r.data);
