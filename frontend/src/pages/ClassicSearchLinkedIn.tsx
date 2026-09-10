@@ -223,6 +223,97 @@ function IdPicker({
   );
 }
 
+/**
+ * Several plain-text values, entered as chips.
+ *
+ * Unlike IdPicker there is nothing to resolve — LinkedIn accepts job titles as
+ * free text — so this just collects what you type. Enter or comma commits one.
+ */
+function TagInput({
+  label,
+  hint,
+  placeholder,
+  values,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  hint?: string;
+  placeholder?: string;
+  values: string[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const [term, setTerm] = useState("");
+
+  const commit = (raw: string) => {
+    const value = raw.trim().replace(/,+$/, "").trim();
+    // Case-insensitive duplicate check: the same title twice is one filter, and
+    // sending it twice would make an identical search hash differently.
+    if (!value || values.some((v) => v.toLowerCase() === value.toLowerCase())) {
+      setTerm("");
+      return;
+    }
+    onChange([...values, value]);
+    setTerm("");
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </label>
+      {values.length > 0 && (
+        <div className="mb-1 mt-1 flex flex-wrap gap-1">
+          {values.map((value) => (
+            <span
+              key={value}
+              className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700"
+            >
+              {value}
+              <button
+                type="button"
+                className="text-slate-400 hover:text-slate-700"
+                onClick={() => onChange(values.filter((v) => v !== value))}
+                disabled={disabled}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        value={term}
+        onChange={(e) => {
+          // A pasted comma-separated list becomes chips rather than one long
+          // value that matches nobody.
+          if (e.target.value.includes(",")) {
+            e.target.value.split(",").forEach(commit);
+            return;
+          }
+          setTerm(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit(term);
+          } else if (e.key === "Backspace" && !term && values.length > 0) {
+            onChange(values.slice(0, -1));
+          }
+        }}
+        // Committing on blur too: leaving a typed title in the box and pressing
+        // Search would otherwise silently drop it.
+        onBlur={() => commit(term)}
+        placeholder={placeholder}
+        disabled={disabled}
+        className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+      />
+      {hint && <p className="mt-1 text-[11px] text-slate-500">{hint}</p>}
+    </div>
+  );
+}
+
 function ProgressBar({ progress }: { progress: SearchProgress }) {
   const total = Math.max(0, progress.total);
   const done = Math.max(0, progress.done);
@@ -361,7 +452,10 @@ export default function ClassicSearchLinkedIn() {
   // --- filters -----------------------------------------------------------
   const [api, setApi] = usePersistedState<string>("search:api", "classic");
   const [keywords, setKeywords] = usePersistedState<string>("search:keywords", "");
-  const [jobTitle, setJobTitle] = usePersistedState<string>("search:jobTitle", "");
+  const [jobTitles, setJobTitles] = usePersistedState<string[]>(
+    "search:jobTitles",
+    []
+  );
   const [seniority, setSeniority] = usePersistedState<string[]>("search:seniority", []);
   const [headcount, setHeadcount] = usePersistedState<string[]>("search:headcount", []);
   const [degrees, setDegrees] = usePersistedState<number[]>("search:degrees", []);
@@ -405,14 +499,14 @@ export default function ClassicSearchLinkedIn() {
   const filters: SearchFilters = useMemo(() => {
     const out: SearchFilters = {};
     if (keywords.trim()) out.keywords = keywords.trim();
-    if (jobTitle.trim()) out.job_title = jobTitle.trim();
+    if (jobTitles.length) out.job_titles = jobTitles;
     if (salesNav && seniority.length) out.seniority = seniority;
     if (salesNav && headcount.length) out.company_headcount = headcount;
     if (degrees.length) out.network_distance = degrees;
     if (industry.length) out.industry = industry.map((o) => o.id);
     if (location.length) out.location = location.map((o) => o.id);
     return out;
-  }, [keywords, jobTitle, seniority, headcount, degrees, industry, location, salesNav]);
+  }, [keywords, jobTitles, seniority, headcount, degrees, industry, location, salesNav]);
 
   const hasFilters = Object.keys(filters).length > 0;
 
@@ -718,18 +812,18 @@ export default function ClassicSearchLinkedIn() {
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
             />
           </div>
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Job title
-            </label>
-            <input
-              value={jobTitle}
-              onChange={(e) => setJobTitle(e.target.value)}
-              disabled={busy}
-              placeholder="e.g. Chief Executive Officer"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-            />
-          </div>
+          <TagInput
+            label="Job titles"
+            placeholder="e.g. Chief Operating Officer — press Enter to add another"
+            values={jobTitles}
+            onChange={setJobTitles}
+            disabled={busy}
+            hint={
+              salesNav
+                ? "Anyone holding any of these titles matches."
+                : "Classic search takes one title box, so several are joined with OR."
+            }
+          />
           {/* The id namespaces differ per API — classic resolves LOCATION and
               INDUSTRY, Sales Navigator resolves REGION and SALES_INDUSTRY — so
               the picker asks for the right type and the selections are cleared
