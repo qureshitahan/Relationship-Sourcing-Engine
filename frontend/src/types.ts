@@ -582,6 +582,9 @@ export interface SearchStatus {
   accounts: { id: string; name?: string | null; status?: string | null }[];
   campaign_key?: string | null;
   stats?: SearchStats | null;
+  /** Server-side truncation point for the invitation note. Read from here so the
+   *  page can never promise a length the backend then trims away. */
+  invite_note_max_chars?: number;
 }
 
 /** Live state of the running search / draft / send job. */

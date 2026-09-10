@@ -241,6 +241,10 @@ def search_status(
         "accounts": accounts,
         "campaign_key": None,
         "stats": None,
+        # Served rather than hard-coded in the page. The invitation note is
+        # truncated to this server-side, and a page that promised a different
+        # number would silently swallow the tail of what was typed.
+        "invite_note_max_chars": int(settings.linkedin_invite_note_max_chars),
     }
     if not account_id:
         return payload
