@@ -319,6 +319,8 @@ def generate_copy(payload: SearchCopyRequest):
             note_max_chars=int(settings.linkedin_invite_note_max_chars),
             job_titles=payload.job_titles,
             keywords=payload.keywords,
+            avoid_note=payload.avoid_note,
+            avoid_message=payload.avoid_message,
         )
     except linkedin_copy.CopyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

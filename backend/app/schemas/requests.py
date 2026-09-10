@@ -402,6 +402,10 @@ class SearchCopyRequest(BaseModel):
     #: makes it land, and the user has already said it by picking them.
     job_titles: Optional[list[str]] = None
     keywords: Optional[str] = None
+    #: What the boxes hold right now, when this is a re-roll. Sent so the model
+    #: is asked for a different angle instead of returning near-identical copy.
+    avoid_note: Optional[str] = None
+    avoid_message: Optional[str] = None
 
 
 class SearchActionRequest(BaseModel):

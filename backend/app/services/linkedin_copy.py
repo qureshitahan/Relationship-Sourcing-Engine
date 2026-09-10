@@ -66,8 +66,14 @@ Write like a person, not a brochure. Concrete beats clever: name the actual work
 being automated or the actual problem being solved rather than talking about
 "solutions" and "synergies". No hype adjectives.
 
-Respond with ONLY a JSON object, no prose around it, no code fences:
-{{"invitation_note": "...", "message": "..."}}"""
+Reply in EXACTLY this shape, with nothing before, after, or between except the
+text itself. No JSON, no code fences, no commentary:
+
+===NOTE===
+the invitation note
+===MESSAGE===
+the message
+==="""
 
 
 def _client():
@@ -82,22 +88,36 @@ def _client():
 
 
 def _parse(text: str) -> dict:
-    """Pull the JSON object out of the reply.
+    """Split the reply on its two markers.
 
-    Fenced or prefaced output still parses: the model is told not to do either,
-    but a rejected draft because of a stray ``` is a worse outcome than being
-    lenient here.
+    Deliberately NOT JSON. The message is several paragraphs, and a model that
+    puts a real newline inside a JSON string produces invalid JSON — which is
+    exactly how the first regenerate failed. Markers cannot be broken by the
+    content between them.
+
+    A JSON object is still accepted, because older replies and retries sometimes
+    come back that way and rejecting one would lose a perfectly good draft.
     """
-    cleaned = text.strip()
+    cleaned = (text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned).strip()
-    try:
-        return json.loads(cleaned)
-    except (TypeError, ValueError):
-        pass
+
+    match = re.search(
+        r"===\s*NOTE\s*===(.*?)===\s*MESSAGE\s*===(.*?)(?:===\s*$|$)",
+        cleaned,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if match:
+        return {
+            "invitation_note": match.group(1).strip(),
+            "message": match.group(2).strip().rstrip("="). strip(),
+        }
+
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start >= 0 and end > start:
         try:
-            return json.loads(cleaned[start : end + 1])
+            parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
         except (TypeError, ValueError):
             pass
     raise CopyError("The model did not return usable copy. Try again.")
@@ -109,6 +129,8 @@ def generate_copy(
     note_max_chars: int,
     job_titles: Optional[list[str]] = None,
     keywords: Optional[str] = None,
+    avoid_note: Optional[str] = None,
+    avoid_message: Optional[str] = None,
 ) -> dict:
     """Draft an invitation note and a message from a campaign goal.
 
@@ -126,29 +148,60 @@ def generate_copy(
     if (keywords or "").strip():
         audience.append(f"Search keywords: {keywords.strip()}")
 
-    user = goal if not audience else goal + "\n\n" + "\n".join(audience)
-
-    try:
-        client = _client()
-        resp = client.messages.create(
-            model=settings.linkedin_copy_model,
-            max_tokens=2000,
-            system=SYSTEM.format(note_max=note_max_chars),
-            messages=[{"role": "user", "content": user}],
-        )
-    except CopyError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - surfaced to the user, not swallowed
-        logger.warning("LinkedIn copy generation failed: %s", exc)
-        # Feeds the provider banner, so an exhausted key says so app-wide rather
-        # than looking like this one button is broken.
-        detail = inspect_anthropic_exception(exc)
-        raise CopyError(detail or f"Claude could not be reached: {exc}") from exc
-
-    text = "".join(
-        block.text for block in resp.content if getattr(block, "type", None) == "text"
+    parts = [goal] + audience
+    # A re-roll shows the model what it already wrote and asks for a different
+    # take. Without this the same goal produces near-identical copy, and
+    # pressing Regenerate looks like it did nothing.
+    previous = "\n".join(
+        p for p in [(avoid_note or "").strip(), (avoid_message or "").strip()] if p
     )
-    parsed = _parse(text)
+    if previous:
+        parts.append(
+            "You already wrote the version below and it was not wanted. Write a "
+            "genuinely different one: a different opening, a different angle on "
+            "the offer, different sentences. Do not reuse its phrasing.\n\n"
+            + previous
+        )
+    user = "\n\n".join(parts)
+
+    client = _client()
+
+    def _ask(content: str):
+        try:
+            return client.messages.create(
+                model=settings.linkedin_copy_model,
+                max_tokens=2000,
+                system=SYSTEM.format(note_max=note_max_chars),
+                messages=[{"role": "user", "content": content}],
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced, not swallowed
+            logger.warning("LinkedIn copy generation failed: %s", exc)
+            # Feeds the provider banner, so an exhausted key says so app-wide
+            # rather than looking like this one button is broken.
+            detail = inspect_anthropic_exception(exc)
+            raise CopyError(detail or f"Claude could not be reached: {exc}") from exc
+
+    def _text(resp) -> str:
+        return "".join(
+            b.text for b in resp.content if getattr(b, "type", None) == "text"
+        )
+
+    # One retry on an unreadable reply. The reply shape is occasionally off
+    # (a stray preamble, JSON instead of the markers), and a re-press costs the
+    # user a round trip to fix something they did nothing wrong to cause.
+    try:
+        parsed = _parse(_text(_ask(user)))
+    except CopyError:
+        logger.info("Copy reply was unreadable; retrying once with a stricter nudge")
+        parsed = _parse(
+            _text(
+                _ask(
+                    user
+                    + "\n\nReply with the ===NOTE=== and ===MESSAGE=== "
+                    "markers exactly as instructed, and nothing else at all."
+                )
+            )
+        )
     record_provider_success("anthropic")
 
     note = " ".join(str(parsed.get("invitation_note") or "").split()).strip()

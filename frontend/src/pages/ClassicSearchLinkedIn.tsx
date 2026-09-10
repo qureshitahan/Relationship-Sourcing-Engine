@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePersistedState } from "../hooks/usePersistedState";
+import { useAccountScopedState } from "../hooks/useAccountScopedState";
 import {
   approveAllSearchLeads,
   createLinkedInConnectLink,
@@ -411,37 +412,49 @@ export default function ClassicSearchLinkedIn() {
     ""
   );
 
+  // Everything below belongs to ONE account. The server already scopes leads and
+  // counts by account; without scoping the boxes too, switching left the previous
+  // account's filters and message sitting above the new account's (empty)
+  // results, which reads as a fault rather than as a switch. Empty until the
+  // account is known — nothing can be typed before then, because the page renders
+  // a spinner until status loads.
+  const scopeId = tabAccountId;
+
   // --- filters -----------------------------------------------------------
-  const [api, setApi] = usePersistedState<string>("search:api", "classic");
-  const [keywords, setKeywords] = usePersistedState<string>("search:keywords", "");
-  const [jobTitles, setJobTitles] = usePersistedState<string[]>(
-    "search:jobTitles",
+  const [api, setApi] = useAccountScopedState<string>("api", scopeId, "classic");
+  const [keywords, setKeywords] = useAccountScopedState<string>("keywords", scopeId, "");
+  const [jobTitles, setJobTitles] = useAccountScopedState<string[]>(
+    "jobTitles",
+    scopeId,
     []
   );
-  const [seniority, setSeniority] = usePersistedState<string[]>("search:seniority", []);
-  const [headcount, setHeadcount] = usePersistedState<string[]>("search:headcount", []);
-  const [degrees, setDegrees] = usePersistedState<number[]>("search:degrees", []);
-  const [industry, setIndustry] = usePersistedState<SearchParameterOption[]>(
-    "search:industry",
+  const [seniority, setSeniority] = useAccountScopedState<string[]>("seniority", scopeId, []);
+  const [headcount, setHeadcount] = useAccountScopedState<string[]>("headcount", scopeId, []);
+  const [degrees, setDegrees] = useAccountScopedState<number[]>("degrees", scopeId, []);
+  const [industry, setIndustry] = useAccountScopedState<SearchParameterOption[]>(
+    "industry",
+    scopeId,
     []
   );
-  const [location, setLocation] = usePersistedState<SearchParameterOption[]>(
-    "search:location",
+  const [location, setLocation] = useAccountScopedState<SearchParameterOption[]>(
+    "location",
+    scopeId,
     []
   );
 
   // --- message -----------------------------------------------------------
   // The message IS the campaign: its text decides which people belong together
   // and who has already been contacted, so it must survive a refresh.
-  const [message, setMessage] = usePersistedState<string>("search:message", "");
-  const [activeMessage, setActiveMessage] = usePersistedState<string>(
-    "search:activeMessage",
+  const [message, setMessage] = useAccountScopedState<string>("message", scopeId, "");
+  const [activeMessage, setActiveMessage] = useAccountScopedState<string>(
+    "activeMessage",
+    scopeId,
     ""
   );
-  const [inviteNote, setInviteNote] = usePersistedState<string>("search:inviteNote", "");
+  const [inviteNote, setInviteNote] = useAccountScopedState<string>("inviteNote", scopeId, "");
   // What the copy is drafted FROM. Kept separately from the two boxes, and never
   // sent to anybody — only the boxes below are transmitted.
-  const [goal, setGoal] = usePersistedState<string>("search:goal", "");
+  const [goal, setGoal] = useAccountScopedState<string>("goal", scopeId, "");
   const [draftLimit, setDraftLimit] = usePersistedState<string>("search:draftLimit", "50");
   const [appendCount, setAppendCount] = usePersistedState<string>("search:append", "");
 
@@ -486,7 +499,7 @@ export default function ClassicSearchLinkedIn() {
   // The search key the server assigned to the last run, so the counts and the
   // list scope to the filters actually searched rather than to whatever is
   // currently typed in the boxes.
-  const [searchKey, setSearchKey] = usePersistedState<string>("search:key", "");
+  const [searchKey, setSearchKey] = useAccountScopedState<string>("key", scopeId, "");
 
   const { data: status, isLoading: statusLoading } = useQuery({
     queryKey: ["linkedin-search", "status", activeMessage, tabAccountId, searchKey],
@@ -544,6 +557,12 @@ export default function ClassicSearchLinkedIn() {
 
   const accounts = status?.accounts ?? [];
   const activeId = status?.active_account_id ?? null;
+  useEffect(() => {
+    // Pin whatever the server had selected the first time it is known. Without
+    // this the page's state would sit under a placeholder key until someone
+    // picked an account by hand, and would not be per-account at all.
+    if (!tabAccountId && activeId) setTabAccountId(activeId);
+  }, [tabAccountId, activeId, setTabAccountId]);
   useEffect(() => {
     // A pin naming an account that is no longer connected clears itself, rather
     // than leaving the page pointed at nothing.
@@ -612,12 +631,18 @@ export default function ClassicSearchLinkedIn() {
     onError: () => setNote("Could not start the search."),
   });
 
+  const hasCopy = Boolean(message.trim() || inviteNote.trim());
+
   const generate = useMutation({
-    mutationFn: () =>
+    // `fresh` throws away what is in the boxes; the default hands it to the
+    // model as "not this" so a re-roll actually reads differently.
+    mutationFn: ({ fresh }: { fresh: boolean }) =>
       generateSearchCopy({
         goal,
         jobTitles: jobTitles.length ? jobTitles : undefined,
         keywords: keywords.trim() || undefined,
+        avoidNote: fresh ? undefined : inviteNote,
+        avoidMessage: fresh ? undefined : message,
       }),
     onSuccess: (data) => {
       // Straight into the boxes, where it can be read and edited. Committing the
@@ -989,15 +1014,38 @@ export default function ClassicSearchLinkedIn() {
           <div className="mt-2 flex flex-wrap items-center gap-3">
             <Button
               variant="secondary"
-              onClick={() => generate.mutate()}
+              onClick={() => generate.mutate({ fresh: !hasCopy })}
               disabled={busy || generate.isPending || !goal.trim()}
-              title="Write the invitation note and the message from this goal"
+              title={
+                hasCopy
+                  ? "Write a different version — the current one is shown to the model as what NOT to repeat"
+                  : "Write the invitation note and the message from this goal"
+              }
             >
-              {generate.isPending ? "Drafting…" : "Draft with AI"}
+              {generate.isPending
+                ? "Drafting…"
+                : hasCopy
+                  ? "Regenerate"
+                  : "Draft with AI"}
             </Button>
+            {hasCopy && (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setMessage("");
+                  setInviteNote("");
+                  setNote("Cleared. Write them yourself, or draft again.");
+                }}
+                disabled={busy || generate.isPending}
+                title="Empty both boxes"
+              >
+                Clear copy
+              </Button>
+            )}
             <span className="text-[11px] text-slate-500">
-              Fills the two boxes below — both stay editable, and nothing is sent
-              until you press Send.
+              {hasCopy
+                ? "Regenerate writes a different version — it will not repeat what is below."
+                : "Fills the two boxes below — both stay editable, and nothing is sent until you press Send."}
             </span>
           </div>
         </div>
