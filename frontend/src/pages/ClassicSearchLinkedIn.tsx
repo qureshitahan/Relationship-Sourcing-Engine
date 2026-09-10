@@ -30,6 +30,12 @@ import {
   PageHeader,
   StatusBadge,
 } from "../components/ui";
+import { MultiSelectDropdown } from "../components/MultiSelectDropdown";
+import {
+  INDUSTRY_PRESETS,
+  JOB_TITLE_OPTIONS,
+  LOCATION_PRESETS,
+} from "../constants/linkedinSearchOptions";
 
 /** Tabs over the leads list. `pending` is "found, but no message written yet". */
 const STATUS_TABS = [
@@ -135,6 +141,7 @@ function IdPicker({
   selected,
   onChange,
   disabled,
+  presets = [],
 }: {
   label: string;
   kind: string;
@@ -142,9 +149,35 @@ function IdPicker({
   selected: SearchParameterOption[];
   onChange: (next: SearchParameterOption[]) => void;
   disabled?: boolean;
+  /** Common values offered as one-click chips. Held as SEARCH TERMS, not ids:
+   *  the id for "United States" differs between classic and Sales Navigator, so
+   *  a click resolves it in whichever mode is active instead of storing one. */
+  presets?: string[];
 }) {
   const [term, setTerm] = useState("");
   const [open, setOpen] = useState(false);
+  const [resolving, setResolving] = useState<string | null>(null);
+
+  const addPreset = async (preset: string) => {
+    setResolving(preset);
+    try {
+      const options = await getSearchParameters(kind, preset, accountId);
+      // Prefer an exact title match; LinkedIn often returns narrower entries
+      // first ("California, United States" ahead of "United States").
+      const exact = options.find(
+        (o) => o.title.toLowerCase() === preset.toLowerCase()
+      );
+      const pick = exact ?? options[0];
+      if (pick && !selected.some((sel) => sel.id === pick.id)) {
+        onChange([...selected, pick]);
+      }
+    } catch {
+      // A lookup that fails leaves the filter untouched rather than adding a
+      // value LinkedIn would ignore.
+    } finally {
+      setResolving(null);
+    }
+  };
   const { data: options, isFetching } = useQuery({
     queryKey: ["linkedin-search", "parameters", kind, term, accountId],
     queryFn: () => getSearchParameters(kind, term, accountId),
@@ -192,6 +225,24 @@ function IdPicker({
         disabled={disabled}
         className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
       />
+      {presets.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {presets
+            .filter((p) => !selected.some((sel) => sel.title === p))
+            .slice(0, 8)
+            .map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                disabled={disabled || resolving !== null}
+                onClick={() => addPreset(preset)}
+                className="rounded-full border border-dashed border-slate-300 px-2 py-0.5 text-[11px] text-slate-500 hover:border-slate-400 hover:text-slate-700 disabled:opacity-50"
+              >
+                {resolving === preset ? "adding…" : `+ ${preset}`}
+              </button>
+            ))}
+        </div>
+      )}
       {open && term.trim().length >= 2 && (
         <div className="absolute z-20 mt-1 max-h-48 w-full overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
           {isFetching && (
@@ -219,97 +270,6 @@ function IdPicker({
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-/**
- * Several plain-text values, entered as chips.
- *
- * Unlike IdPicker there is nothing to resolve — LinkedIn accepts job titles as
- * free text — so this just collects what you type. Enter or comma commits one.
- */
-function TagInput({
-  label,
-  hint,
-  placeholder,
-  values,
-  onChange,
-  disabled,
-}: {
-  label: string;
-  hint?: string;
-  placeholder?: string;
-  values: string[];
-  onChange: (next: string[]) => void;
-  disabled?: boolean;
-}) {
-  const [term, setTerm] = useState("");
-
-  const commit = (raw: string) => {
-    const value = raw.trim().replace(/,+$/, "").trim();
-    // Case-insensitive duplicate check: the same title twice is one filter, and
-    // sending it twice would make an identical search hash differently.
-    if (!value || values.some((v) => v.toLowerCase() === value.toLowerCase())) {
-      setTerm("");
-      return;
-    }
-    onChange([...values, value]);
-    setTerm("");
-  };
-
-  return (
-    <div>
-      <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-        {label}
-      </label>
-      {values.length > 0 && (
-        <div className="mb-1 mt-1 flex flex-wrap gap-1">
-          {values.map((value) => (
-            <span
-              key={value}
-              className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700"
-            >
-              {value}
-              <button
-                type="button"
-                className="text-slate-400 hover:text-slate-700"
-                onClick={() => onChange(values.filter((v) => v !== value))}
-                disabled={disabled}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <input
-        value={term}
-        onChange={(e) => {
-          // A pasted comma-separated list becomes chips rather than one long
-          // value that matches nobody.
-          if (e.target.value.includes(",")) {
-            e.target.value.split(",").forEach(commit);
-            return;
-          }
-          setTerm(e.target.value);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            commit(term);
-          } else if (e.key === "Backspace" && !term && values.length > 0) {
-            onChange(values.slice(0, -1));
-          }
-        }}
-        // Committing on blur too: leaving a typed title in the box and pressing
-        // Search would otherwise silently drop it.
-        onBlur={() => commit(term)}
-        placeholder={placeholder}
-        disabled={disabled}
-        className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-      />
-      {hint && <p className="mt-1 text-[11px] text-slate-500">{hint}</p>}
     </div>
   );
 }
@@ -812,16 +772,16 @@ export default function ClassicSearchLinkedIn() {
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
             />
           </div>
-          <TagInput
+          <MultiSelectDropdown
             label="Job titles"
-            placeholder="e.g. Chief Operating Officer — press Enter to add another"
-            values={jobTitles}
+            selected={jobTitles}
             onChange={setJobTitles}
-            disabled={busy}
+            options={JOB_TITLE_OPTIONS}
+            placeholder="Pick from the list, or type any title…"
             hint={
               salesNav
-                ? "Anyone holding any of these titles matches."
-                : "Classic search takes one title box, so several are joined with OR."
+                ? "Anyone holding any of these titles matches. The list is a starting point — type anything."
+                : "Classic search takes one title box, so several are joined with OR. Type anything."
             }
           />
           {/* The id namespaces differ per API — classic resolves LOCATION and
@@ -835,6 +795,7 @@ export default function ClassicSearchLinkedIn() {
             selected={location}
             onChange={setLocation}
             disabled={busy}
+            presets={LOCATION_PRESETS}
           />
           <IdPicker
             label="Industry"
@@ -843,6 +804,7 @@ export default function ClassicSearchLinkedIn() {
             selected={industry}
             onChange={setIndustry}
             disabled={busy}
+            presets={INDUSTRY_PRESETS}
           />
         </div>
 
