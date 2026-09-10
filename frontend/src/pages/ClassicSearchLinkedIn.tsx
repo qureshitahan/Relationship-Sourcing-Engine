@@ -455,8 +455,11 @@ export default function ClassicSearchLinkedIn() {
   // What the copy is drafted FROM. Kept separately from the two boxes, and never
   // sent to anybody — only the boxes below are transmitted.
   const [goal, setGoal] = useAccountScopedState<string>("goal", scopeId, "");
-  const [draftLimit, setDraftLimit] = usePersistedState<string>("search:draftLimit", "50");
-  const [appendCount, setAppendCount] = usePersistedState<string>("search:append", "");
+  // ONE number, meaning "this many MORE" — the same simplification the Followers
+  // tab got. A target total plus a separate Append box meant remembering how many
+  // already existed and doing the arithmetic, and the total silently did nothing
+  // once reached. Defaults to the daily cap, which is all that can go out today.
+  const [howMany, setHowMany] = useAccountScopedState<string>("howMany", scopeId, "50");
 
   const salesNav = api === "sales_navigator";
 
@@ -675,22 +678,36 @@ export default function ClassicSearchLinkedIn() {
     return text;
   };
 
+  // Set while a "draft, approve & send" press is in flight.
+  const chainSend = useRef(false);
+  const [chainPending, setChainPending] = useState(false);
+
   const draft = useMutation({
-    mutationFn: ({ text, append }: { text: string; append?: number }) =>
+    // `limit` is "add this many more". The endpoint's `target` (a total) is no
+    // longer sent from here.
+    mutationFn: (text: string) =>
       draftAllSearchLeads({
         filters,
         message: text,
         principalId: attributedPrincipal?.id as number,
         invitationNote: inviteNote.trim() || undefined,
         accountId: tabAccountId || undefined,
-        ...(append ? { limit: append } : {}),
-        ...(!append && Number(draftLimit) > 0 ? { target: Number(draftLimit) } : {}),
+        ...(Number(howMany) > 0 ? { limit: Number(howMany) } : {}),
       }),
     onSuccess: (data) => {
       setNote(data.message);
+      // Nothing queued, so there will be no "drafting finished" to send on.
+      if (!data.started) {
+        chainSend.current = false;
+        setChainPending(false);
+      }
       invalidate();
     },
-    onError: () => setNote("Could not start drafting."),
+    onError: () => {
+      setNote("Could not start drafting.");
+      chainSend.current = false;
+      setChainPending(false);
+    },
   });
 
   const approve = useMutation({
@@ -716,10 +733,50 @@ export default function ClassicSearchLinkedIn() {
       }),
     onSuccess: (data) => {
       setNote(data.message);
+      setChainPending(false);
       invalidate();
     },
-    onError: () => setNote("Could not start sending."),
+    onError: () => {
+      setNote("Could not start sending.");
+      setChainPending(false);
+    },
   });
+
+  // "Draft, approve & send" in one press. The send waits for the DRAFTING to
+  // finish, not merely to start: the draft endpoint returns as soon as the job
+  // is queued, so sending immediately would find nothing to send.
+  const draftWasRunning = useRef(false);
+  useEffect(() => {
+    if (running && progress?.job === "draft") {
+      draftWasRunning.current = true;
+      return;
+    }
+    if (!draftWasRunning.current || running) return;
+    draftWasRunning.current = false;
+    if (!chainSend.current) return;
+    chainSend.current = false;
+    // A drafting run that failed or was stopped does not roll on into sending.
+    if (progress?.status === "done" && activeMessage) {
+      send.mutate(activeMessage);
+    } else {
+      setChainPending(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, progress?.job, progress?.status, activeMessage]);
+
+  const startDrafting = (andSend: boolean) => {
+    const text = requireMessage();
+    if (!text) return;
+    if (!attributedPrincipal) {
+      setNote(
+        "Add a principal on the Principals page first — drafts are filed against one."
+      );
+      return;
+    }
+    chainSend.current = andSend;
+    setChainPending(andSend);
+    draft.mutate(text);
+  };
 
   const stop = useMutation({
     mutationFn: stopSearchJob,
@@ -731,6 +788,7 @@ export default function ClassicSearchLinkedIn() {
 
   const busy =
     running ||
+    chainPending ||
     search.isPending ||
     draft.isPending ||
     approve.isPending ||
@@ -1119,71 +1177,44 @@ export default function ClassicSearchLinkedIn() {
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Draft how many{" "}
-              <span className="normal-case text-slate-400">(total)</span>
+              How many{" "}
+              <span className="normal-case text-slate-400">(more)</span>
             </label>
             <input
               type="number"
               min={1}
-              value={draftLimit}
-              onChange={(e) => setDraftLimit(e.target.value)}
+              value={howMany}
+              onChange={(e) => setHowMany(e.target.value)}
               disabled={busy}
               className="mt-1 w-24 rounded-md border border-slate-300 px-3 py-2 text-sm"
-              title="How many people to prepare this message for, in total. Blank = everyone found."
+              title="How many MORE people to prepare this message for. Blank = everyone still eligible."
             />
           </div>
           <Button
-            onClick={() => {
-              const text = requireMessage();
-              if (!text) return;
-              if (!attributedPrincipal) {
-                setNote(
-                  "Add a principal on the Principals page first — drafts are filed against one."
-                );
-                return;
-              }
-              draft.mutate({ text });
-            }}
+            onClick={() => startDrafting(false)}
             disabled={busy || !activeId || !hasFilters}
+            title="Prepare this many more messages. Nothing is sent."
           >
             {progress?.job === "draft" && running
               ? "Drafting…"
-              : Number(draftLimit) > 0
-                ? `Draft ${Number(draftLimit)}`
+              : Number(howMany) > 0
+                ? `Draft ${Number(howMany)}`
                 : stats
                   ? `Draft all (${stats.eligible})`
                   : "Draft all"}
           </Button>
-
-          {/* The explicit "more" control, separate so the box above keeps
-              meaning a total — one number cannot mean both. */}
-          <label className="flex items-center gap-1.5">
-            <span className="text-xs font-medium text-slate-500">Append</span>
-            <input
-              type="number"
-              min={1}
-              value={appendCount}
-              placeholder="0"
-              onChange={(e) => setAppendCount(e.target.value)}
-              disabled={busy}
-              className="w-20 rounded-md border border-slate-300 px-2 py-2 text-sm"
-              title="Draft this many MORE, on top of what already exists."
-            />
-          </label>
+          {/* The whole routine in one press: draft, approve, then send as many
+              as today's cap allows — same capped, paced, checkpointed path. */}
           <Button
-            variant="secondary"
-            onClick={() => {
-              const text = requireMessage();
-              if (!text) return;
-              if (!attributedPrincipal) {
-                setNote("Add a principal on the Principals page first.");
-                return;
-              }
-              draft.mutate({ text, append: Number(appendCount) });
-            }}
-            disabled={busy || !activeId || !(Number(appendCount) > 0)}
+            onClick={() => startDrafting(true)}
+            disabled={busy || !activeId || !hasFilters}
+            title="Draft this many more, approve them, and send as many as today's cap allows"
           >
-            {Number(appendCount) > 0 ? `Append ${Number(appendCount)}` : "Append"}
+            {chainPending
+              ? "Working…"
+              : Number(howMany) > 0
+                ? `Draft, approve & send ${Number(howMany)}`
+                : "Draft, approve & send"}
           </Button>
           <Button
             variant="secondary"
@@ -1229,16 +1260,13 @@ export default function ClassicSearchLinkedIn() {
         {/* The number above is a target TOTAL, which reads like "add this many"
             right up until it quietly does nothing. Say the arithmetic out loud
             rather than leaving it to a tooltip. */}
-        {Number(draftLimit) > 0 && stats && (
+        {Number(howMany) > 0 && stats && (
           <p className="mt-2 text-xs text-slate-500">
-            &ldquo;Draft {Number(draftLimit)}&rdquo; means finish with{" "}
-            {Number(draftLimit)} in total for this message, not {Number(draftLimit)}{" "}
-            more.{" "}
-            {stats.all >= Number(draftLimit)
-              ? `You already have ${stats.all}, so it will do nothing — use Append to add more on top.`
-              : `You have ${stats.all}, so it will draft ${
-                  Number(draftLimit) - stats.all
-                } more.`}
+            &ldquo;{Number(howMany)}&rdquo; means {Number(howMany)} MORE, on top of
+            the {stats.all} already prepared for this message.{" "}
+            {stats.eligible === 0
+              ? "Nobody is left to draft — search again to bring in more people."
+              : `${Math.min(Number(howMany), stats.eligible)} will be drafted (${stats.eligible} still eligible).`}
           </p>
         )}
 

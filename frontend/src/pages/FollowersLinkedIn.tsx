@@ -371,8 +371,13 @@ export default function FollowersLinkedIn() {
   // How many to draft in one go. Defaults to the daily cap because that is all
   // that can actually be sent today; drafting the whole roster would just queue
   // hundreds of DMs that sit unsent and pin them to this campaign.
-  const [draftLimit, setDraftLimit] = usePersistedState<string>(
-    "followers:draftLimit",
+  // ONE number, and it means "this many MORE". There used to be two: a target
+  // total here and an Append box beside it. Nobody should have to remember how
+  // many were already drafted and add to it in their head, and the total box
+  // silently did nothing once it was reached, which read as the button being
+  // broken. Defaults to the daily cap, because that is all that can go out today.
+  const [howMany, setHowMany] = usePersistedState<string>(
+    "followers:howMany",
     "50"
   );
   // The account THIS tab is working with. The server keeps ONE active-account
@@ -538,54 +543,45 @@ export default function FollowersLinkedIn() {
   // again tops up to that many rather than doubling the batch, which is what
   // used to turn "50" into 100 on a second click. Append is the explicit
   // "give me this many more" — the old add-N behaviour, kept but named.
-  const [appendCount, setAppendCount] = usePersistedState<string>(
-    "followers:appendCount",
-    ""
-  );
+
+  // Set while a "draft, approve & send" press is in flight, so the effect below
+  // knows this drafting run should roll on into a send.
+  const chainSend = useRef(false);
+  const [chainPending, setChainPending] = useState(false);
 
   const draftAll = useMutation({
+    // `limit` is "add this many more"; the `target` argument (a total) is never
+    // sent any more. Same endpoint, so nothing else had to change.
     mutationFn: (text: string) =>
       draftAllFollowers(
         text,
         resolvedPrincipalId!,
+        Number(howMany) > 0 ? Number(howMany) : undefined,
         undefined,
-        Number(draftLimit) > 0 ? Number(draftLimit) : undefined,
         activeId ?? undefined
       ),
     onSuccess: (res) => {
       setNote(res.message);
+      // Nothing was queued (already drafted, nobody eligible, a job already
+      // running) — so there will be no "drafting finished" moment to send on.
+      if (!res.started) {
+        chainSend.current = false;
+        setChainPending(false);
+      }
       invalidate();
     },
     onError: (e: unknown) => {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
         ?.detail;
       setNote(String(detail ?? "Could not start drafting."));
+      chainSend.current = false;
+      setChainPending(false);
     },
   });
 
   // Ids only, and intersected with what is on screen before anything is sent —
   // a tick that survived a tab change must never delete a row now out of view.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-
-  const appendDrafts = useMutation({
-    mutationFn: (text: string) =>
-      draftAllFollowers(
-        text,
-        resolvedPrincipalId!,
-        Number(appendCount) > 0 ? Number(appendCount) : undefined,
-        undefined,
-        activeId ?? undefined
-      ),
-    onSuccess: (res) => {
-      setNote(res.message);
-      invalidate();
-    },
-    onError: (e: unknown) => {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
-        ?.detail;
-      setNote(String(detail ?? "Could not start drafting."));
-    },
-  });
 
   const approveAll = useMutation({
     mutationFn: (text: string) => approveAllFollowers(text, activeId ?? undefined),
@@ -604,14 +600,54 @@ export default function FollowersLinkedIn() {
     mutationFn: (text: string) => sendAllFollowers(text, activeId ?? undefined),
     onSuccess: (res) => {
       setNote(res.message);
+      setChainPending(false);
       invalidate();
     },
     onError: (e: unknown) => {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
         ?.detail;
       setNote(String(detail ?? "Could not start sending."));
+      setChainPending(false);
     },
   });
+
+  // "Draft, approve & send" in one press. The send has to wait for the DRAFTING
+  // to finish, not merely to start: the draft endpoint returns as soon as the
+  // background job is queued, so sending immediately would find nothing to send.
+  // Watching the job go from running to finished is the only honest signal.
+  const draftWasRunning = useRef(false);
+  useEffect(() => {
+    if (running && progress?.job === "draft") {
+      draftWasRunning.current = true;
+      return;
+    }
+    if (!draftWasRunning.current || running) return;
+    draftWasRunning.current = false;
+    if (!chainSend.current) return;
+    chainSend.current = false;
+    // A drafting run that failed or was stopped does not roll on into sending —
+    // the point of the chain is convenience, not momentum.
+    if (progress?.status === "done" && activeMessage) {
+      sendAll.mutate(activeMessage);
+    } else {
+      setChainPending(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, progress?.job, progress?.status, activeMessage]);
+
+  const startDrafting = (andSend: boolean) => {
+    const text = requireMessage();
+    if (!text) return;
+    if (!resolvedPrincipalId) {
+      setNote(
+        "Add a principal on the Principals page first — drafts are filed against one."
+      );
+      return;
+    }
+    chainSend.current = andSend;
+    setChainPending(andSend);
+    draftAll.mutate(text);
+  };
 
   const bulkDelete = useMutation({
     mutationFn: (ids: number[]) => deleteLinkedInMessages(ids),
@@ -638,7 +674,12 @@ export default function FollowersLinkedIn() {
   });
 
   const busy =
-    running || sync.isPending || draftAll.isPending || sendAll.isPending || approveAll.isPending;
+    running ||
+    chainPending ||
+    sync.isPending ||
+    draftAll.isPending ||
+    sendAll.isPending ||
+    approveAll.isPending;
   const items = followers?.items ?? [];
   // Preview against a REAL follower from the current list, so the greeting shown
   // is the greeting that will actually be sent.
@@ -799,79 +840,45 @@ export default function FollowersLinkedIn() {
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <div>
             <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Draft how many{" "}
-              <span className="normal-case text-slate-400">(total)</span>
+              How many{" "}
+              <span className="normal-case text-slate-400">(more)</span>
             </label>
             <input
               type="number"
               min={1}
-              value={draftLimit}
-              onChange={(e) => setDraftLimit(e.target.value)}
+              value={howMany}
+              onChange={(e) => setHowMany(e.target.value)}
               className="mt-1 w-24 rounded-md border border-slate-300 px-3 py-2 text-sm"
               disabled={busy}
-              title="How many followers to prepare this message for. Blank = all remaining. Only the daily cap can actually be sent today."
+              title="How many MORE followers to prepare this message for. Blank = everyone still eligible."
             />
           </div>
           <Button
-            onClick={() => {
-              const text = requireMessage();
-              if (!text) return;
-              if (!resolvedPrincipalId) {
-                setNote(
-                  "Add a principal on the Principals page first — drafts are filed against one."
-                );
-                return;
-              }
-              draftAll.mutate(text);
-            }}
+            onClick={() => startDrafting(false)}
             disabled={busy || !activeId}
-            title={
-              Number(draftLimit) > 0
-                ? `Bring this message up to ${Number(draftLimit)} drafts. Pressing it again does nothing until you raise the number or use Append.`
-                : "Prepare your message for every follower who does not have it yet"
-            }
+            title="Prepare this many more DMs. Nothing is sent."
           >
             {progress?.job === "draft" && running
               ? "Drafting…"
-              : Number(draftLimit) > 0
-                ? `Draft ${Number(draftLimit)}`
+              : Number(howMany) > 0
+                ? `Draft ${Number(howMany)}`
                 : stats
                   ? `Draft all (${stats.eligible})`
                   : "Draft all"}
           </Button>
-
-          {/* The explicit "more" control. Separate box so the target above keeps
-              meaning a total — one number cannot mean both. */}
-          <label className="flex items-center gap-1.5">
-            <span className="text-xs font-medium text-slate-500">Append</span>
-            <input
-              type="number"
-              min={1}
-              value={appendCount}
-              placeholder="0"
-              onChange={(e) => setAppendCount(e.target.value)}
-              className="w-20 rounded-md border border-slate-300 px-2 py-2 text-sm"
-              disabled={busy}
-              title="Draft this many MORE, on top of what already exists."
-            />
-          </label>
+          {/* The whole daily routine in one press. It still goes draft ->
+              approve -> send in that order, and the send half is the same
+              capped, paced, checkpointed path as the button beside it. */}
           <Button
-            variant="secondary"
-            onClick={() => {
-              const text = requireMessage();
-              if (!text) return;
-              if (!resolvedPrincipalId) {
-                setNote(
-                  "Add a principal on the Principals page first — drafts are filed against one."
-                );
-                return;
-              }
-              appendDrafts.mutate(text);
-            }}
-            disabled={busy || !activeId || !(Number(appendCount) > 0)}
-            title="Draft this many more, on top of the ones already prepared"
+            onClick={() => startDrafting(true)}
+            disabled={busy || !activeId}
+            title="Draft this many more, approve them, and send as many as today's cap allows"
           >
-            {Number(appendCount) > 0 ? `Append ${Number(appendCount)}` : "Append"}
+            {chainPending
+              ? "Working…"
+              : Number(howMany) > 0
+                ? `Draft, approve & send ${Number(howMany)}`
+                : "Draft, approve & send"}
           </Button>
           <Button
             variant="secondary"
@@ -918,14 +925,13 @@ export default function FollowersLinkedIn() {
         {/* The number above is a target TOTAL, which reads like "add this many"
             right up until it quietly does nothing. Say the arithmetic out loud
             under the button rather than leaving it to a tooltip. */}
-        {Number(draftLimit) > 0 && stats && (
+        {Number(howMany) > 0 && stats && (
           <p className="mt-2 text-xs text-slate-500">
-            &ldquo;Draft {Number(draftLimit)}&rdquo; means finish with{" "}
-            {Number(draftLimit)} draft(s) in total for this message, not{" "}
-            {Number(draftLimit)} more.{" "}
-            {stats.all >= Number(draftLimit)
-              ? `You already have ${stats.all}, so it will do nothing — use Append to add more on top.`
-              : `You have ${stats.all}, so it will draft ${Number(draftLimit) - stats.all} more.`}
+            &ldquo;{Number(howMany)}&rdquo; means {Number(howMany)} MORE, on top of
+            the {stats.all} already prepared for this message.{" "}
+            {stats.eligible === 0
+              ? "Nobody is left to draft — click “Refresh followers” to pick up new ones."
+              : `${Math.min(Number(howMany), stats.eligible)} will be drafted (${stats.eligible} still eligible).`}
           </p>
         )}
 
