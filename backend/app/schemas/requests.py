@@ -344,8 +344,12 @@ class SearchFilters(BaseModel):
     """
 
     keywords: Optional[str] = None
-    #: Job titles, sent as LinkedIn's ``role`` filter.
+    #: One job title, kept so a saved search from before multi-title support
+    #: still parses. New callers send ``job_titles``; both are merged.
     job_title: Optional[str] = None
+    #: Several job titles at once — LinkedIn's ``role`` filter takes a list, so
+    #: "COO" and "VP Operations" can be one search instead of two.
+    job_titles: Optional[list[str]] = None
     #: LinkedIn seniority buckets, e.g. ["Owner", "CXO", "VP", "Director"].
     seniority: Optional[list[str]] = None
     #: Headcount bands, e.g. ["11-50", "51-200"].

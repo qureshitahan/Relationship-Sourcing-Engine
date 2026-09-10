@@ -96,7 +96,19 @@ def _filters_dict(filters: Optional[SearchFilters]) -> dict:
     if filters is None:
         return {}
     raw = filters.model_dump(exclude_none=True)
-    return {key: value for key, value in raw.items() if value not in ("", [], {})}
+    # One title box and a list of them are the same filter; fold them into the
+    # list so everything downstream — including the search key — sees one shape.
+    titles = [
+        title.strip()
+        for title in ([raw.pop("job_title", None)] + list(raw.pop("job_titles", []) or []))
+        if isinstance(title, str) and title.strip()
+    ]
+    cleaned = {key: value for key, value in raw.items() if value not in ("", [], {})}
+    if titles:
+        # Deduplicated but kept in the order they were typed, so the same titles
+        # entered twice do not make a different search.
+        cleaned["job_titles"] = list(dict.fromkeys(titles))
+    return cleaned
 
 
 #: LinkedIn's own seniority ids. The buttons show human labels; the search only
@@ -149,14 +161,20 @@ def _provider_filters(filters: dict, api: str) -> dict:
     if filters.get("keywords"):
         out["keywords"] = filters["keywords"]
 
-    title = (filters.get("job_title") or "").strip()
-    if title:
+    titles = [t for t in (filters.get("job_titles") or []) if t]
+    if titles:
         if sales:
-            # Plain text is accepted by ``role``; an id is only needed for an
-            # exact-match title, which this box does not promise.
-            out["role"] = {"include": [title]}
+            # ``role.include`` is a list and accepts plain text, so several
+            # titles are one search rather than one search each.
+            out["role"] = {"include": titles}
         else:
-            out["advanced_keywords"] = {"title": title}
+            # Classic takes a single title STRING, so several become LinkedIn's
+            # own OR syntax — the same thing you would type into its search box.
+            out["advanced_keywords"] = {
+                "title": titles[0]
+                if len(titles) == 1
+                else " OR ".join(f'"{t}"' for t in titles)
+            }
 
     if filters.get("network_distance"):
         out["network_distance"] = [int(d) for d in filters["network_distance"]]

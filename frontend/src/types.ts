@@ -517,7 +517,9 @@ export interface FollowersProgress {
  *  for those. */
 export interface SearchFilters {
   keywords?: string;
-  job_title?: string;
+  /** Several titles at once — LinkedIn's `role` filter takes a list, so "COO"
+   *  and "VP Operations" are one search rather than two. */
+  job_titles?: string[];
   seniority?: string[];
   company_headcount?: string[];
   industry?: string[];
