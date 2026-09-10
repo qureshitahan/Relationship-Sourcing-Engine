@@ -337,6 +337,11 @@ function LeadRow({ row }: { row: SearchLeadRow }) {
 export default function ClassicSearchLinkedIn() {
   const qc = useQueryClient();
   const [note, setNote] = useState<string | null>(null);
+  // The last job's result is a DB row, so it survives a refresh and sits there
+  // until the next job overwrites it — a failed search kept showing its error
+  // long after it stopped being true. Dismissal is keyed by the summary text,
+  // not a boolean: closing one run's result must not hide the next one's.
+  const [dismissed, setDismissed] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = usePersistedState<string>(
     "search:statusFilter",
     ""
@@ -504,6 +509,10 @@ export default function ClassicSearchLinkedIn() {
   }, [principals, status?.active_account_name]);
 
   const previewName = leads?.items?.[0]?.name ?? null;
+  // Read from the server, never hard-coded: this page used to say 300 while the
+  // backend trimmed at 200, so a long note lost its tail with no warning.
+  const noteMax = status?.invite_note_max_chars ?? 200;
+  const noteLength = inviteNote.trim().length;
 
   const selectAccount = useMutation({
     mutationFn: (id: string) => selectLinkedInAccount(id),
@@ -623,9 +632,16 @@ export default function ClassicSearchLinkedIn() {
       )}
 
       {progress && running && <ProgressBar progress={progress} />}
-      {progress && !running && progress.message && (
-        <div className="flex items-start justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+      {progress && !running && progress.message && dismissed !== progress.message && (
+        <div className="flex items-start justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
           <span>{progress.message}</span>
+          <button
+            type="button"
+            onClick={() => setDismissed(progress.message ?? null)}
+            className="shrink-0 text-xs font-medium underline-offset-2 hover:underline"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -844,7 +860,7 @@ export default function ClassicSearchLinkedIn() {
           <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
             Invitation note{" "}
             <span className="normal-case text-slate-400">
-              (optional, max 300 characters)
+              (optional, max {noteMax} characters)
             </span>
           </label>
           <textarea
@@ -855,6 +871,24 @@ export default function ClassicSearchLinkedIn() {
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
             placeholder="Carried by the connection request. Blank = the message above, trimmed."
           />
+          {/* Anything past the limit is cut server-side without an error, so the
+              count is shown rather than left to be discovered in a sent invite. */}
+          <div className="mt-1 flex justify-between text-[11px]">
+            <span className="text-slate-500">
+              LinkedIn caps the note on a connection request. Whatever is blank
+              here falls back to the message above, trimmed to the same length.
+            </span>
+            <span
+              className={
+                noteLength > noteMax ? "font-medium text-rose-600" : "text-slate-400"
+              }
+            >
+              {noteLength}/{noteMax}
+              {noteLength > noteMax
+                ? ` — last ${noteLength - noteMax} will be cut`
+                : ""}
+            </span>
+          </div>
         </div>
 
         {message.trim() && (
