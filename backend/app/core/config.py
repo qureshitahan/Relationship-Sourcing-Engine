@@ -186,6 +186,11 @@ class Settings(BaseSettings):
     llm_provider: str = "anthropic"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
+    # Model that drafts the Classic Search LinkedIn copy from a campaign goal.
+    # Separate from anthropic_model on purpose: that one drives the research and
+    # insight pipeline, and changing it to suit a copywriting box would move
+    # every existing prompt onto a different model.
+    linkedin_copy_model: str = "claude-opus-5"
     # Cheaper model used for writing emails when the optimized pipeline's
     # cheap_draft_model flag is switched on. Research never uses this.
     optimized_draft_model: str = "claude-haiku-4-5"

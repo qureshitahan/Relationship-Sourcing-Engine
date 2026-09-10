@@ -394,6 +394,16 @@ class SearchDraftRequest(BaseModel):
     target: Optional[int] = None
 
 
+class SearchCopyRequest(BaseModel):
+    """Draft the invitation note and message from a campaign goal."""
+
+    goal: str
+    #: The filters already on screen. Who the copy is going to is most of what
+    #: makes it land, and the user has already said it by picking them.
+    job_titles: Optional[list[str]] = None
+    keywords: Optional[str] = None
+
+
 class SearchActionRequest(BaseModel):
     """Approve / send all search messages for one message campaign."""
 
