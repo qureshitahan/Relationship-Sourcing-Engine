@@ -99,28 +99,97 @@ def _filters_dict(filters: Optional[SearchFilters]) -> dict:
     return {key: value for key, value in raw.items() if value not in ("", [], {})}
 
 
-def _provider_filters(filters: dict) -> dict:
-    """Translate our field names into the ones LinkedIn's search expects."""
+#: LinkedIn's own seniority ids. The buttons show human labels; the search only
+#: accepts these exact strings, and silently rejects the whole request otherwise.
+_SENIORITY_IDS = {
+    "Owner": "owner/partner",
+    "Partner": "owner/partner",
+    "CXO": "cxo",
+    "Vice President": "vice_president",
+    "Director": "director",
+    "Manager": "experienced_manager",
+    "Senior": "senior",
+    "Entry": "entry_level",
+}
+
+#: Headcount arrives from the UI as a band label; LinkedIn wants a {min, max}
+#: pair, and only these exact numbers.
+_HEADCOUNT_BANDS = {
+    "1-10": {"min": 1, "max": 10},
+    "11-50": {"min": 11, "max": 50},
+    "51-200": {"min": 51, "max": 200},
+    "201-500": {"min": 201, "max": 500},
+    "501-1000": {"min": 501, "max": 1000},
+    "1001-5000": {"min": 1001, "max": 5000},
+    "5001-10000": {"min": 5001, "max": 10000},
+    "10001+": {"min": 10001},
+}
+
+
+def _provider_filters(filters: dict, api: str) -> dict:
+    """Translate our field names into the shapes LinkedIn's search demands.
+
+    The two APIs are NOT the same request with a different flag — they take
+    different property shapes and different id namespaces, and Unipile rejects
+    the entire call (400 invalid_parameters) rather than ignoring a field it does
+    not recognise. Learned from a live 400 on the first real search:
+
+    * Sales Navigator wraps ``role``, ``seniority``, ``location`` and
+      ``industry`` in ``{"include": [...]}``; classic takes bare arrays and has
+      no seniority or headcount filter at all.
+    * Classic has no job-title field either; the title goes in
+      ``advanced_keywords.title``.
+    * ``company_headcount`` is a list of ``{min, max}`` objects, not band labels.
+    * The ids differ per API too: classic resolves LOCATION / INDUSTRY, Sales
+      Navigator resolves REGION / SALES_INDUSTRY. The page asks for the right
+      type, so ids from one mode must not be reused in the other.
+    """
+    sales = api == "sales_navigator"
     out: dict = {}
     if filters.get("keywords"):
         out["keywords"] = filters["keywords"]
-    if filters.get("job_title"):
-        # LinkedIn's people search takes job titles under ``role``.
-        out["role"] = [{"keywords": filters["job_title"]}]
-    for ours, theirs in (
-        ("seniority", "seniority"),
-        ("company_headcount", "company_headcount"),
-        ("network_distance", "network_distance"),
-    ):
-        if filters.get(ours):
-            out[theirs] = filters[ours]
-    # Industry and location are ids on LinkedIn's side, and it takes them as an
-    # include/exclude object rather than a bare list.
-    if filters.get("industry"):
-        out["industry"] = {"include": filters["industry"]}
+
+    title = (filters.get("job_title") or "").strip()
+    if title:
+        if sales:
+            # Plain text is accepted by ``role``; an id is only needed for an
+            # exact-match title, which this box does not promise.
+            out["role"] = {"include": [title]}
+        else:
+            out["advanced_keywords"] = {"title": title}
+
+    if filters.get("network_distance"):
+        out["network_distance"] = [int(d) for d in filters["network_distance"]]
+
     if filters.get("location"):
-        out["location"] = filters["location"]
-    return out
+        out["location"] = (
+            {"include": list(filters["location"])} if sales else list(filters["location"])
+        )
+    if filters.get("industry"):
+        out["industry"] = (
+            {"include": list(filters["industry"])} if sales else list(filters["industry"])
+        )
+
+    # Classic search has neither of these on LinkedIn's side, so they are dropped
+    # rather than sent — sending them is what returns 400 and finds nobody.
+    if sales:
+        if filters.get("seniority"):
+            ids = [
+                _SENIORITY_IDS[label]
+                for label in filters["seniority"]
+                if label in _SENIORITY_IDS
+            ]
+            if ids:
+                out["seniority"] = {"include": sorted(set(ids))}
+        if filters.get("company_headcount"):
+            bands = [
+                _HEADCOUNT_BANDS[band]
+                for band in filters["company_headcount"]
+                if band in _HEADCOUNT_BANDS
+            ]
+            if bands:
+                out["company_headcount"] = bands
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})}
 
 
 def _resolve_campaign(message: str) -> str:
@@ -228,7 +297,7 @@ def run_search(payload: SearchRunRequest, db: Session = Depends(get_db)):
     search_key = _resolve_search(filters)
     if not service.launch_search(
         account_id=account_id,
-        filters=_provider_filters(filters),
+        filters=_provider_filters(filters, payload.api),
         api=payload.api,
         search_key=search_key,
         pages=payload.pages,
@@ -541,4 +610,6 @@ def list_leads(
                 error=(send.error if send else None) or (msg.error if msg else None),
             )
         )
-    return Page[SearchLeadOut](items=items, total=len(filtered))
+    return Page[SearchLeadOut](
+        items=items, total=len(filtered), limit=limit, offset=offset
+    )
