@@ -38,11 +38,12 @@ from app.models.linkedin_search_lead import (
 from app.schemas.entities import Page
 from app.schemas.requests import (
     SearchActionRequest,
+    SearchCopyRequest,
     SearchDraftRequest,
     SearchFilters,
     SearchRunRequest,
 )
-from app.services import linkedin_search as service
+from app.services import linkedin_copy, linkedin_search as service
 from app.services.audit import log_action
 from app.services.linkedin_providers import get_linkedin_provider
 
@@ -302,6 +303,25 @@ def search_parameters(
     provider = get_linkedin_provider(resolved)
     options = provider.search_parameters(kind=kind, keywords=keywords)
     return {"items": [{"id": o.id, "title": o.title} for o in options]}
+
+
+@router.post("/generate")
+def generate_copy(payload: SearchCopyRequest):
+    """Draft the invitation note and the message from a campaign goal.
+
+    Inline rather than on the background job path: it is one short model call,
+    and the answer has to come back into the two boxes for the user to read and
+    edit before anything is drafted for anybody.
+    """
+    try:
+        return linkedin_copy.generate_copy(
+            goal=payload.goal,
+            note_max_chars=int(settings.linkedin_invite_note_max_chars),
+            job_titles=payload.job_titles,
+            keywords=payload.keywords,
+        )
+    except linkedin_copy.CopyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/run")

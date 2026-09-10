@@ -4,6 +4,7 @@ import { usePersistedState } from "../hooks/usePersistedState";
 import {
   approveAllSearchLeads,
   draftAllSearchLeads,
+  generateSearchCopy,
   getSearchParameters,
   getSearchProgress,
   getSearchStatus,
@@ -437,6 +438,9 @@ export default function ClassicSearchLinkedIn() {
     ""
   );
   const [inviteNote, setInviteNote] = usePersistedState<string>("search:inviteNote", "");
+  // What the copy is drafted FROM. Kept separately from the two boxes, and never
+  // sent to anybody — only the boxes below are transmitted.
+  const [goal, setGoal] = usePersistedState<string>("search:goal", "");
   const [draftLimit, setDraftLimit] = usePersistedState<string>("search:draftLimit", "50");
   const [appendCount, setAppendCount] = usePersistedState<string>("search:append", "");
 
@@ -588,6 +592,32 @@ export default function ClassicSearchLinkedIn() {
       invalidate();
     },
     onError: () => setNote("Could not start the search."),
+  });
+
+  const generate = useMutation({
+    mutationFn: () =>
+      generateSearchCopy({
+        goal,
+        jobTitles: jobTitles.length ? jobTitles : undefined,
+        keywords: keywords.trim() || undefined,
+      }),
+    onSuccess: (data) => {
+      // Straight into the boxes, where it can be read and edited. Committing the
+      // campaign is still a separate press, so nothing is keyed to this text
+      // until the user decides it is right.
+      setMessage(data.message);
+      setInviteNote(data.invitation_note);
+      setNote(
+        data.note_trimmed
+          ? "Drafted. The note came back long and was trimmed to fit — read it before sending."
+          : "Drafted below. Read both, edit anything, then draft for your leads."
+      );
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response
+        ?.data?.detail;
+      setNote(detail ?? "Could not draft the copy.");
+    },
   });
 
   const requireMessage = (): string | null => {
@@ -891,6 +921,41 @@ export default function ClassicSearchLinkedIn() {
       {/* --- Message --- */}
       <Card>
         <h2 className="text-sm font-semibold text-slate-900">2. Write the message</h2>
+
+        {/* Optional shortcut. Describe the campaign and Claude fills the two
+            boxes below; they stay fully editable, and only what is in them is
+            ever sent. Leave this empty and write the boxes yourself. */}
+        <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
+            Campaign goal{" "}
+            <span className="normal-case text-slate-400">
+              (optional — draft the copy for me)
+            </span>
+          </label>
+          <textarea
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            rows={4}
+            disabled={busy || generate.isPending}
+            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            placeholder="Who you want to reach, what you are offering, who you are. e.g. Book 15-minute intro calls with pharmacy owners and operations leaders about automating prescription intake, refills and prior auth…"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <Button
+              variant="secondary"
+              onClick={() => generate.mutate()}
+              disabled={busy || generate.isPending || !goal.trim()}
+              title="Write the invitation note and the message from this goal"
+            >
+              {generate.isPending ? "Drafting…" : "Draft with AI"}
+            </Button>
+            <span className="text-[11px] text-slate-500">
+              Fills the two boxes below — both stay editable, and nothing is sent
+              until you press Send.
+            </span>
+          </div>
+        </div>
+
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}

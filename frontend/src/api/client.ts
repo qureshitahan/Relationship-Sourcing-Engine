@@ -1168,3 +1168,25 @@ export const stopSearchJob = () =>
   api
     .post<{ stopped: boolean; message: string }>("/api/linkedin-search/stop")
     .then((r) => r.data);
+
+/** Draft the invitation note and the message from a campaign goal.
+ *
+ *  Inline, not a background job: it is one short model call and the answer has
+ *  to land back in the two boxes for the user to read and edit. */
+export const generateSearchCopy = (payload: {
+  goal: string;
+  jobTitles?: string[];
+  keywords?: string;
+}) =>
+  api
+    .post<{
+      invitation_note: string;
+      message: string;
+      note_chars: number;
+      note_trimmed: boolean;
+    }>("/api/linkedin-search/generate", {
+      goal: payload.goal,
+      job_titles: payload.jobTitles,
+      keywords: payload.keywords || undefined,
+    })
+    .then((r) => r.data);
