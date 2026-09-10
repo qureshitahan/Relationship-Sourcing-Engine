@@ -1177,6 +1177,9 @@ export const generateSearchCopy = (payload: {
   goal: string;
   jobTitles?: string[];
   keywords?: string;
+  /** What the boxes hold now, on a re-roll — asks for a different angle. */
+  avoidNote?: string;
+  avoidMessage?: string;
 }) =>
   api
     .post<{
@@ -1188,5 +1191,7 @@ export const generateSearchCopy = (payload: {
       goal: payload.goal,
       job_titles: payload.jobTitles,
       keywords: payload.keywords || undefined,
+      avoid_note: payload.avoidNote || undefined,
+      avoid_message: payload.avoidMessage || undefined,
     })
     .then((r) => r.data);
