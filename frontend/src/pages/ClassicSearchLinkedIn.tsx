@@ -427,7 +427,6 @@ export default function ClassicSearchLinkedIn() {
     "search:location",
     []
   );
-  const [pages, setPages] = usePersistedState<string>("search:pages", "1");
 
   // --- message -----------------------------------------------------------
   // The message IS the campaign: its text decides which people belong together
@@ -581,7 +580,6 @@ export default function ClassicSearchLinkedIn() {
       runLinkedInSearch({
         filters,
         api,
-        pages: Math.max(1, Number(pages) || 1),
         accountId: tabAccountId || undefined,
       }),
     onSuccess: (data) => {
@@ -861,32 +859,27 @@ export default function ClassicSearchLinkedIn() {
           </div>
         </div>
 
+        {/* No "how many pages" control. One press brings the 50 LinkedIn returns
+            per page, which is also the most that can be messaged in a day, and
+            the next press continues from where this one stopped. */}
         <div className="mt-3 flex flex-wrap items-end gap-3">
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
-              Pages <span className="normal-case text-slate-400">(50 each)</span>
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={20}
-              value={pages}
-              onChange={(e) => setPages(e.target.value)}
-              disabled={busy}
-              className="mt-1 w-20 rounded-md border border-slate-300 px-3 py-2 text-sm"
-            />
-          </div>
           <Button
             onClick={() => search.mutate()}
             disabled={busy || !activeId || !hasFilters}
             title={
               hasFilters
-                ? "Run this search and store what it finds"
+                ? "Bring in the next 50 people matching these filters"
                 : "Fill in at least one filter first"
             }
           >
-            {progress?.job === "search" && running ? "Searching…" : "Search LinkedIn"}
+            {progress?.job === "search" && running
+              ? "Searching…"
+              : "Search LinkedIn"}
           </Button>
+          <span className="text-xs text-slate-500">
+            Brings 50 at a time — the most that can be messaged in a day. Press
+            it again for the next 50.
+          </span>
           {stats && (
             <span className="text-xs text-slate-500">
               {stats.leads_total} stored for these filters

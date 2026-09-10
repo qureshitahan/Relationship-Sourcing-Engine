@@ -147,6 +147,25 @@ def search_key_for(filters: Optional[dict]) -> Optional[str]:
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
+def _cursor_setting(account_id: str, search_key: str) -> str:
+    """Where this search left off, per account.
+
+    ``app_settings.key`` is 100 characters, and an account id plus a 40-char sha1
+    fits, but the search key is hashed again to keep it comfortably inside.
+    """
+    short = hashlib.sha1(f"{account_id}:{search_key}".encode("utf-8")).hexdigest()
+    return f"linkedin_search_cursor:{short}"
+
+
+def read_cursor(account_id: str, search_key: str) -> Optional[str]:
+    return (get_setting(_cursor_setting(account_id, search_key)) or "").strip() or None
+
+
+def write_cursor(account_id: str, search_key: str, cursor: Optional[str]) -> None:
+    """Remember the next page, or clear it once the results run out."""
+    set_setting(_cursor_setting(account_id, search_key), cursor or "")
+
+
 def active_account_id() -> Optional[str]:
     value = (get_setting(ACTIVE_ACCOUNT_SETTING) or "").strip()
     return value or (settings.unipile_account_id or "").strip() or None
@@ -357,9 +376,13 @@ def run_search(
         ).scalars().all()
     }
     imported = skipped = 0
-    cursor: Optional[str] = None
+    # Resume where the last run for these filters stopped. Without this every run
+    # asked LinkedIn for page one again, so the same 50 people came back, were
+    # all recognised as already stored, and a repeat search found nobody new.
+    cursor: Optional[str] = read_cursor(account_id, search_key)
     total: Optional[int] = None
     error: Optional[str] = None
+    exhausted = False
 
     for _ in range(max(1, int(pages))):
         if stop_requested():
@@ -400,10 +423,23 @@ def run_search(
         db.commit()
         write_progress(imported=imported, done=imported)
         cursor = page.cursor
+        # Saved per page, not at the end: a run stopped or killed half way still
+        # carries on from the right place next time.
+        write_cursor(account_id, search_key, cursor)
         if not cursor:
+            # LinkedIn has no more pages. The cursor is already cleared above, so
+            # the next run starts the search over — which is what picks up people
+            # who match these filters but were not there before.
+            exhausted = True
             break
 
-    return {"imported": imported, "skipped": skipped, "total": total, "error": error}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "total": total,
+        "error": error,
+        "exhausted": exhausted,
+    }
 
 
 def launch_search(
@@ -422,12 +458,18 @@ def launch_search(
         if result["error"]:
             fail_progress(result["error"][:300])
             return
+        found = result["imported"]
         finish_progress(
             stopped=stop_requested(),
             message=(
-                f"Found {result['imported']} new "
-                f"{'person' if result['imported'] == 1 else 'people'}."
+                f"Found {found} new {'person' if found == 1 else 'people'}."
                 + (f" {result['skipped']} already on the list." if result["skipped"] else "")
+                + (
+                    " That is everyone LinkedIn has for these filters — "
+                    "searching again starts from the top."
+                    if result["exhausted"]
+                    else " Search again for the next batch."
+                )
             ),
         )
 
