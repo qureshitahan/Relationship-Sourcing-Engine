@@ -418,26 +418,25 @@ def sync_followers(
 # --------------------------------------------------------------------------
 
 
-def _contacted_provider_ids(
-    db: Session, *, account_id: str, campaign_key: str
-) -> set[str]:
-    """Followers this account must NOT DM again for this campaign.
+def _contacted_provider_ids(account_id: str, campaign_key: str):
+    """Followers this account must NOT DM again for this campaign, as a subquery.
 
     SENT is permanent. CLAIMED is included because its outcome is unknown: a
     claim whose worker died may well have delivered, and re-sending a possible
     duplicate is worse than leaving one message unsent. FAILED and SKIPPED are
     absent on purpose — those are safe to attempt again.
+
+    A subquery rather than a set, so callers can apply it in SQL alongside their
+    other filters. Applying it AFTER a LIMIT, in Python, is what made "Append 20"
+    return nobody while the page said thousands were still to draft.
     """
-    rows = db.execute(
-        select(LinkedInFollowerSend.follower_provider_id).where(
-            LinkedInFollowerSend.account_id == account_id,
-            LinkedInFollowerSend.campaign_key == campaign_key,
-            LinkedInFollowerSend.status.in_(
-                [FollowerSendStatus.SENT, FollowerSendStatus.CLAIMED]
-            ),
-        )
-    ).scalars().all()
-    return {r for r in rows if r}
+    return select(LinkedInFollowerSend.follower_provider_id).where(
+        LinkedInFollowerSend.account_id == account_id,
+        LinkedInFollowerSend.campaign_key == campaign_key,
+        LinkedInFollowerSend.status.in_(
+            [FollowerSendStatus.SENT, FollowerSendStatus.CLAIMED]
+        ),
+    )
 
 
 def eligible_followers(
@@ -452,23 +451,28 @@ def eligible_followers(
         LinkedInMessage.follower_id.is_not(None),
         LinkedInMessage.follower_campaign_key == campaign_key,
     )
+    # Both exclusions belong in SQL, BEFORE the limit. They used to be split:
+    # the query took the first `limit` undrafted followers and the
+    # already-contacted ones were dropped afterwards in Python. Anyone contacted
+    # under this message whose draft row no longer exists is undrafted but not
+    # eligible, and those are the OLDEST followers, so they sit at the front of
+    # an id-ordered page. "Append 20" therefore fetched twenty of them, filtered
+    # all twenty away, and reported "every follower already has a draft" while
+    # the page's own tab said 7,133 still to draft — the two numbers came from
+    # here and from count_eligible_followers, which had always done it in SQL.
+    contacted = _contacted_provider_ids(account_id, campaign_key)
     query = (
         select(LinkedInFollower)
         .where(
             LinkedInFollower.account_id == account_id,
             LinkedInFollower.id.not_in(drafted),
+            LinkedInFollower.provider_id.not_in(contacted),
         )
         .order_by(LinkedInFollower.id)
     )
     if limit is not None:
         query = query.limit(limit)
-    followers = list(db.execute(query).scalars().all())
-    contacted = _contacted_provider_ids(
-        db, account_id=account_id, campaign_key=campaign_key
-    )
-    if not contacted:
-        return followers
-    return [f for f in followers if f.provider_id not in contacted]
+    return list(db.execute(query).scalars().all())
 
 
 def count_eligible_followers(db: Session, *, account_id: str, campaign_key: str) -> int:
@@ -487,13 +491,7 @@ def count_eligible_followers(db: Session, *, account_id: str, campaign_key: str)
         LinkedInMessage.follower_id.is_not(None),
         LinkedInMessage.follower_campaign_key == campaign_key,
     )
-    contacted = select(LinkedInFollowerSend.follower_provider_id).where(
-        LinkedInFollowerSend.account_id == account_id,
-        LinkedInFollowerSend.campaign_key == campaign_key,
-        LinkedInFollowerSend.status.in_(
-            [FollowerSendStatus.SENT, FollowerSendStatus.CLAIMED]
-        ),
-    )
+    contacted = _contacted_provider_ids(account_id, campaign_key)
     return int(
         db.execute(
             select(func.count())
