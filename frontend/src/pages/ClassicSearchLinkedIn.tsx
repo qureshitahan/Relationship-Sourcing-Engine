@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePersistedState } from "../hooks/usePersistedState";
 import {
   approveAllSearchLeads,
+  createLinkedInConnectLink,
   draftAllSearchLeads,
   generateSearchCopy,
   getSearchParameters,
@@ -579,6 +580,23 @@ export default function ClassicSearchLinkedIn() {
     },
   });
 
+  // Its own connect, rather than sending people to the Followers page for it.
+  // Reconnecting is part of THIS page's troubleshooting: a Sales Navigator seat
+  // added after the account was linked is invisible to the old session, and the
+  // only fix is to link it again.
+  const connectAccount = useMutation({
+    mutationFn: (label: string) => createLinkedInConnectLink(label),
+    onSuccess: (res) => {
+      if (res.url) window.open(res.url, "_blank", "noopener");
+      setNote(
+        "Opened LinkedIn in a new tab. Finish the login there, then come back " +
+          "and refresh this page."
+      );
+    },
+    onError: () =>
+      setNote("Could not create a connect link — check the Unipile configuration."),
+  });
+
   const search = useMutation({
     mutationFn: () =>
       runLinkedInSearch({
@@ -750,14 +768,42 @@ export default function ClassicSearchLinkedIn() {
           </div>
           <div className="text-xs text-slate-500">
             {status?.supports_search ? (
-              <Badge tone="green">Search available</Badge>
+              <Badge tone="green">Connected</Badge>
             ) : (
               <Badge tone="amber">
-                This account cannot search — connect it through Unipile first
+                This account cannot search — connect it below first
               </Badge>
             )}
           </div>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              connectAccount.mutate(
+                status?.active_account_name
+                  ? `Reconnect ${status.active_account_name}`
+                  : "Reconnect LinkedIn account"
+              )
+            }
+            disabled={busy || connectAccount.isPending || !activeId}
+            title="Link this same LinkedIn account again — use it when a subscription was added after it was first connected"
+          >
+            {connectAccount.isPending ? "Opening…" : "Reconnect this account"}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => connectAccount.mutate("New LinkedIn account")}
+            disabled={busy || connectAccount.isPending}
+            title="Link a different LinkedIn account"
+          >
+            Connect another
+          </Button>
         </div>
+        <p className="mt-2 text-xs text-slate-500">
+          Sales Navigator has to be on the account at the moment it is linked. If
+          the seat was added later, LinkedIn refuses the search
+          (&ldquo;feature not subscribed&rdquo;) until the account is reconnected
+          — open Sales Navigator in the same browser first, then press Reconnect.
+        </p>
       </Card>
 
       {/* --- Search --- */}
