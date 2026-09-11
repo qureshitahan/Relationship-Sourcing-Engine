@@ -38,12 +38,19 @@ from app.models.linkedin_follower import (
     LinkedInFollowerSend,
 )
 from app.models.linkedin_message import LinkedInMessage
+from app.models.linkedin_search_lead import (
+    LinkedInSearchLead,
+    LinkedInSearchSend,
+    SearchSendStatus,
+)
 from app.models.principal import Principal
 from app.schemas.entities import (
     AnalyticsChannel,
     AnalyticsFilterOption,
     AnalyticsFollowerAccountRow,
     AnalyticsFollowers,
+    AnalyticsSearch,
+    AnalyticsSearchAccountRow,
     AnalyticsGroupRow,
     AnalyticsOut,
     AnalyticsTotals,
@@ -707,6 +714,156 @@ def _followers_by_account(
     return AnalyticsFollowers(by_account=rows, totals=totals)
 
 
+def _search_by_account(db: Session, win: Window) -> AnalyticsSearch:
+    """The Classic Search module split by the account that ran the search.
+
+    Mirrors ``_followers_by_account`` deliberately — same grouping, same two
+    clocks, same refusal to fold into the prospect channel. The difference is the
+    extra step this lane has: most leads are not connections, so an INVITATION
+    goes first and the message lands only once it is accepted. Reporting one
+    combined "sent" would call an unaccepted invitation a delivered message, so
+    the invitation, the message and the ones still waiting are counted apart.
+
+    Audience counts are all-time by design (a search result has no meaningful
+    "found on" date); everything else respects the window.
+    """
+    account_names = resolved_account_names()
+
+    def _grouped(query) -> dict[str, int]:
+        return {acct: int(n or 0) for acct, n in db.execute(query).all() if acct}
+
+    # One row per (account, search, person), so a plain count is how many results
+    # that account has stored.
+    leads = _grouped(
+        select(LinkedInSearchLead.account_id, func.count()).group_by(
+            LinkedInSearchLead.account_id
+        )
+    )
+
+    # Checkpoint truth, counted DISTINCT: the same person found by two different
+    # searches and reached once is one person contacted, not two. SETTLED covers
+    # invited and sent — both mean this account has already approached them.
+    contacted = _grouped(
+        select(
+            LinkedInSearchSend.account_id,
+            func.count(func.distinct(LinkedInSearchSend.lead_provider_id)),
+        )
+        .where(LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED))
+        .group_by(LinkedInSearchSend.account_id)
+    )
+
+    def _checkpoint(status: str) -> dict[str, int]:
+        where = [LinkedInSearchSend.status == status]
+        where.extend(win.bounds(LinkedInSearchSend.sent_at))
+        return _grouped(
+            select(LinkedInSearchSend.account_id, func.count())
+            .where(*where)
+            .group_by(LinkedInSearchSend.account_id)
+        )
+
+    invited = _checkpoint(SearchSendStatus.INVITED)
+    dms_sent = _checkpoint(SearchSendStatus.SENT)
+
+    # What actually reached an inbox. Read from the MESSAGE, not the checkpoint,
+    # because an accepted invitation is auto-sent later by the reply poller: the
+    # checkpoint still says "invited" while the message has moved to SENT. Taking
+    # this from the checkpoint would undercount every acceptance.
+    delivered_where = [
+        LinkedInMessage.search_lead_id.is_not(None),
+        LinkedInMessage.status.in_([LinkedInStatus.SENT, LinkedInStatus.REPLIED]),
+        LinkedInMessage.from_account.is_not(None),
+    ]
+    delivered_where.extend(win.bounds(LinkedInMessage.sent_at))
+    delivered = _grouped(
+        select(LinkedInMessage.from_account, func.count())
+        .where(*delivered_where)
+        .group_by(LinkedInMessage.from_account)
+    )
+
+    replied_where = [
+        LinkedInMessage.search_lead_id.is_not(None),
+        LinkedInMessage.status == LinkedInStatus.REPLIED,
+        LinkedInMessage.from_account.is_not(None),
+    ]
+    replied_where.extend(win.bounds(LinkedInMessage.replied_at))
+    replied = _grouped(
+        select(LinkedInMessage.from_account, func.count())
+        .where(*replied_where)
+        .group_by(LinkedInMessage.from_account)
+    )
+
+    # Invitation out, not accepted yet, message still queued behind it. Never
+    # windowed: it is an open item, and ageing out of the window would hide the
+    # very thing worth chasing.
+    awaiting = _grouped(
+        select(LinkedInMessage.from_account, func.count())
+        .where(
+            LinkedInMessage.search_lead_id.is_not(None),
+            LinkedInMessage.status == LinkedInStatus.INVITE_SENT,
+            LinkedInMessage.from_account.is_not(None),
+        )
+        .group_by(LinkedInMessage.from_account)
+    )
+
+    # A claim whose outcome is unknown. Never windowed, same reasoning.
+    needs_review = _grouped(
+        select(LinkedInSearchSend.account_id, func.count())
+        .where(LinkedInSearchSend.status == SearchSendStatus.CLAIMED)
+        .group_by(LinkedInSearchSend.account_id)
+    )
+
+    account_ids = (
+        set(leads)
+        | set(contacted)
+        | set(invited)
+        | set(dms_sent)
+        | set(delivered)
+        | set(replied)
+        | set(awaiting)
+        | set(needs_review)
+    )
+
+    rows = [
+        AnalyticsSearchAccountRow(
+            account_id=acct,
+            account_name=account_names.get(acct),
+            leads=leads.get(acct, 0),
+            contacted=contacted.get(acct, 0),
+            # Clamped: a lead row deleted after being contacted would otherwise
+            # show as a negative remainder.
+            never_contacted=max(0, leads.get(acct, 0) - contacted.get(acct, 0)),
+            invited=invited.get(acct, 0),
+            dms_sent=dms_sent.get(acct, 0),
+            delivered=delivered.get(acct, 0),
+            replied=replied.get(acct, 0),
+            reply_rate=_rate(replied.get(acct, 0), delivered.get(acct, 0)),
+            awaiting_acceptance=awaiting.get(acct, 0),
+            needs_review=needs_review.get(acct, 0),
+        )
+        for acct in account_ids
+    ]
+    # Biggest audience first, then by what actually landed.
+    rows.sort(key=lambda r: (-r.leads, -r.delivered, r.account_id))
+
+    total_delivered = sum(r.delivered for r in rows)
+    total_replied = sum(r.replied for r in rows)
+    totals = AnalyticsSearchAccountRow(
+        account_id="",
+        leads=sum(r.leads for r in rows),
+        contacted=sum(r.contacted for r in rows),
+        never_contacted=sum(r.never_contacted for r in rows),
+        invited=sum(r.invited for r in rows),
+        dms_sent=sum(r.dms_sent for r in rows),
+        delivered=total_delivered,
+        replied=total_replied,
+        # From the summed counts, not an average of per-account rates.
+        reply_rate=_rate(total_replied, total_delivered),
+        awaiting_acceptance=sum(r.awaiting_acceptance for r in rows),
+        needs_review=sum(r.needs_review for r in rows),
+    )
+    return AnalyticsSearch(by_account=rows, totals=totals)
+
+
 @router.get("/analytics", response_model=AnalyticsOut)
 def analytics(
     db: Session = Depends(get_db),
@@ -772,6 +929,15 @@ def analytics(
         logger.warning("follower analytics failed; reporting it as empty", exc_info=True)
         followers = AnalyticsFollowers()
 
+    # Same guard, same reason: the search tables are newer still, and a
+    # deployment that has not created them must not lose the whole page.
+    try:
+        search = _search_by_account(db, win)
+    except Exception:  # noqa: BLE001 - an added section must not fail the page
+        db.rollback()
+        logger.warning("search analytics failed; reporting it as empty", exc_info=True)
+        search = AnalyticsSearch()
+
     return AnalyticsOut(
         days=days,
         since=win.since.isoformat() if win.since else None,
@@ -782,6 +948,7 @@ def analytics(
         email=email,
         linkedin=linkedin,
         followers=followers,
+        search=search,
         principals=[
             AnalyticsFilterOption(id=pid, label=name)
             for pid, name in sorted(principal_names.items(), key=lambda kv: kv[1].lower())

@@ -813,6 +813,68 @@ class AnalyticsFollowers(BaseModel):
     totals: AnalyticsFollowerAccountRow = AnalyticsFollowerAccountRow(account_id="")
 
 
+class AnalyticsSearchAccountRow(BaseModel):
+    """Classic Search LinkedIn outcomes for ONE connected LinkedIn account.
+
+    Per account for the same reason the followers rows are: a lead belongs to the
+    account whose search found it, and the invitation or DM goes from that same
+    account. There is no campaign or principal to group by.
+
+    This lane has a step the other two do not — most people are not connections
+    yet, so an INVITATION goes first and the message only lands once it is
+    accepted. That is why ``invited``, ``delivered`` and ``awaiting_acceptance``
+    are separate figures rather than one "sent": counting an invitation as a
+    delivered message would overstate this module's reach considerably.
+
+    Two clocks, as in the followers row: ``leads``/``contacted`` describe what
+    exists right now (a search result carries no meaningful "found on" date to
+    window by), while everything else respects the selected window.
+    """
+
+    account_id: str
+    #: Display name when one is known locally; the UI falls back to the id.
+    account_name: Optional[str] = None
+
+    # --- audience: always all-time, never windowed ---
+    leads: int = 0
+    contacted: int = 0
+    never_contacted: int = 0
+
+    # --- outreach: windowed ---
+    #: Connection requests sent. The message follows only if they accept.
+    invited: int = 0
+    #: Direct messages sent straight out, to people already connected.
+    dms_sent: int = 0
+    #: Messages that actually reached an inbox — the DMs above plus the
+    #: invitations that were accepted and auto-sent afterwards.
+    delivered: int = 0
+    replied: int = 0
+    #: Replies over DELIVERED messages, not over invitations sent: nobody can
+    #: reply to a message still waiting on a connection request.
+    reply_rate: float = 0.0
+
+    # --- outstanding: never windowed, because it needs attention today ---
+    #: Invitation sent, not yet accepted, message still queued behind it.
+    awaiting_acceptance: int = 0
+    #: A claim whose outcome is unknown; never retried automatically.
+    needs_review: int = 0
+
+
+class AnalyticsSearch(BaseModel):
+    """The Classic Search module, reported on its own.
+
+    Kept apart from the LinkedIn channel above for the same reason the followers
+    section is: the queries there filter ``search_lead_id IS NULL``, so folding
+    these numbers in would double-count them and let one search campaign move the
+    prospect reply rate.
+    """
+
+    by_account: list[AnalyticsSearchAccountRow] = []
+    #: Column sums of the rows above. Rates are recomputed from the totals rather
+    #: than averaged, so a quiet account does not weigh as much as a busy one.
+    totals: AnalyticsSearchAccountRow = AnalyticsSearchAccountRow(account_id="")
+
+
 class AnalyticsOut(BaseModel):
     days: int
     since: Optional[str] = None
@@ -826,6 +888,10 @@ class AnalyticsOut(BaseModel):
     # unaffected, and a deployment whose follower tables are missing still gets a
     # valid response.
     followers: AnalyticsFollowers = AnalyticsFollowers()
+    # Additive in the same way: a caller that reads only the channels above is
+    # unaffected, and a deployment without the search tables still gets a valid
+    # response.
+    search: AnalyticsSearch = AnalyticsSearch()
     principals: list[AnalyticsFilterOption] = []
     campaigns: list[AnalyticsFilterOption] = []
 
