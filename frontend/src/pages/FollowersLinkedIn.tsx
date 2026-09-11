@@ -458,6 +458,21 @@ export default function FollowersLinkedIn() {
       setTabAccountId("");
     }
   }, [tabAccountId, status, setTabAccountId]);
+
+  // Pin whatever account was active the first time this browser tab knows one.
+  //
+  // Choosing an account writes ONE app-wide row (linkedin/select-account), so
+  // picking Scott on the Classic Search page moved this page onto Scott too --
+  // roster, counts and the next send with it -- without anyone touching the
+  // picker here. An empty pin meant "follow whatever that row says now", which
+  // is a silent switch rather than a choice. Pinning on load makes each browser
+  // tab stay where it was put, so two accounts can be worked side by side in two
+  // tabs. Picking an account here still sets the app-wide row, as before; it
+  // just no longer reaches back into tabs that already had one.
+  useEffect(() => {
+    if (!tabAccountId && activeId) setTabAccountId(activeId);
+  }, [tabAccountId, activeId, setTabAccountId]);
+
   const stats = status?.stats ?? null;
   // Which principal each draft is filed under. Derived from the connected
   // LinkedIn account by name, because that account is what actually sends — so
