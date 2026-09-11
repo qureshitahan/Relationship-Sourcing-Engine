@@ -1134,6 +1134,38 @@ export interface AnalyticsFollowers {
   totals: AnalyticsFollowerAccountRow;
 }
 
+/** Classic Search outcomes for ONE connected LinkedIn account.
+ *
+ *  This lane has a step the others do not: most leads are not connections, so an
+ *  invitation goes first and the message lands only when it is accepted. That is
+ *  why `invited`, `delivered` and `awaiting_acceptance` are separate — calling an
+ *  unaccepted invitation a delivered message would overstate the reach. */
+export interface AnalyticsSearchAccountRow {
+  account_id: string;
+  account_name?: string | null;
+  /** All-time: a search result has no meaningful "found on" date to window by. */
+  leads: number;
+  contacted: number;
+  never_contacted: number;
+  /** Windowed. Connection requests sent. */
+  invited: number;
+  /** Windowed. Direct messages to people already connected. */
+  dms_sent: number;
+  /** Windowed. Messages that actually reached an inbox, accepted invites too. */
+  delivered: number;
+  replied: number;
+  /** Replies over DELIVERED, not over invitations sent. */
+  reply_rate: number;
+  /** Never windowed — an open item, still waiting on acceptance. */
+  awaiting_acceptance: number;
+  needs_review: number;
+}
+
+export interface AnalyticsSearch {
+  by_account: AnalyticsSearchAccountRow[];
+  totals: AnalyticsSearchAccountRow;
+}
+
 export interface AnalyticsOut {
   days: number;
   since?: string | null;
@@ -1145,6 +1177,7 @@ export interface AnalyticsOut {
   // Reported on its own, never folded into the LinkedIn channel. Optional so an
   // API that predates this section still typechecks.
   followers?: AnalyticsFollowers;
+  search?: AnalyticsSearch;
   principals: AnalyticsFilterOption[];
   campaigns: AnalyticsFilterOption[];
 }

@@ -18,6 +18,7 @@ import { getAnalytics } from "../api/client";
 import type {
   AnalyticsChannel,
   AnalyticsFollowers,
+  AnalyticsSearch,
   AnalyticsGroupRow,
 } from "../types";
 import { BarList, StatTile, TrendChart } from "../components/charts";
@@ -611,6 +612,176 @@ function FollowersSection({ followers }: { followers: AnalyticsFollowers }) {
   );
 }
 
+/**
+ * Classic Search LinkedIn, split by the account that ran the search.
+ *
+ * Its own section rather than folded into the LinkedIn channel above: those
+ * queries filter `search_lead_id IS NULL`, so merging these would double-count
+ * them and let one search campaign move the prospect reply rate.
+ *
+ * The funnel is the thing to read here. An invitation is not a delivered
+ * message - it becomes one only when the person accepts - so the two are shown
+ * apart, with what is still waiting in between.
+ */
+function SearchSection({ search }: { search: AnalyticsSearch }) {
+  const rows = search.by_account ?? [];
+  const t = search.totals;
+  const needsReview = rows.reduce((n, r) => n + r.needs_review, 0);
+
+  return (
+    <section className="mb-10">
+      <div className="mb-1 flex items-center gap-2">
+        <span
+          aria-hidden
+          className="inline-block h-2.5 w-2.5 rounded-full"
+          // Not VIZ.series[3]: that set is a validated categorical THREE, and
+          // inventing a fourth hue for a decorative section marker would put an
+          // unchecked colour next to ones that were checked.
+          style={{ backgroundColor: VIZ.secondary }}
+        />
+        <h2 className="text-base font-semibold text-slate-900">
+          Classic Search LinkedIn
+        </h2>
+      </div>
+      <p className="mb-4 max-w-4xl text-xs text-slate-400">
+        Outreach to people found through LinkedIn&rsquo;s own search &mdash;
+        counted apart from the prospect outreach above, and never added to it.
+        Most of them are not connections yet, so a <b>connection request</b> goes
+        first and the message is delivered only once it is accepted; the two are
+        counted separately for that reason. Leads found and contacted are{" "}
+        <b>all-time</b> (a search result carries no &ldquo;found on&rdquo; date
+        to measure a window against); everything else follows the selected range.
+        The principal and campaign filters do not apply here, because a lead
+        belongs to an account rather than to a campaign.
+      </p>
+
+      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+        <StatTile label="Leads found" value={t.leads} sub="all time" />
+        <StatTile
+          label="Contacted"
+          value={t.contacted}
+          sub={`${t.never_contacted} not approached`}
+          tone="amber"
+        />
+        <StatTile
+          label="Invitations"
+          value={t.invited}
+          sub={`${t.awaiting_acceptance} awaiting acceptance`}
+        />
+        <StatTile
+          label="Messages delivered"
+          value={t.delivered}
+          sub={`${t.dms_sent} sent direct`}
+          tone="blue"
+        />
+        <StatTile
+          label="Replied"
+          value={t.replied}
+          sub={`${pct(t.reply_rate)} of delivered`}
+          tone="green"
+        />
+      </div>
+
+      {needsReview > 0 && (
+        <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          {needsReview} send{needsReview === 1 ? "" : "s"} need review &mdash; the
+          job stopped mid-send, so whether it went out is unknown. These are never
+          retried on their own; check them on the Classic Search page.
+        </p>
+      )}
+
+      <Card className="p-5">
+        <div className="mb-3 text-sm font-semibold text-slate-800">
+          By sending account
+        </div>
+        {rows.length === 0 ? (
+          <p className="py-4 text-sm text-slate-400">No searches run yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[48rem] text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-400">
+                  <th className="py-2 pr-3 text-left font-medium">Account</th>
+                  <th className="px-3 py-2 text-right font-medium">Leads</th>
+                  <th className="px-3 py-2 text-right font-medium">Contacted</th>
+                  <th className="px-3 py-2 text-right font-medium">Invitations</th>
+                  <th className="px-3 py-2 text-right font-medium">Awaiting</th>
+                  <th className="px-3 py-2 text-right font-medium">Delivered</th>
+                  <th className="px-3 py-2 text-right font-medium">Replied</th>
+                  <th className="px-3 py-2 text-right font-medium">Reply rate</th>
+                  <th className="py-2 pl-3 text-right font-medium">Needs review</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr
+                    key={r.account_id}
+                    className="border-b border-slate-100 last:border-0"
+                  >
+                    {/* The account's own name when known, otherwise a shortened
+                        id with the full value in the tooltip. Never a guessed
+                        name - a wrong label on a performance report is worse
+                        than a raw id. */}
+                    <td className="py-2 pr-3" title={r.account_id}>
+                      {r.account_name ? (
+                        <span className="font-medium text-slate-900">
+                          {r.account_name}
+                        </span>
+                      ) : (
+                        <span className="font-mono text-xs text-slate-500">
+                          {r.account_id.slice(0, 10)}&hellip;
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.leads}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.contacted}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.invited}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">
+                      {r.awaiting_acceptance || (
+                        <span className="text-slate-300">&mdash;</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-800">
+                      {r.delivered}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-700">
+                      {r.replied}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {r.delivered ? (
+                        <span className="font-medium text-emerald-700">
+                          {pct(r.reply_rate)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">&mdash;</span>
+                      )}
+                    </td>
+                    <td className="py-2 pl-3 text-right tabular-nums">
+                      {r.needs_review ? (
+                        <span className="font-medium text-amber-700">
+                          {r.needs_review}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">&mdash;</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 export default function Analytics() {
   const [days, setDays] = useState<number>(30);
   // A custom range, when the presets are not the shape of the question. Empty
@@ -768,6 +939,7 @@ export default function Analytics() {
         <LinkedInSection channel={data.linkedin} />
         {/* Optional so an API that predates this section renders as before. */}
         {data.followers && <FollowersSection followers={data.followers} />}
+        {data.search && <SearchSection search={data.search} />}
       </div>
     </div>
   );
