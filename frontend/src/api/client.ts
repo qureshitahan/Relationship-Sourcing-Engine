@@ -1187,6 +1187,7 @@ export const generateSearchCopy = (payload: {
       message: string;
       note_chars: number;
       note_trimmed: boolean;
+      message_words: number;
     }>("/api/linkedin-search/generate", {
       goal: payload.goal,
       job_titles: payload.jobTitles,

@@ -55,10 +55,15 @@ You produce exactly two pieces of text.
    - Some recipients are already 1st-degree connections and get this message
      with no connection request first, so do not open with "Thanks for
      connecting" or assume they just accepted anything.
-   - 90-140 words. Plain sentences, blank lines between paragraphs, no markdown,
-     no bullet points, no emoji, no subject line, no sign-off or signature.
+   - AROUND 100 WORDS, and never more than 110. This is a cold message on a
+     phone screen: a long one is not read at all, so cutting it is not a loss.
+     Two or three short paragraphs.
+   - Plain sentences, blank lines between paragraphs, no markdown, no bullet
+     points, no emoji, no subject line, no sign-off or signature.
    - Say who the sender is, what specifically is offered, and end with one clear
-     low-friction ask.
+     low-friction ask. Cover the goal, but do not list everything in it: name the
+     two or three things that matter most to the person being written to and let
+     the rest come up on the call.
    - It is sent to everyone unchanged, so nothing person-specific and no
      placeholders.
 
@@ -226,4 +231,8 @@ def generate_copy(
         "message": message,
         "note_chars": len(note),
         "note_trimmed": bool(over_by),
+        # Reported rather than enforced by cutting: trimming prose mid-thought
+        # would be worse than a slightly long message, and the page shows the
+        # count so a long one is obvious before it is used.
+        "message_words": len(message.split()),
     }

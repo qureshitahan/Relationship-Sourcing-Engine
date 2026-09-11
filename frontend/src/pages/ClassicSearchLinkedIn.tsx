@@ -593,6 +593,7 @@ export default function ClassicSearchLinkedIn() {
   // backend trimmed at 200, so a long note lost its tail with no warning.
   const noteMax = status?.invite_note_max_chars ?? 200;
   const noteLength = inviteNote.trim().length;
+  const messageWords = message.trim() ? message.trim().split(/\s+/).length : 0;
 
   const selectAccount = useMutation({
     mutationFn: (id: string) => selectLinkedInAccount(id),
@@ -655,8 +656,8 @@ export default function ClassicSearchLinkedIn() {
       setInviteNote(data.invitation_note);
       setNote(
         data.note_trimmed
-          ? "Drafted. The note came back long and was trimmed to fit — read it before sending."
-          : "Drafted below. Read both, edit anything, then draft for your leads."
+          ? `Drafted (${data.message_words} words). The note came back long and was trimmed to fit — read it before sending.`
+          : `Drafted below — ${data.message_words} words. Read both, edit anything, then draft for your leads.`
       );
     },
     onError: (err: unknown) => {
@@ -1116,11 +1117,26 @@ export default function ClassicSearchLinkedIn() {
           className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
           placeholder="Sent exactly as written, with only 'Hi <first name>,' added at the top."
         />
-        <p className="mt-1 text-xs text-slate-500">
-          Sent exactly as written — nothing rewrites or personalises it. The text
-          also identifies the campaign: change it and you start a new one, so the
-          same people become eligible again.
-        </p>
+        <div className="mt-1 flex justify-between gap-4 text-xs text-slate-500">
+          <span>
+            Sent exactly as written — nothing rewrites or personalises it. The
+            text also identifies the campaign: change it and you start a new one,
+            so the same people become eligible again.
+          </span>
+          {/* Length is the difference between a message that gets read on a
+              phone and one that does not, so it is shown rather than left to be
+              judged by eye. A limit, not a rule: nothing stops a longer one. */}
+          <span
+            className={
+              messageWords > 130
+                ? "shrink-0 font-medium text-amber-700"
+                : "shrink-0 text-slate-400"
+            }
+          >
+            {messageWords} word{messageWords === 1 ? "" : "s"}
+            {messageWords > 130 ? " — long for a cold DM" : ""}
+          </span>
+        </div>
 
         <div className="mt-3">
           <label className="block text-xs font-medium uppercase tracking-wide text-slate-500">
