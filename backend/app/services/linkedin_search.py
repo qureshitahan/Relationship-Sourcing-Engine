@@ -351,6 +351,16 @@ def _run_job(kind: str, work) -> bool:
 # --------------------------------------------------------------------------
 
 
+#: How many NEW people one press of Search should bring. Matches the daily send
+#: cap, because that is what a day's work is.
+SEARCH_BATCH = 50
+
+#: Safety bound on how many provider calls one press may make. Classic search
+#: returns ten per page, so fifty people is five calls; the rest of the headroom
+#: is for pages that are mostly people already stored.
+MAX_SEARCH_PAGES = 25
+
+
 def run_search(
     db: Session,
     *,
@@ -358,9 +368,16 @@ def run_search(
     filters: dict,
     api: str,
     search_key: str,
-    pages: int = 1,
+    want: int = SEARCH_BATCH,
 ) -> dict:
-    """Pull ``pages`` pages of results and store them as leads.
+    """Pull results until ``want`` NEW people are stored, or LinkedIn runs out.
+
+    Counted in people, not pages, because a page is not a fixed size: Sales
+    Navigator returns the 50 it is asked for, while CLASSIC search returns TEN
+    per page and ignores the limit entirely. Fetching "one page" therefore gave
+    50 people on one API and 10 on the other, which is exactly what a press of
+    Search felt like. Pages are now an implementation detail — it keeps asking
+    for the next one until it has what was wanted.
 
     Stored, not just shown, because everything after this — drafting, the tab
     counts, the send queue — has to survive a page refresh and a restart.
@@ -384,11 +401,18 @@ def run_search(
     error: Optional[str] = None
     exhausted = False
 
-    for _ in range(max(1, int(pages))):
+    want = max(1, int(want))
+    pages_fetched = 0
+    while imported < want:
         if stop_requested():
             break
+        # Bounded so a filter that keeps returning people already stored cannot
+        # walk LinkedIn all night looking for its fiftieth new one.
+        if pages_fetched >= MAX_SEARCH_PAGES:
+            break
+        pages_fetched += 1
         page = provider.search_people(
-            filters=filters, api=api, cursor=cursor, limit=50
+            filters=filters, api=api, cursor=cursor, limit=want
         )
         if not page.supported or page.error:
             error = page.error or "This provider cannot search LinkedIn."
@@ -443,7 +467,7 @@ def run_search(
 
 
 def launch_search(
-    *, account_id: str, filters: dict, api: str, search_key: str, pages: int
+    *, account_id: str, filters: dict, api: str, search_key: str, want: int
 ) -> bool:
     def work(db: Session) -> None:
         start_progress("search", total=0)
@@ -453,7 +477,7 @@ def launch_search(
             filters=filters,
             api=api,
             search_key=search_key,
-            pages=pages,
+            want=want,
         )
         if result["error"]:
             fail_progress(result["error"][:300])

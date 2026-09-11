@@ -344,7 +344,10 @@ def run_search(payload: SearchRunRequest, db: Session = Depends(get_db)):
         filters=_provider_filters(filters, payload.api),
         api=payload.api,
         search_key=search_key,
-        pages=payload.pages,
+        # `pages` is kept on the request for compatibility; it now means
+        # batches of SEARCH_BATCH people rather than provider pages, which is
+        # what the page always claimed it did.
+        want=max(1, int(payload.pages or 1)) * service.SEARCH_BATCH,
     ):
         return {"started": False, "message": "A search job is already running."}
     log_action(
