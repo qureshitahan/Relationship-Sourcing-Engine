@@ -394,13 +394,25 @@ export default function FollowersLinkedIn() {
   );
 
   // Declared before the others because both of them key their polling off it.
+  // Declared before the progress query because that query polls while a chain is
+  // in flight, not only while a job reports itself running.
+  const chainSend = useRef(false);
+  const [chainPending, setChainPending] = useState(false);
+  //: When the current chain began, so it can be given up on rather than spin.
+  const chainStartedAt = useRef(0);
+
   const { data: progress } = useQuery({
     queryKey: ["followers", "progress"],
     queryFn: getFollowersProgress,
     // Poll only while something is running, and fetch on mount so a reload
     // mid-job still shows the bar and offers Stop.
+    // Also while a chain is waiting: drafting 50 is pure string formatting and
+    // regularly finishes between two polls, so without this the chain never sees
+    // the state it is waiting for.
     refetchInterval: (q) =>
-      (q.state.data as FollowersProgress | undefined)?.status === "running" ? 2000 : false,
+      (q.state.data as FollowersProgress | undefined)?.status === "running" || chainPending
+        ? 1500
+        : false,
   });
   const running = progress?.status === "running";
 
@@ -559,11 +571,6 @@ export default function FollowersLinkedIn() {
   // used to turn "50" into 100 on a second click. Append is the explicit
   // "give me this many more" — the old add-N behaviour, kept but named.
 
-  // Set while a "draft, approve & send" press is in flight, so the effect below
-  // knows this drafting run should roll on into a send.
-  const chainSend = useRef(false);
-  const [chainPending, setChainPending] = useState(false);
-
   const draftAll = useMutation({
     // `limit` is "add this many more"; the `target` argument (a total) is never
     // sent any more. Same endpoint, so nothing else had to change.
@@ -626,29 +633,38 @@ export default function FollowersLinkedIn() {
     },
   });
 
-  // "Draft, approve & send" in one press. The send has to wait for the DRAFTING
-  // to finish, not merely to start: the draft endpoint returns as soon as the
-  // background job is queued, so sending immediately would find nothing to send.
-  // Watching the job go from running to finished is the only honest signal.
-  const draftWasRunning = useRef(false);
+  // "Draft, approve & send" in one press. The send waits for the DRAFTING to
+  // finish, not merely to start: the draft endpoint returns as soon as the job
+  // is queued, so sending immediately would find nothing to send.
+  //
+  // It watches for the draft job to reach a TERMINAL state rather than for it to
+  // go running -> finished. That edge is never seen when the job starts and ends
+  // inside one poll interval, which is the normal case here -- and when it was
+  // missed the send never fired and the button sat on "Working..." until the page
+  // was reloaded.
   useEffect(() => {
-    if (running && progress?.job === "draft") {
-      draftWasRunning.current = true;
+    if (!chainSend.current) return;
+    if (progress?.job === "draft" && progress.status !== "running") {
+      chainSend.current = false;
+      // A drafting run that failed or was stopped does not roll on into sending.
+      if (progress.status === "done" && activeMessage) {
+        sendAll.mutate(activeMessage);
+      } else {
+        setChainPending(false);
+      }
       return;
     }
-    if (!draftWasRunning.current || running) return;
-    draftWasRunning.current = false;
-    if (!chainSend.current) return;
-    chainSend.current = false;
-    // A drafting run that failed or was stopped does not roll on into sending —
-    // the point of the chain is convenience, not momentum.
-    if (progress?.status === "done" && activeMessage) {
-      sendAll.mutate(activeMessage);
-    } else {
+    // Last resort. Whatever went wrong, the button must not spin forever, and
+    // the work is not lost -- the drafts are on the server either way.
+    if (chainStartedAt.current && Date.now() - chainStartedAt.current > 90_000) {
+      chainSend.current = false;
       setChainPending(false);
+      setNote(
+        'Drafting finished but sending did not start on its own — press "Approve & send all".'
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, progress?.job, progress?.status, activeMessage]);
+  }, [progress, activeMessage]);
 
   const startDrafting = (andSend: boolean) => {
     const text = requireMessage();
@@ -660,6 +676,7 @@ export default function FollowersLinkedIn() {
       return;
     }
     chainSend.current = andSend;
+    chainStartedAt.current = andSend ? Date.now() : 0;
     setChainPending(andSend);
     draftAll.mutate(text);
   };

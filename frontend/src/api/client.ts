@@ -1055,8 +1055,13 @@ export const getSearchStatus = (params: {
     .then((r) => r.data);
 
 /** Live progress of the running search/draft/send job (poll while running). */
-export const getSearchProgress = () =>
-  api.get<SearchProgress>("/api/linkedin-search/progress").then((r) => r.data);
+export const getSearchProgress = (accountId?: string) =>
+  api
+    .get<SearchProgress>("/api/linkedin-search/progress", {
+      // Per account: another account's running job is not this page's business.
+      params: { account_id: accountId || undefined },
+    })
+    .then((r) => r.data);
 
 /** Type-ahead for filters LinkedIn takes as ids rather than free text. */
 export const getSearchParameters = (
@@ -1097,6 +1102,8 @@ export const runLinkedInSearch = (payload: {
     .post<{
       started: boolean;
       search_key?: string;
+      /** True when refused only because a job is already running on the account. */
+      busy?: boolean;
       message: string;
     }>("/api/linkedin-search/run", {
       filters: payload.filters,
@@ -1123,6 +1130,8 @@ export const draftAllSearchLeads = (payload: {
     .post<{
       started: boolean;
       candidates: number;
+      /** True when refused only because a job is already running on the account. */
+      busy?: boolean;
       message: string;
     }>("/api/linkedin-search/draft-all", {
       filters: payload.filters,
@@ -1154,7 +1163,7 @@ export const sendAllSearchLeads = (payload: {
   accountId?: string;
 }) =>
   api
-    .post<{ started: boolean; matched: number; message: string }>(
+    .post<{ started: boolean; matched: number; busy?: boolean; message: string }>(
       "/api/linkedin-search/send-all",
       {
         filters: payload.filters,
@@ -1164,9 +1173,12 @@ export const sendAllSearchLeads = (payload: {
     )
     .then((r) => r.data);
 
-export const stopSearchJob = () =>
+export const stopSearchJob = (accountId?: string) =>
   api
-    .post<{ stopped: boolean; message: string }>("/api/linkedin-search/stop")
+    .post<{ stopped: boolean; message: string }>("/api/linkedin-search/stop", null, {
+      // Stops THIS account's job only; another account's run keeps going.
+      params: { account_id: accountId || undefined },
+    })
     .then((r) => r.data);
 
 /** Draft the invitation note and the message from a campaign goal.

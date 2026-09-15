@@ -277,10 +277,45 @@ def search_status(
     return payload
 
 
+#: How each job kind reads in a sentence someone will see.
+_BUSY_PHRASES = {
+    "search": "A search is already running on this account",
+    "draft": "Drafting is already in progress on this account",
+    "send": "A send is already running on this account",
+}
+
+
+def _busy_message(account_id: Optional[str]) -> str:
+    """Say WHICH job is running on this account.
+
+    Every refusal used to read "A search job is already running." whatever was
+    really running, so pressing Search during a send looked like a stuck search
+    while the send that was actually going went unnamed. The job is read from the
+    same per-account record the progress bar reads, so the two always agree.
+    """
+    state = service.read_progress(account_id)
+    if state.get("status") != service.STATUS_RUNNING:
+        # The lock is held but the job has not written its first state yet: a
+        # moment after another press. There is nothing to name, so say that.
+        return "Another job on this account is just starting — try again in a moment."
+    job = state.get("job")
+    phrase = _BUSY_PHRASES.get(job, "Another job is already running on this account")
+    total = int(state.get("total") or 0)
+    done = int(state.get("done") or 0)
+    count = f" ({done} of {total})" if job == "send" and total else ""
+    return f"{phrase}{count} — wait for it to finish, or press Stop."
+
+
 @router.get("/progress")
-def search_progress():
-    """Live state of the running search/draft/send job (poll this for the bar)."""
-    state = service.read_progress()
+def search_progress(account_id: Optional[str] = None):
+    """Live state of THIS account's search/draft/send job (poll this for the bar).
+
+    Per account: a job running on one account no longer shows as running on
+    another account's page, and so no longer disables that page's controls.
+    Omitted => the app-wide selected account, like every other endpoint here.
+    """
+    account = (account_id or "").strip() or service.active_account_id()
+    state = service.read_progress(account)
     # A job whose process died leaves "running" in the row for good. Report that
     # honestly here — this is what the bar and every disabled button read —
     # rather than in read_progress(), so a live worker's writes are never
@@ -349,7 +384,13 @@ def run_search(payload: SearchRunRequest, db: Session = Depends(get_db)):
         # what the page always claimed it did.
         want=max(1, int(payload.pages or 1)) * service.SEARCH_BATCH,
     ):
-        return {"started": False, "message": "A search job is already running."}
+        return {
+            "started": False,
+            # Additive: lets the page tell "refused because busy" apart from the
+            # other not-started answers, which are instructions, not job state.
+            "busy": True,
+            "message": _busy_message(account_id),
+        }
     log_action(
         db,
         AuditAction.LINKEDIN_SEND,
@@ -448,7 +489,8 @@ def draft_all(payload: SearchDraftRequest, db: Session = Depends(get_db)):
             "candidates": len(eligible),
             "search_key": search_key,
             "campaign_key": campaign_key,
-            "message": "A search job is already running.",
+            "busy": True,
+            "message": _busy_message(account_id),
         }
     return {
         "started": True,
@@ -508,7 +550,8 @@ def send_all(payload: SearchActionRequest, db: Session = Depends(get_db)):
             "started": False,
             "matched": open_count,
             "campaign_key": campaign_key,
-            "message": "A search job is already running.",
+            "busy": True,
+            "message": _busy_message(account_id),
         }
     return {
         "started": True,
@@ -519,20 +562,28 @@ def send_all(payload: SearchActionRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/stop")
-def stop(db: Session = Depends(get_db)):
-    """Halt the running job between items.
+def stop(
+    db: Session = Depends(get_db),
+    account_id: Optional[str] = Query(
+        None,
+        description="Whose job to stop. Omitted = the app-wide selected account.",
+    ),
+):
+    """Halt THIS account's running job between items.
 
     The message in flight finishes, so nothing is left half-sent: its checkpoint
-    row is resolved before the worker looks at the stop flag again.
+    row is resolved before the worker looks at the stop flag again. Another
+    account's run is left alone.
     """
-    if not service.request_stop():
-        if service.clear_stale_progress():
+    account = (account_id or "").strip() or service.active_account_id()
+    if not service.request_stop(account):
+        if service.clear_stale_progress(account):
             return {
                 "stopped": True,
                 "message": "That job had already stopped when the server "
                 "restarted — cleared it. Anything it saved is kept.",
             }
-        return {"stopped": False, "message": "No search job is running."}
+        return {"stopped": False, "message": "Nothing is running on this account."}
     log_action(
         db,
         AuditAction.LINKEDIN_SEND,

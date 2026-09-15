@@ -491,13 +491,72 @@ export default function ClassicSearchLinkedIn() {
   const hasFilters = Object.keys(filters).length > 0;
 
   // Declared first because the other queries key their polling off it.
+  // Declared before the progress query because that query polls while a chain is
+  // in flight, not only while a job reports itself running.
+  const chainSend = useRef(false);
+  const [chainPending, setChainPending] = useState(false);
+  //: When the current chain began, so it can be given up on rather than spin.
+  const chainStartedAt = useRef(0);
+  //: The account the chain was started on, and the progress record on screen at
+  //: that moment. The chain effect below explains why both are needed.
+  const chainAccount = useRef("");
+  const chainBaseline = useRef<string | null>(null);
+  // A green note that reports a job -- started, refused because one is running,
+  // or stopping -- stops being true the moment that job ends, yet it used to sit
+  // there until something else replaced it. These let it clear itself then, and
+  // ONLY that exact note: anything written since is left alone.
+  const [noteWaitsForJob, setNoteWaitsForJob] = useState(false);
+  const jobNoteText = useRef<string | null>(null);
+  const jobNoteBaseline = useRef<string | null>(null);
+  const jobNoteSince = useRef(0);
+
   const { data: progress } = useQuery({
-    queryKey: ["linkedin-search", "progress"],
-    queryFn: getSearchProgress,
+    // Keyed by this tab's account. Job state is per account now, so a send running
+    // on another account neither shows here nor disables anything here.
+    queryKey: ["linkedin-search", "progress", tabAccountId],
+    queryFn: () => getSearchProgress(tabAccountId || undefined),
+    // Also while a chain is waiting: drafting 50 is pure string formatting and
+    // regularly finishes between two polls, so without this the chain never sees
+    // the state it is waiting for.
     refetchInterval: (q) =>
-      (q.state.data as SearchProgress | undefined)?.status === "running" ? 2000 : false,
+      (q.state.data as SearchProgress | undefined)?.status === "running" ||
+      chainPending ||
+      noteWaitsForJob
+        ? 1500
+        : false,
   });
   const running = progress?.status === "running";
+
+  /** Show a note, and if it reports a job, clear it once that job has finished. */
+  const setJobNote = (message: string, tracksJob: boolean) => {
+    setNote(message);
+    if (!tracksJob) return;
+    jobNoteText.current = message;
+    // The record on screen now. Only a record written after it -- the job's own
+    // start or finish -- may clear the note, never the one already showing.
+    jobNoteBaseline.current = progress?.heartbeat ?? null;
+    jobNoteSince.current = Date.now();
+    setNoteWaitsForJob(true);
+  };
+
+  useEffect(() => {
+    if (!noteWaitsForJob) return;
+    // Something else has been written since: that note is not ours to clear.
+    if (note !== jobNoteText.current) {
+      setNoteWaitsForJob(false);
+      return;
+    }
+    // Bounded, so a job that never reports back cannot keep this polling forever.
+    // The note simply stays, exactly as before.
+    if (Date.now() - jobNoteSince.current > 120_000) {
+      setNoteWaitsForJob(false);
+      return;
+    }
+    if (!progress || progress.status === "running") return;
+    if ((progress.heartbeat ?? null) === jobNoteBaseline.current) return;
+    setNote(null);
+    setNoteWaitsForJob(false);
+  }, [progress, note, noteWaitsForJob]);
 
   // The search key the server assigned to the last run, so the counts and the
   // list scope to the filters actually searched rather than to whatever is
@@ -629,7 +688,7 @@ export default function ClassicSearchLinkedIn() {
       }),
     onSuccess: (data) => {
       if (data.search_key) setSearchKey(data.search_key);
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       invalidate();
     },
     onError: () => setNote("Could not start the search."),
@@ -679,10 +738,6 @@ export default function ClassicSearchLinkedIn() {
     return text;
   };
 
-  // Set while a "draft, approve & send" press is in flight.
-  const chainSend = useRef(false);
-  const [chainPending, setChainPending] = useState(false);
-
   const draft = useMutation({
     // `limit` is "add this many more". The endpoint's `target` (a total) is no
     // longer sent from here.
@@ -696,7 +751,7 @@ export default function ClassicSearchLinkedIn() {
         ...(Number(howMany) > 0 ? { limit: Number(howMany) } : {}),
       }),
     onSuccess: (data) => {
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       // Nothing queued, so there will be no "drafting finished" to send on.
       if (!data.started) {
         chainSend.current = false;
@@ -733,7 +788,7 @@ export default function ClassicSearchLinkedIn() {
         accountId: tabAccountId || undefined,
       }),
     onSuccess: (data) => {
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       setChainPending(false);
       invalidate();
     },
@@ -746,24 +801,47 @@ export default function ClassicSearchLinkedIn() {
   // "Draft, approve & send" in one press. The send waits for the DRAFTING to
   // finish, not merely to start: the draft endpoint returns as soon as the job
   // is queued, so sending immediately would find nothing to send.
-  const draftWasRunning = useRef(false);
+  //
+  // It watches for the draft job to reach a TERMINAL state rather than for it to
+  // go running -> finished. That edge is never seen when the job starts and ends
+  // inside one poll interval, which is the normal case here -- and when it was
+  // missed the send never fired and the button sat on "Working..." until the page
+  // was reloaded.
   useEffect(() => {
-    if (running && progress?.job === "draft") {
-      draftWasRunning.current = true;
+    if (!chainSend.current) return;
+    // Switched accounts mid-chain. The progress now on screen belongs to another
+    // account, and so do the message and filters a send would use, so give up
+    // rather than send anything. The drafts already made are safe on the server.
+    if (tabAccountId !== chainAccount.current) {
+      chainSend.current = false;
+      setChainPending(false);
       return;
     }
-    if (!draftWasRunning.current || running) return;
-    draftWasRunning.current = false;
-    if (!chainSend.current) return;
-    chainSend.current = false;
-    // A drafting run that failed or was stopped does not roll on into sending.
-    if (progress?.status === "done" && activeMessage) {
-      send.mutate(activeMessage);
-    } else {
+    // Only a record written AFTER this press counts. The one on screen when the
+    // button was pressed may be an older "draft done" on this same account, and
+    // acting on it would start a send before the new drafts exist.
+    const fresh = (progress?.heartbeat ?? null) !== chainBaseline.current;
+    if (fresh && progress?.job === "draft" && progress.status !== "running") {
+      chainSend.current = false;
+      // A drafting run that failed or was stopped does not roll on into sending.
+      if (progress.status === "done" && activeMessage) {
+        send.mutate(activeMessage);
+      } else {
+        setChainPending(false);
+      }
+      return;
+    }
+    // Last resort. Whatever went wrong, the button must not spin forever, and
+    // the work is not lost -- the drafts are on the server either way.
+    if (chainStartedAt.current && Date.now() - chainStartedAt.current > 90_000) {
+      chainSend.current = false;
       setChainPending(false);
+      setNote(
+        'Drafting finished but sending did not start on its own — press "Approve & send all".'
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, progress?.job, progress?.status, activeMessage]);
+  }, [progress, activeMessage, tabAccountId]);
 
   const startDrafting = (andSend: boolean) => {
     const text = requireMessage();
@@ -775,14 +853,19 @@ export default function ClassicSearchLinkedIn() {
       return;
     }
     chainSend.current = andSend;
+    chainStartedAt.current = andSend ? Date.now() : 0;
+    chainAccount.current = tabAccountId;
+    chainBaseline.current = progress?.heartbeat ?? null;
     setChainPending(andSend);
     draft.mutate(text);
   };
 
   const stop = useMutation({
-    mutationFn: stopSearchJob,
+    mutationFn: () => stopSearchJob(tabAccountId || undefined),
     onSuccess: (data) => {
-      setNote(data.message);
+      // "Stopping..." is job state; "Nothing is running" and "cleared a job that
+      // had already stopped" are final answers and stay until replaced.
+      setJobNote(data.message, Boolean(data.stopped) && running);
       invalidate();
     },
   });
@@ -840,7 +923,10 @@ export default function ClassicSearchLinkedIn() {
               value={activeId ?? ""}
               onChange={(e) => e.target.value && selectAccount.mutate(e.target.value)}
               className="mt-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
-              disabled={busy}
+              // Never locked by a running job. Jobs are per account and run on the
+              // server, so switching to another account mid-run is safe: the run
+              // carries on, and this page simply shows the other account.
+              disabled={selectAccount.isPending}
             >
               <option value="">Select an account…</option>
               {accounts.map((a) => (
@@ -876,7 +962,8 @@ export default function ClassicSearchLinkedIn() {
           <Button
             variant="secondary"
             onClick={() => connectAccount.mutate("New LinkedIn account")}
-            disabled={busy || connectAccount.isPending}
+            // Linking a DIFFERENT account cannot affect this account's running job.
+            disabled={connectAccount.isPending}
             title="Link a different LinkedIn account"
           >
             Connect another
