@@ -501,6 +501,14 @@ export default function ClassicSearchLinkedIn() {
   //: that moment. The chain effect below explains why both are needed.
   const chainAccount = useRef("");
   const chainBaseline = useRef<string | null>(null);
+  // A green note that reports a job -- started, refused because one is running,
+  // or stopping -- stops being true the moment that job ends, yet it used to sit
+  // there until something else replaced it. These let it clear itself then, and
+  // ONLY that exact note: anything written since is left alone.
+  const [noteWaitsForJob, setNoteWaitsForJob] = useState(false);
+  const jobNoteText = useRef<string | null>(null);
+  const jobNoteBaseline = useRef<string | null>(null);
+  const jobNoteSince = useRef(0);
 
   const { data: progress } = useQuery({
     // Keyed by this tab's account. Job state is per account now, so a send running
@@ -511,11 +519,44 @@ export default function ClassicSearchLinkedIn() {
     // regularly finishes between two polls, so without this the chain never sees
     // the state it is waiting for.
     refetchInterval: (q) =>
-      (q.state.data as SearchProgress | undefined)?.status === "running" || chainPending
+      (q.state.data as SearchProgress | undefined)?.status === "running" ||
+      chainPending ||
+      noteWaitsForJob
         ? 1500
         : false,
   });
   const running = progress?.status === "running";
+
+  /** Show a note, and if it reports a job, clear it once that job has finished. */
+  const setJobNote = (message: string, tracksJob: boolean) => {
+    setNote(message);
+    if (!tracksJob) return;
+    jobNoteText.current = message;
+    // The record on screen now. Only a record written after it -- the job's own
+    // start or finish -- may clear the note, never the one already showing.
+    jobNoteBaseline.current = progress?.heartbeat ?? null;
+    jobNoteSince.current = Date.now();
+    setNoteWaitsForJob(true);
+  };
+
+  useEffect(() => {
+    if (!noteWaitsForJob) return;
+    // Something else has been written since: that note is not ours to clear.
+    if (note !== jobNoteText.current) {
+      setNoteWaitsForJob(false);
+      return;
+    }
+    // Bounded, so a job that never reports back cannot keep this polling forever.
+    // The note simply stays, exactly as before.
+    if (Date.now() - jobNoteSince.current > 120_000) {
+      setNoteWaitsForJob(false);
+      return;
+    }
+    if (!progress || progress.status === "running") return;
+    if ((progress.heartbeat ?? null) === jobNoteBaseline.current) return;
+    setNote(null);
+    setNoteWaitsForJob(false);
+  }, [progress, note, noteWaitsForJob]);
 
   // The search key the server assigned to the last run, so the counts and the
   // list scope to the filters actually searched rather than to whatever is
@@ -647,7 +688,7 @@ export default function ClassicSearchLinkedIn() {
       }),
     onSuccess: (data) => {
       if (data.search_key) setSearchKey(data.search_key);
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       invalidate();
     },
     onError: () => setNote("Could not start the search."),
@@ -710,7 +751,7 @@ export default function ClassicSearchLinkedIn() {
         ...(Number(howMany) > 0 ? { limit: Number(howMany) } : {}),
       }),
     onSuccess: (data) => {
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       // Nothing queued, so there will be no "drafting finished" to send on.
       if (!data.started) {
         chainSend.current = false;
@@ -747,7 +788,7 @@ export default function ClassicSearchLinkedIn() {
         accountId: tabAccountId || undefined,
       }),
     onSuccess: (data) => {
-      setNote(data.message);
+      setJobNote(data.message, Boolean(data.started || data.busy));
       setChainPending(false);
       invalidate();
     },
@@ -822,7 +863,9 @@ export default function ClassicSearchLinkedIn() {
   const stop = useMutation({
     mutationFn: () => stopSearchJob(tabAccountId || undefined),
     onSuccess: (data) => {
-      setNote(data.message);
+      // "Stopping..." is job state; "Nothing is running" and "cleared a job that
+      // had already stopped" are final answers and stay until replaced.
+      setJobNote(data.message, Boolean(data.stopped) && running);
       invalidate();
     },
   });

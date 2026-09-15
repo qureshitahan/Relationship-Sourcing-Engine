@@ -1102,6 +1102,8 @@ export const runLinkedInSearch = (payload: {
     .post<{
       started: boolean;
       search_key?: string;
+      /** True when refused only because a job is already running on the account. */
+      busy?: boolean;
       message: string;
     }>("/api/linkedin-search/run", {
       filters: payload.filters,
@@ -1128,6 +1130,8 @@ export const draftAllSearchLeads = (payload: {
     .post<{
       started: boolean;
       candidates: number;
+      /** True when refused only because a job is already running on the account. */
+      busy?: boolean;
       message: string;
     }>("/api/linkedin-search/draft-all", {
       filters: payload.filters,
@@ -1159,7 +1163,7 @@ export const sendAllSearchLeads = (payload: {
   accountId?: string;
 }) =>
   api
-    .post<{ started: boolean; matched: number; message: string }>(
+    .post<{ started: boolean; matched: number; busy?: boolean; message: string }>(
       "/api/linkedin-search/send-all",
       {
         filters: payload.filters,
