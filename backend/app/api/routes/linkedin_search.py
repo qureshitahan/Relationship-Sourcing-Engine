@@ -278,9 +278,15 @@ def search_status(
 
 
 @router.get("/progress")
-def search_progress():
-    """Live state of the running search/draft/send job (poll this for the bar)."""
-    state = service.read_progress()
+def search_progress(account_id: Optional[str] = None):
+    """Live state of THIS account's search/draft/send job (poll this for the bar).
+
+    Per account: a job running on one account no longer shows as running on
+    another account's page, and so no longer disables that page's controls.
+    Omitted => the app-wide selected account, like every other endpoint here.
+    """
+    account = (account_id or "").strip() or service.active_account_id()
+    state = service.read_progress(account)
     # A job whose process died leaves "running" in the row for good. Report that
     # honestly here — this is what the bar and every disabled button read —
     # rather than in read_progress(), so a live worker's writes are never
@@ -519,14 +525,22 @@ def send_all(payload: SearchActionRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/stop")
-def stop(db: Session = Depends(get_db)):
-    """Halt the running job between items.
+def stop(
+    db: Session = Depends(get_db),
+    account_id: Optional[str] = Query(
+        None,
+        description="Whose job to stop. Omitted = the app-wide selected account.",
+    ),
+):
+    """Halt THIS account's running job between items.
 
     The message in flight finishes, so nothing is left half-sent: its checkpoint
-    row is resolved before the worker looks at the stop flag again.
+    row is resolved before the worker looks at the stop flag again. Another
+    account's run is left alone.
     """
-    if not service.request_stop():
-        if service.clear_stale_progress():
+    account = (account_id or "").strip() or service.active_account_id()
+    if not service.request_stop(account):
+        if service.clear_stale_progress(account):
             return {
                 "stopped": True,
                 "message": "That job had already stopped when the server "

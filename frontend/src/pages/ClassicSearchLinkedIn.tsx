@@ -497,10 +497,16 @@ export default function ClassicSearchLinkedIn() {
   const [chainPending, setChainPending] = useState(false);
   //: When the current chain began, so it can be given up on rather than spin.
   const chainStartedAt = useRef(0);
+  //: The account the chain was started on, and the progress record on screen at
+  //: that moment. The chain effect below explains why both are needed.
+  const chainAccount = useRef("");
+  const chainBaseline = useRef<string | null>(null);
 
   const { data: progress } = useQuery({
-    queryKey: ["linkedin-search", "progress"],
-    queryFn: getSearchProgress,
+    // Keyed by this tab's account. Job state is per account now, so a send running
+    // on another account neither shows here nor disables anything here.
+    queryKey: ["linkedin-search", "progress", tabAccountId],
+    queryFn: () => getSearchProgress(tabAccountId || undefined),
     // Also while a chain is waiting: drafting 50 is pure string formatting and
     // regularly finishes between two polls, so without this the chain never sees
     // the state it is waiting for.
@@ -762,7 +768,19 @@ export default function ClassicSearchLinkedIn() {
   // was reloaded.
   useEffect(() => {
     if (!chainSend.current) return;
-    if (progress?.job === "draft" && progress.status !== "running") {
+    // Switched accounts mid-chain. The progress now on screen belongs to another
+    // account, and so do the message and filters a send would use, so give up
+    // rather than send anything. The drafts already made are safe on the server.
+    if (tabAccountId !== chainAccount.current) {
+      chainSend.current = false;
+      setChainPending(false);
+      return;
+    }
+    // Only a record written AFTER this press counts. The one on screen when the
+    // button was pressed may be an older "draft done" on this same account, and
+    // acting on it would start a send before the new drafts exist.
+    const fresh = (progress?.heartbeat ?? null) !== chainBaseline.current;
+    if (fresh && progress?.job === "draft" && progress.status !== "running") {
       chainSend.current = false;
       // A drafting run that failed or was stopped does not roll on into sending.
       if (progress.status === "done" && activeMessage) {
@@ -782,7 +800,7 @@ export default function ClassicSearchLinkedIn() {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [progress, activeMessage]);
+  }, [progress, activeMessage, tabAccountId]);
 
   const startDrafting = (andSend: boolean) => {
     const text = requireMessage();
@@ -795,12 +813,14 @@ export default function ClassicSearchLinkedIn() {
     }
     chainSend.current = andSend;
     chainStartedAt.current = andSend ? Date.now() : 0;
+    chainAccount.current = tabAccountId;
+    chainBaseline.current = progress?.heartbeat ?? null;
     setChainPending(andSend);
     draft.mutate(text);
   };
 
   const stop = useMutation({
-    mutationFn: stopSearchJob,
+    mutationFn: () => stopSearchJob(tabAccountId || undefined),
     onSuccess: (data) => {
       setNote(data.message);
       invalidate();
@@ -860,7 +880,10 @@ export default function ClassicSearchLinkedIn() {
               value={activeId ?? ""}
               onChange={(e) => e.target.value && selectAccount.mutate(e.target.value)}
               className="mt-1 rounded-md border border-slate-300 px-3 py-2 text-sm"
-              disabled={busy}
+              // Never locked by a running job. Jobs are per account and run on the
+              // server, so switching to another account mid-run is safe: the run
+              // carries on, and this page simply shows the other account.
+              disabled={selectAccount.isPending}
             >
               <option value="">Select an account…</option>
               {accounts.map((a) => (
@@ -896,7 +919,8 @@ export default function ClassicSearchLinkedIn() {
           <Button
             variant="secondary"
             onClick={() => connectAccount.mutate("New LinkedIn account")}
-            disabled={busy || connectAccount.isPending}
+            // Linking a DIFFERENT account cannot affect this account's running job.
+            disabled={connectAccount.isPending}
             title="Link a different LinkedIn account"
           >
             Connect another

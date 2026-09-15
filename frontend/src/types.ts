@@ -606,6 +606,10 @@ export interface SearchProgress {
   stop_requested: boolean;
   message?: string | null;
   campaign_key?: string | null;
+  /** Whose job this record belongs to. */
+  account_id?: string | null;
+  /** When the job last wrote. Lets the page tell a fresh record from an old one. */
+  heartbeat?: string | null;
 }
 
 /** One resolved id for a filter LinkedIn will not take as free text. */

@@ -83,14 +83,25 @@ STATUS_STOPPED = "stopped"
 #: exists can be told apart from one still being worked on.
 _PROCESS_TOKEN = uuid.uuid4().hex[:16]
 
-#: One job at a time. Repeated clicks must not stack two workers over the same
-#: leads — the checkpoint would stop the duplicate, but the wasted provider calls
-#: and the confusing progress record are worth avoiding outright.
-_JOB_LOCKS: dict[str, threading.Lock] = {
-    "search": threading.Lock(),
-    "draft": threading.Lock(),
-    "send": threading.Lock(),
-}
+#: One job at a time PER ACCOUNT. Repeated clicks must not stack two workers over
+#: the same leads — the checkpoint would stop the duplicate, but the wasted provider
+#: calls and the confusing progress record are worth avoiding outright. These used
+#: to be global per kind, so a send on one account also refused a send on every
+#: other account; they are keyed by (kind, account) now.
+_JOB_KINDS = ("search", "draft", "send")
+_JOB_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_JOB_LOCKS_GUARD = threading.Lock()
+
+
+def _job_lock(kind: str, account_id: Optional[str]) -> threading.Lock:
+    if kind not in _JOB_KINDS:
+        raise ValueError(f"Unknown job kind: {kind}")
+    key = (kind, (account_id or "").strip())
+    with _JOB_LOCKS_GUARD:
+        lock = _JOB_LOCKS.get(key)
+        if lock is None:
+            lock = _JOB_LOCKS[key] = threading.Lock()
+        return lock
 
 _IDLE: dict = {
     "job": None,
@@ -110,7 +121,6 @@ _IDLE: dict = {
     "campaign_key": None,
 }
 
-_STOP = threading.Event()
 
 
 # --------------------------------------------------------------------------
@@ -213,8 +223,55 @@ def build_invite_note(*, note: Optional[str], message: str, name: Optional[str])
 # --------------------------------------------------------------------------
 
 
-def read_progress() -> dict:
-    raw = get_setting(PROGRESS_SETTING)
+def _progress_key(account_id: Optional[str]) -> str:
+    """The app_settings key holding ONE account's job state.
+
+    This used to be a single shared record, so a send running on one account
+    showed as "running" on every account's page and disabled every control there:
+    nobody could search or send from a second account until the first account's
+    paced batch had finished, often twenty minutes later. Each account now owns
+    its record. No account => the original shared key — the same fallback
+    ``linkedin_send_progress.key_for`` uses — so a caller that never learned about
+    accounts reads and writes exactly what it used to.
+    """
+    account = (account_id or "").strip()
+    if not account:
+        return PROGRESS_SETTING
+    key = f"{PROGRESS_SETTING}:{account}"
+    # app_settings.key is 100 characters. A long id is hashed rather than cut,
+    # because cutting could make two accounts share one record again.
+    if len(key) > 100:
+        key = f"{PROGRESS_SETTING}:{hashlib.sha1(account.encode('utf-8')).hexdigest()}"
+    return key
+
+
+#: Which account the job on THIS thread belongs to. Set by _run_job, so the job
+#: bodies keep calling write_progress()/stop_requested() exactly as before and
+#: still land on their own account's record and their own account's Stop.
+_CURRENT = threading.local()
+
+
+def _account(account_id: Optional[str] = None) -> Optional[str]:
+    """An explicit account wins; otherwise the account of the job on this thread."""
+    return (account_id or getattr(_CURRENT, "account_id", None) or "").strip() or None
+
+
+#: One Stop signal per account, so stopping one account's run leaves another's alone.
+_STOPS: dict[str, threading.Event] = {}
+_STOPS_GUARD = threading.Lock()
+
+
+def _stop_event(account_id: Optional[str] = None) -> threading.Event:
+    key = _account(account_id) or ""
+    with _STOPS_GUARD:
+        event = _STOPS.get(key)
+        if event is None:
+            event = _STOPS[key] = threading.Event()
+        return event
+
+
+def read_progress(account_id: Optional[str] = None) -> dict:
+    raw = get_setting(_progress_key(_account(account_id)))
     if not raw:
         return dict(_IDLE)
     try:
@@ -226,21 +283,29 @@ def read_progress() -> dict:
     return merged
 
 
-def _write(**fields) -> None:
-    state = read_progress()
+def _write(*, account_id: Optional[str] = None, **fields) -> None:
+    account = _account(account_id)
+    state = read_progress(account)
     state.update(fields)
     state["heartbeat"] = datetime.utcnow().isoformat()
-    set_setting(PROGRESS_SETTING, json.dumps(state))
+    set_setting(_progress_key(account), json.dumps(state))
 
 
-def write_progress(**fields) -> None:
-    _write(**fields)
+def write_progress(*, account_id: Optional[str] = None, **fields) -> None:
+    _write(account_id=account_id, **fields)
 
 
-def start_progress(job: str, *, total: int, campaign_key: Optional[str] = None) -> None:
-    _STOP.clear()
+def start_progress(
+    job: str,
+    *,
+    total: int,
+    campaign_key: Optional[str] = None,
+    account_id: Optional[str] = None,
+) -> None:
+    account = _account(account_id)
+    _stop_event(account).clear()
     set_setting(
-        PROGRESS_SETTING,
+        _progress_key(account),
         json.dumps(
             {
                 **_IDLE,
@@ -248,22 +313,34 @@ def start_progress(job: str, *, total: int, campaign_key: Optional[str] = None) 
                 "status": STATUS_RUNNING,
                 "total": int(total),
                 "campaign_key": campaign_key,
+                "account_id": account,
                 "heartbeat": datetime.utcnow().isoformat(),
             }
         ),
     )
 
 
-def finish_progress(*, stopped: bool = False, message: Optional[str] = None) -> None:
+def finish_progress(
+    *,
+    stopped: bool = False,
+    message: Optional[str] = None,
+    account_id: Optional[str] = None,
+) -> None:
     _write(
+        account_id=account_id,
         status=STATUS_STOPPED if stopped else STATUS_DONE,
         stop_requested=False,
         message=message,
     )
 
 
-def fail_progress(message: str) -> None:
-    _write(status=STATUS_FAILED, stop_requested=False, message=message)
+def fail_progress(message: str, account_id: Optional[str] = None) -> None:
+    _write(
+        account_id=account_id,
+        status=STATUS_FAILED,
+        stop_requested=False,
+        message=message,
+    )
 
 
 def stale_progress(state: dict) -> Optional[dict]:
@@ -291,58 +368,70 @@ def stale_progress(state: dict) -> Optional[dict]:
     return corrected
 
 
-def clear_stale_progress() -> bool:
+def clear_stale_progress(account_id: Optional[str] = None) -> bool:
     """Retire a dead ``running`` record so the page's buttons come back."""
-    state = read_progress()
+    account = _account(account_id)
+    state = read_progress(account)
     if stale_progress(state) is None:
         return False
-    set_setting(PROGRESS_SETTING, json.dumps({**_IDLE, "job": state.get("job")}))
+    set_setting(_progress_key(account), json.dumps({**_IDLE, "job": state.get("job")}))
     return True
 
 
-def request_stop() -> bool:
-    state = read_progress()
+def request_stop(account_id: Optional[str] = None) -> bool:
+    """Ask THIS account's running job to stop. Another account's run keeps going."""
+    account = _account(account_id)
+    state = read_progress(account)
     if state.get("status") != STATUS_RUNNING:
         return False
-    _STOP.set()
-    _write(stop_requested=True)
+    _stop_event(account).set()
+    _write(account_id=account, stop_requested=True)
     return True
 
 
-def stop_requested() -> bool:
-    return _STOP.is_set()
+def stop_requested(account_id: Optional[str] = None) -> bool:
+    return _stop_event(account_id).is_set()
 
 
-def sleep_unless_stopped(seconds: float) -> bool:
+def sleep_unless_stopped(seconds: float, account_id: Optional[str] = None) -> bool:
     """Pace between sends, but wake immediately when Stop is pressed."""
-    return _STOP.wait(timeout=seconds)
+    return _stop_event(account_id).wait(timeout=seconds)
 
 
-def _run_job(kind: str, work) -> bool:
-    """Run ``work`` on a daemon thread under the per-kind lock."""
-    lock = _JOB_LOCKS[kind]
+def _run_job(kind: str, work, account_id: Optional[str] = None) -> bool:
+    """Run ``work`` on a daemon thread under this account's lock for ``kind``.
+
+    The thread records which account it works for, so everything the job writes
+    lands on that account's progress record and only that account's Stop halts it.
+    """
+    account = (account_id or "").strip() or None
+    lock = _job_lock(kind, account)
     if not lock.acquire(blocking=False):
         return False
-    state = read_progress()
+    state = read_progress(account)
     if state.get("status") == STATUS_RUNNING and stale_progress(state) is None:
         lock.release()
         return False
 
     def runner() -> None:
+        _CURRENT.account_id = account
         db = SessionLocal()
         try:
             work(db)
         except Exception as exc:  # noqa: BLE001 - a job must not kill the process
             logger.exception("LinkedIn search %s job failed: %s", kind, exc)
             try:
-                fail_progress(str(exc)[:300])
+                fail_progress(str(exc)[:300], account_id=account)
             except Exception:  # noqa: BLE001
                 pass
         finally:
             db.close()
+            _CURRENT.account_id = None
             lock.release()
 
-    threading.Thread(target=runner, daemon=True, name=f"li-search-{kind}").start()
+    threading.Thread(
+        target=runner, daemon=True, name=f"li-search-{kind}-{account or 'shared'}"
+    ).start()
     return True
 
 
@@ -497,7 +586,7 @@ def launch_search(
             ),
         )
 
-    return _run_job("search", work)
+    return _run_job("search", work, account_id)
 
 
 # --------------------------------------------------------------------------
@@ -685,7 +774,7 @@ def launch_draft(
             limit=limit,
         )
 
-    return _run_job("draft", work)
+    return _run_job("draft", work, account_id)
 
 
 def approve_all(
@@ -1067,7 +1156,7 @@ def launch_send(
             search_key=search_key,
         )
 
-    return _run_job("send", work)
+    return _run_job("send", work, account_id)
 
 
 # --------------------------------------------------------------------------
