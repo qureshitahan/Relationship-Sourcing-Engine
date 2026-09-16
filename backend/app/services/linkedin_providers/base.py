@@ -123,6 +123,10 @@ class InviteResult:
     # True when the invite was rejected because they are already connected —
     # the caller should fall back to sending a direct message.
     already_connected: bool = False
+    # True when LinkedIn refused because it already has a recent invitation to
+    # this person from this account. Not a failure and not worth retrying: the
+    # invitation exists, it just was not sent by this module.
+    already_invited: bool = False
     error: Optional[str] = None
 
 

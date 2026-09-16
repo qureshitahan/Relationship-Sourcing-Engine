@@ -276,6 +276,16 @@ class UnipileLinkedInProvider(LinkedInProvider):
                 invitation_id=d.get("invitation_id") or d.get("id"),
             )
         body = resp.text or ""
+        # Checked before the already-connected test below: this body says
+        # "already" too, but means something entirely different.
+        if "already_invited_recently" in body.lower():
+            return InviteResult(
+                sent=False,
+                provider=self.name,
+                already_invited=True,
+                error="LinkedIn already has a recent invitation to this person "
+                "from this account.",
+            )
         if "already" in body.lower() and "connect" in body.lower():
             return InviteResult(sent=False, provider=self.name, already_connected=True,
                                 error="Already connected.")

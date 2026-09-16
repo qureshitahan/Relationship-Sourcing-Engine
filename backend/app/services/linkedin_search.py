@@ -478,14 +478,17 @@ def run_search(
     counts, the send queue — has to survive a page refresh and a restart.
     """
     provider = get_linkedin_provider(account_id)
+    # Everyone this account already has, from ANY search -- not just this one. A
+    # person found again through different filters is the same person, and storing
+    # them twice is what let them be approached twice.
     known = {
-        row.provider_id
+        row
         for row in db.execute(
-            select(LinkedInSearchLead).where(
+            select(LinkedInSearchLead.provider_id).where(
                 LinkedInSearchLead.account_id == account_id,
-                LinkedInSearchLead.search_key == search_key,
             )
         ).scalars().all()
+        if row
     }
     imported = skipped = 0
     # Resume where the last run for these filters stopped. Without this every run
@@ -629,6 +632,24 @@ def settled_lead_ids(db: Session, *, account_id: str, campaign_key: str) -> set[
     return {row for row in rows if row}
 
 
+def contacted_lead_ids(db: Session, *, account_id: str) -> set[str]:
+    """Everyone this account has ALREADY approached, under any search or message.
+
+    The scope that matters. ``settled_lead_ids`` answers the same question for one
+    message, which is what the counts on the page report; this one is what decides
+    who may be approached at all. A person reached once is never queued again --
+    LinkedIn refuses a second invitation regardless of what the message says, so a
+    per-message rule spent a run's attempts being turned away.
+    """
+    rows = db.execute(
+        select(LinkedInSearchSend.lead_provider_id).where(
+            LinkedInSearchSend.account_id == account_id,
+            LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
+        )
+    ).scalars().all()
+    return {row for row in rows if row}
+
+
 def eligible_leads(
     db: Session,
     *,
@@ -654,10 +675,11 @@ def eligible_leads(
     if limit is not None:
         query = query.limit(limit)
     leads = list(db.execute(query).scalars().all())
-    settled = settled_lead_ids(db, account_id=account_id, campaign_key=campaign_key)
-    if not settled:
+    # Account-wide, not per message: once approached, never queued again.
+    contacted = contacted_lead_ids(db, account_id=account_id)
+    if not contacted:
         return leads
-    return [lead for lead in leads if lead.provider_id not in settled]
+    return [lead for lead in leads if lead.provider_id not in contacted]
 
 
 def account_lead_filter(account_id: str, search_key: Optional[str] = None):
@@ -684,9 +706,10 @@ def unsettled_lead_filter(account_id: str, campaign_key: str):
     as work still to do is what let the followers page offer to send 97 messages
     for a run that could only ever attempt 3.
     """
+    # No campaign filter: a person this account approached under ANY message is
+    # out, so a leftover draft written under a different message can never send.
     settled = select(LinkedInSearchSend.lead_provider_id).where(
         LinkedInSearchSend.account_id == account_id,
-        LinkedInSearchSend.campaign_key == campaign_key,
         LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
     )
     settled_leads = select(LinkedInSearchLead.id).where(
@@ -853,6 +876,20 @@ def _claim(
     row is re-used in place so retries never grow the table.
     """
     now = datetime.utcnow()
+    # The guarantee lives here, not in whatever filtered the queue: one approach
+    # per person per account, whatever the message. Checked across every campaign,
+    # because the unique index below is per campaign and would happily allow a
+    # second row under a different one.
+    approached = db.execute(
+        select(LinkedInSearchSend.id).where(
+            LinkedInSearchSend.account_id == account_id,
+            LinkedInSearchSend.lead_provider_id == lead.provider_id,
+            LinkedInSearchSend.campaign_key != campaign_key,
+            LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
+        )
+    ).scalars().first()
+    if approached is not None:
+        return None
     existing = db.execute(
         select(LinkedInSearchSend).where(
             LinkedInSearchSend.account_id == account_id,
@@ -1013,6 +1050,19 @@ def _reach(
         claim.error = None
         db.commit()
         return "sent"
+    if getattr(invite, "already_invited", False):
+        # Not a failure: LinkedIn already holds an invitation to this person from
+        # this account, sent before this module knew about them (the LinkedIn tab,
+        # or by hand). Recording it as INVITED makes our record match LinkedIn's
+        # and settles them for good, instead of leaving a retryable row that is
+        # refused again on every future run.
+        claim.status = SearchSendStatus.INVITED
+        claim.reach = "invite"
+        claim.error = invite.error
+        msg.status = LinkedInStatus.INVITE_SENT
+        msg.error = invite.error
+        db.commit()
+        return "duplicate"
     if not invite.sent:
         claim.status = SearchSendStatus.FAILED
         claim.error = invite.error or "LinkedIn invitation failed"
@@ -1219,11 +1269,15 @@ def campaign_stats(
     settled_providers = settled_lead_ids(
         db, account_id=account_id, campaign_key=campaign_key
     )
+    # Counted against everyone this account has approached, matching what the
+    # queue will actually accept. `settled_providers` above stays per message,
+    # because "already contacted with this message" is what the page reports.
+    contacted_all = contacted_lead_ids(db, account_id=account_id)
     settled_ids = set(
         db.execute(
             select(LinkedInSearchLead.id).where(
                 LinkedInSearchLead.account_id == account_id,
-                LinkedInSearchLead.provider_id.in_(settled_providers or [""]),
+                LinkedInSearchLead.provider_id.in_(contacted_all or [""]),
             )
         ).scalars().all()
     )
