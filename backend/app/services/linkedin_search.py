@@ -444,10 +444,22 @@ def _run_job(kind: str, work, account_id: Optional[str] = None) -> bool:
 #: cap, because that is what a day's work is.
 SEARCH_BATCH = 50
 
-#: Safety bound on how many provider calls one press may make. Classic search
-#: returns ten per page, so fifty people is five calls; the rest of the headroom
-#: is for pages that are mostly people already stored.
-MAX_SEARCH_PAGES = 25
+#: How many pages in a row may add NOBODY new before a press gives up. A page
+#: that adds nobody means we are walking ground already covered; ten of those in
+#: a row (a hundred profiles on classic search) means there is nothing left worth
+#: paging for under these filters.
+#:
+#: This replaced a flat 25-page bound, which measured the wrong thing: a filter
+#: set overlapping one already run could spend all 25 pages on people already
+#: stored and return fewer than the 50 asked for, while a search that was still
+#: finding people got cut off at the same point.
+MAX_BARREN_PAGES = 10
+
+#: Absolute ceiling, so a provider that always answers with a cursor can never
+#: loop forever. Far above what a full batch needs -- fifty new people is five
+#: pages on classic search -- so in practice the barren-page rule is what stops a
+#: run, not this.
+MAX_SEARCH_PAGES = 100
 
 
 def run_search(
@@ -468,18 +480,27 @@ def run_search(
     Search felt like. Pages are now an implementation detail — it keeps asking
     for the next one until it has what was wanted.
 
+    Exactly ``want`` are imported, never the remainder of a page as a bonus: a
+    press asking for 50 came back with 58 when the last page carried more than
+    was needed. Stopping inside a page leaves the cursor ON that page, so the
+    people not taken are the next press's first results instead of being skipped
+    for good -- they are reachable through no other cursor.
+
     Stored, not just shown, because everything after this — drafting, the tab
     counts, the send queue — has to survive a page refresh and a restart.
     """
     provider = get_linkedin_provider(account_id)
+    # Everyone this account already has, from ANY search -- not just this one. A
+    # person found again through different filters is the same person, and storing
+    # them twice is what let them be approached twice.
     known = {
-        row.provider_id
+        row
         for row in db.execute(
-            select(LinkedInSearchLead).where(
+            select(LinkedInSearchLead.provider_id).where(
                 LinkedInSearchLead.account_id == account_id,
-                LinkedInSearchLead.search_key == search_key,
             )
         ).scalars().all()
+        if row
     }
     imported = skipped = 0
     # Resume where the last run for these filters stopped. Without this every run
@@ -492,11 +513,15 @@ def run_search(
 
     want = max(1, int(want))
     pages_fetched = 0
+    barren_pages = 0
+    # Keep asking while new people are still coming, and stop the moment `want`
+    # of them are in -- the condition right here.
     while imported < want:
         if stop_requested():
             break
-        # Bounded so a filter that keeps returning people already stored cannot
-        # walk LinkedIn all night looking for its fiftieth new one.
+        # Nothing new for several pages running: this is covered ground.
+        if barren_pages >= MAX_BARREN_PAGES:
+            break
         if pages_fetched >= MAX_SEARCH_PAGES:
             break
         pages_fetched += 1
@@ -508,7 +533,13 @@ def run_search(
             break
         if total is None:
             total = page.total
+        used_cursor = cursor
+        stopped_mid_page = False
+        before_page = imported
         for lead in page.leads:
+            if imported >= want:
+                stopped_mid_page = True
+                break
             if lead.provider_id in known:
                 skipped += 1
                 continue
@@ -535,6 +566,14 @@ def run_search(
             imported += 1
         db.commit()
         write_progress(imported=imported, done=imported)
+        barren_pages = 0 if imported > before_page else barren_pages + 1
+        if stopped_mid_page:
+            # Stay on the page we stopped inside. Advancing past it would skip the
+            # people we did not take, permanently, since this cursor is the only
+            # way back to them. Re-fetching the page next time costs one call, and
+            # the ones already stored are recognised and skipped.
+            write_cursor(account_id, search_key, used_cursor)
+            break
         cursor = page.cursor
         # Saved per page, not at the end: a run stopped or killed half way still
         # carries on from the right place next time.
@@ -552,6 +591,15 @@ def run_search(
         "total": total,
         "error": error,
         "exhausted": exhausted,
+        # Short of what was asked for, with pages still available and nobody
+        # having pressed Stop: we ran out of NEW people rather than out of
+        # people. Worth saying, because "found 12" otherwise looks like a fault.
+        "gave_up": (
+            imported < want
+            and not exhausted
+            and error is None
+            and not stop_requested()
+        ),
     }
 
 
@@ -572,17 +620,25 @@ def launch_search(
             fail_progress(result["error"][:300])
             return
         found = result["imported"]
+        if result["exhausted"]:
+            tail = (
+                " That is everyone LinkedIn has for these filters — "
+                "searching again starts from the top."
+            )
+        elif result["gave_up"]:
+            tail = (
+                " LinkedIn kept returning people already on your list, so the "
+                "search stopped there — try different filters, or press Search "
+                "again to keep looking from where it left off."
+            )
+        else:
+            tail = " Search again for the next batch."
         finish_progress(
             stopped=stop_requested(),
             message=(
                 f"Found {found} new {'person' if found == 1 else 'people'}."
                 + (f" {result['skipped']} already on the list." if result["skipped"] else "")
-                + (
-                    " That is everyone LinkedIn has for these filters — "
-                    "searching again starts from the top."
-                    if result["exhausted"]
-                    else " Search again for the next batch."
-                )
+                + tail
             ),
         )
 
@@ -605,6 +661,24 @@ def settled_lead_ids(db: Session, *, account_id: str, campaign_key: str) -> set[
         select(LinkedInSearchSend.lead_provider_id).where(
             LinkedInSearchSend.account_id == account_id,
             LinkedInSearchSend.campaign_key == campaign_key,
+            LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
+        )
+    ).scalars().all()
+    return {row for row in rows if row}
+
+
+def contacted_lead_ids(db: Session, *, account_id: str) -> set[str]:
+    """Everyone this account has ALREADY approached, under any search or message.
+
+    The scope that matters. ``settled_lead_ids`` answers the same question for one
+    message, which is what the counts on the page report; this one is what decides
+    who may be approached at all. A person reached once is never queued again --
+    LinkedIn refuses a second invitation regardless of what the message says, so a
+    per-message rule spent a run's attempts being turned away.
+    """
+    rows = db.execute(
+        select(LinkedInSearchSend.lead_provider_id).where(
+            LinkedInSearchSend.account_id == account_id,
             LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
         )
     ).scalars().all()
@@ -636,10 +710,11 @@ def eligible_leads(
     if limit is not None:
         query = query.limit(limit)
     leads = list(db.execute(query).scalars().all())
-    settled = settled_lead_ids(db, account_id=account_id, campaign_key=campaign_key)
-    if not settled:
+    # Account-wide, not per message: once approached, never queued again.
+    contacted = contacted_lead_ids(db, account_id=account_id)
+    if not contacted:
         return leads
-    return [lead for lead in leads if lead.provider_id not in settled]
+    return [lead for lead in leads if lead.provider_id not in contacted]
 
 
 def account_lead_filter(account_id: str, search_key: Optional[str] = None):
@@ -666,9 +741,10 @@ def unsettled_lead_filter(account_id: str, campaign_key: str):
     as work still to do is what let the followers page offer to send 97 messages
     for a run that could only ever attempt 3.
     """
+    # No campaign filter: a person this account approached under ANY message is
+    # out, so a leftover draft written under a different message can never send.
     settled = select(LinkedInSearchSend.lead_provider_id).where(
         LinkedInSearchSend.account_id == account_id,
-        LinkedInSearchSend.campaign_key == campaign_key,
         LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
     )
     settled_leads = select(LinkedInSearchLead.id).where(
@@ -835,6 +911,20 @@ def _claim(
     row is re-used in place so retries never grow the table.
     """
     now = datetime.utcnow()
+    # The guarantee lives here, not in whatever filtered the queue: one approach
+    # per person per account, whatever the message. Checked across every campaign,
+    # because the unique index below is per campaign and would happily allow a
+    # second row under a different one.
+    approached = db.execute(
+        select(LinkedInSearchSend.id).where(
+            LinkedInSearchSend.account_id == account_id,
+            LinkedInSearchSend.lead_provider_id == lead.provider_id,
+            LinkedInSearchSend.campaign_key != campaign_key,
+            LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
+        )
+    ).scalars().first()
+    if approached is not None:
+        return None
     existing = db.execute(
         select(LinkedInSearchSend).where(
             LinkedInSearchSend.account_id == account_id,
@@ -995,6 +1085,19 @@ def _reach(
         claim.error = None
         db.commit()
         return "sent"
+    if getattr(invite, "already_invited", False):
+        # Not a failure: LinkedIn already holds an invitation to this person from
+        # this account, sent before this module knew about them (the LinkedIn tab,
+        # or by hand). Recording it as INVITED makes our record match LinkedIn's
+        # and settles them for good, instead of leaving a retryable row that is
+        # refused again on every future run.
+        claim.status = SearchSendStatus.INVITED
+        claim.reach = "invite"
+        claim.error = invite.error
+        msg.status = LinkedInStatus.INVITE_SENT
+        msg.error = invite.error
+        db.commit()
+        return "duplicate"
     if not invite.sent:
         claim.status = SearchSendStatus.FAILED
         claim.error = invite.error or "LinkedIn invitation failed"
@@ -1201,11 +1304,15 @@ def campaign_stats(
     settled_providers = settled_lead_ids(
         db, account_id=account_id, campaign_key=campaign_key
     )
+    # Counted against everyone this account has approached, matching what the
+    # queue will actually accept. `settled_providers` above stays per message,
+    # because "already contacted with this message" is what the page reports.
+    contacted_all = contacted_lead_ids(db, account_id=account_id)
     settled_ids = set(
         db.execute(
             select(LinkedInSearchLead.id).where(
                 LinkedInSearchLead.account_id == account_id,
-                LinkedInSearchLead.provider_id.in_(settled_providers or [""]),
+                LinkedInSearchLead.provider_id.in_(contacted_all or [""]),
             )
         ).scalars().all()
     )
