@@ -468,6 +468,12 @@ def run_search(
     Search felt like. Pages are now an implementation detail — it keeps asking
     for the next one until it has what was wanted.
 
+    Exactly ``want`` are imported, never the remainder of a page as a bonus: a
+    press asking for 50 came back with 58 when the last page carried more than
+    was needed. Stopping inside a page leaves the cursor ON that page, so the
+    people not taken are the next press's first results instead of being skipped
+    for good -- they are reachable through no other cursor.
+
     Stored, not just shown, because everything after this — drafting, the tab
     counts, the send queue — has to survive a page refresh and a restart.
     """
@@ -508,7 +514,12 @@ def run_search(
             break
         if total is None:
             total = page.total
+        used_cursor = cursor
+        stopped_mid_page = False
         for lead in page.leads:
+            if imported >= want:
+                stopped_mid_page = True
+                break
             if lead.provider_id in known:
                 skipped += 1
                 continue
@@ -535,6 +546,13 @@ def run_search(
             imported += 1
         db.commit()
         write_progress(imported=imported, done=imported)
+        if stopped_mid_page:
+            # Stay on the page we stopped inside. Advancing past it would skip the
+            # people we did not take, permanently, since this cursor is the only
+            # way back to them. Re-fetching the page next time costs one call, and
+            # the ones already stored are recognised and skipped.
+            write_cursor(account_id, search_key, used_cursor)
+            break
         cursor = page.cursor
         # Saved per page, not at the end: a run stopped or killed half way still
         # carries on from the right place next time.
