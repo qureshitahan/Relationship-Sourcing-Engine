@@ -444,10 +444,22 @@ def _run_job(kind: str, work, account_id: Optional[str] = None) -> bool:
 #: cap, because that is what a day's work is.
 SEARCH_BATCH = 50
 
-#: Safety bound on how many provider calls one press may make. Classic search
-#: returns ten per page, so fifty people is five calls; the rest of the headroom
-#: is for pages that are mostly people already stored.
-MAX_SEARCH_PAGES = 25
+#: How many pages in a row may add NOBODY new before a press gives up. A page
+#: that adds nobody means we are walking ground already covered; ten of those in
+#: a row (a hundred profiles on classic search) means there is nothing left worth
+#: paging for under these filters.
+#:
+#: This replaced a flat 25-page bound, which measured the wrong thing: a filter
+#: set overlapping one already run could spend all 25 pages on people already
+#: stored and return fewer than the 50 asked for, while a search that was still
+#: finding people got cut off at the same point.
+MAX_BARREN_PAGES = 10
+
+#: Absolute ceiling, so a provider that always answers with a cursor can never
+#: loop forever. Far above what a full batch needs -- fifty new people is five
+#: pages on classic search -- so in practice the barren-page rule is what stops a
+#: run, not this.
+MAX_SEARCH_PAGES = 100
 
 
 def run_search(
@@ -501,11 +513,15 @@ def run_search(
 
     want = max(1, int(want))
     pages_fetched = 0
+    barren_pages = 0
+    # Keep asking while new people are still coming, and stop the moment `want`
+    # of them are in -- the condition right here.
     while imported < want:
         if stop_requested():
             break
-        # Bounded so a filter that keeps returning people already stored cannot
-        # walk LinkedIn all night looking for its fiftieth new one.
+        # Nothing new for several pages running: this is covered ground.
+        if barren_pages >= MAX_BARREN_PAGES:
+            break
         if pages_fetched >= MAX_SEARCH_PAGES:
             break
         pages_fetched += 1
@@ -519,6 +535,7 @@ def run_search(
             total = page.total
         used_cursor = cursor
         stopped_mid_page = False
+        before_page = imported
         for lead in page.leads:
             if imported >= want:
                 stopped_mid_page = True
@@ -549,6 +566,7 @@ def run_search(
             imported += 1
         db.commit()
         write_progress(imported=imported, done=imported)
+        barren_pages = 0 if imported > before_page else barren_pages + 1
         if stopped_mid_page:
             # Stay on the page we stopped inside. Advancing past it would skip the
             # people we did not take, permanently, since this cursor is the only
@@ -573,6 +591,15 @@ def run_search(
         "total": total,
         "error": error,
         "exhausted": exhausted,
+        # Short of what was asked for, with pages still available and nobody
+        # having pressed Stop: we ran out of NEW people rather than out of
+        # people. Worth saying, because "found 12" otherwise looks like a fault.
+        "gave_up": (
+            imported < want
+            and not exhausted
+            and error is None
+            and not stop_requested()
+        ),
     }
 
 
@@ -593,17 +620,25 @@ def launch_search(
             fail_progress(result["error"][:300])
             return
         found = result["imported"]
+        if result["exhausted"]:
+            tail = (
+                " That is everyone LinkedIn has for these filters — "
+                "searching again starts from the top."
+            )
+        elif result["gave_up"]:
+            tail = (
+                " LinkedIn kept returning people already on your list, so the "
+                "search stopped there — try different filters, or press Search "
+                "again to keep looking from where it left off."
+            )
+        else:
+            tail = " Search again for the next batch."
         finish_progress(
             stopped=stop_requested(),
             message=(
                 f"Found {found} new {'person' if found == 1 else 'people'}."
                 + (f" {result['skipped']} already on the list." if result["skipped"] else "")
-                + (
-                    " That is everyone LinkedIn has for these filters — "
-                    "searching again starts from the top."
-                    if result["exhausted"]
-                    else " Search again for the next batch."
-                )
+                + tail
             ),
         )
 
