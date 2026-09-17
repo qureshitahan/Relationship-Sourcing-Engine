@@ -667,6 +667,22 @@ def settled_lead_ids(db: Session, *, account_id: str, campaign_key: str) -> set[
     return {row for row in rows if row}
 
 
+def _contacted_provider_ids(account_id: str):
+    """Everyone this account has approached, as a SUBQUERY.
+
+    A subquery rather than a set because callers must apply it in SQL, alongside
+    their other filters and BEFORE any LIMIT. Filtering after a LIMIT, in Python,
+    is what made "Draft 50" come back with nobody: the limit took the fifty
+    OLDEST undrafted leads -- all long since contacted -- discarded every one of
+    them, and never reached the fifty new people at the end of the list. The
+    followers module had this exact bug and the exact same fix.
+    """
+    return select(LinkedInSearchSend.lead_provider_id).where(
+        LinkedInSearchSend.account_id == account_id,
+        LinkedInSearchSend.status.in_(SearchSendStatus.SETTLED),
+    )
+
+
 def contacted_lead_ids(db: Session, *, account_id: str) -> set[str]:
     """Everyone this account has ALREADY approached, under any search or message.
 
@@ -704,17 +720,15 @@ def eligible_leads(
             LinkedInSearchLead.account_id == account_id,
             LinkedInSearchLead.search_key == search_key,
             LinkedInSearchLead.id.not_in(drafted),
+            # In SQL, BEFORE the limit. Account-wide, not per message: once
+            # approached, never queued again.
+            LinkedInSearchLead.provider_id.not_in(_contacted_provider_ids(account_id)),
         )
         .order_by(LinkedInSearchLead.id)
     )
     if limit is not None:
         query = query.limit(limit)
-    leads = list(db.execute(query).scalars().all())
-    # Account-wide, not per message: once approached, never queued again.
-    contacted = contacted_lead_ids(db, account_id=account_id)
-    if not contacted:
-        return leads
-    return [lead for lead in leads if lead.provider_id not in contacted]
+    return list(db.execute(query).scalars().all())
 
 
 def account_lead_filter(account_id: str, search_key: Optional[str] = None):
