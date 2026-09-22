@@ -217,7 +217,12 @@ class UnipileLinkedInProvider(LinkedInProvider):
                 resp = client.post(url, headers=self._headers(), files=files)
         except httpx.HTTPError as exc:
             logger.warning("Unipile send_message network error: %s", exc)
-            return SendResult(sent=False, provider=self.name, error=str(exc))
+            # The POST may well have reached LinkedIn before the answer was lost,
+            # so this is "unknown", not "did not send". Flagged so callers hold
+            # it for review instead of sending the same DM again.
+            return SendResult(
+                sent=False, provider=self.name, error=str(exc), network_error=True
+            )
         if resp.status_code not in (200, 201):
             logger.warning(
                 "Unipile start chat failed (%s): %s", resp.status_code, resp.text[:300]
@@ -226,6 +231,9 @@ class UnipileLinkedInProvider(LinkedInProvider):
                 sent=False, provider=self.name,
                 error=f"Unipile {resp.status_code}: {resp.text[:200]}",
                 unreachable=_is_unreachable(resp.status_code, resp.text),
+                # 5xx is the gateway failing after it may already have forwarded
+                # the message; 4xx is LinkedIn refusing it outright.
+                network_error=resp.status_code >= 500,
             )
         d = resp.json() or {}
         return SendResult(
@@ -244,11 +252,16 @@ class UnipileLinkedInProvider(LinkedInProvider):
             with httpx.Client(timeout=REQUEST_TIMEOUT, trust_env=False) as client:
                 resp = client.post(url, headers=self._headers(), files=files)
         except httpx.HTTPError as exc:
-            return SendResult(sent=False, provider=self.name, error=str(exc))
+            # Same ambiguity as send_message above: the reply in an existing chat
+            # may have landed before the connection dropped.
+            return SendResult(
+                sent=False, provider=self.name, error=str(exc), network_error=True
+            )
         if resp.status_code not in (200, 201):
             return SendResult(
                 sent=False, provider=self.name,
                 error=f"Unipile {resp.status_code}: {resp.text[:200]}",
+                network_error=resp.status_code >= 500,
             )
         d = resp.json() or {}
         return SendResult(

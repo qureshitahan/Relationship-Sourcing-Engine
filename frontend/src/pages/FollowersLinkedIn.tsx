@@ -91,6 +91,9 @@ function JobBar({ progress }: { progress: FollowersProgress }) {
     const details = [
       progress.skipped > 0 ? `${progress.skipped} not reachable` : null,
       progress.failed > 0 ? `${progress.failed} failed` : null,
+      progress.unconfirmed
+        ? `${progress.unconfirmed} unconfirmed — check before resending`
+        : null,
       progress.duplicates ? `${progress.duplicates} already contacted` : null,
       progress.held ? `${progress.held} left for the next run` : null,
       status === "stopped" ? "stopped early" : null,
