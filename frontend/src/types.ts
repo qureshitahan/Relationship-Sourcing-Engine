@@ -501,6 +501,9 @@ export interface FollowersProgress {
   // the next run. Optional so a record written before these existed still fits.
   duplicates?: number;
   held?: number;
+  // Sends the provider never confirmed — held for review instead of retried, so
+  // they read apart from outright failures. Optional for the same reason.
+  unconfirmed?: number;
   imported: number;
   stop_requested: boolean;
   message?: string | null;

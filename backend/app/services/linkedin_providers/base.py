@@ -50,6 +50,14 @@ class SendResult:
     # and no InMail available. A permanent-for-now condition, not a transport
     # failure — callers skip them cleanly instead of counting a send failure.
     unreachable: bool = False
+    # True when the outcome is UNKNOWN rather than refused: the request timed
+    # out, the connection dropped, or the provider answered 5xx. LinkedIn may
+    # already have delivered the message before the answer was lost, so callers
+    # must not retry these automatically — a second identical DM is worse than a
+    # missed one. A clean 4xx refusal leaves this False: nothing was delivered.
+    # Mirrors ``LinkedInProfile.network_error`` above, which already draws this
+    # same distinction for profile lookups.
+    network_error: bool = False
 
 
 @dataclass

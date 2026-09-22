@@ -105,6 +105,9 @@ _IDLE: dict = {
     "sent": 0,
     "skipped": 0,
     "failed": 0,
+    # Sends whose delivery the provider never confirmed. Held for review rather
+    # than retried, so they are reported apart from outright failures.
+    "unconfirmed": 0,
     # Already contacted under this message, and whatever the daily cap left for
     # the next run. Both were reported only inside the finish sentence, which the
     # UI cannot break apart to show a tidy summary.
@@ -774,7 +777,8 @@ def send_one(
 ) -> str:
     """Send one follower DM under the checkpoint. Returns the outcome.
 
-    Outcomes: ``sent`` | ``skipped`` (unreachable) | ``failed`` | ``duplicate``.
+    Outcomes: ``sent`` | ``skipped`` (unreachable) | ``failed`` | ``duplicate``
+    | ``unconfirmed`` (delivery unknown — held for review, never auto-retried).
     The message is marked SENT only after the provider confirms delivery.
     """
     claim = _claim(
@@ -856,6 +860,25 @@ def send_one(
         msg.error = claim.error
         db.commit()
         return "skipped"
+
+    if result.network_error:
+        # The answer was LOST, not refused: the request timed out or the gateway
+        # failed, and LinkedIn may already have delivered this DM. Marking it
+        # FAILED would put it back in RETRYABLE, so every later run sent the same
+        # message again — which is exactly how followers received one identical
+        # DM twice. CLAIMED is the existing "outcome unknown" state and is never
+        # retried automatically. ``claimed_by`` is cleared so it counts as
+        # "needs review" straight away rather than only after this process is
+        # replaced (see ``interrupted_sends``, which ignores its own live token).
+        claim.status = FollowerSendStatus.CLAIMED
+        claim.claimed_by = None
+        claim.reach = reach
+        claim.error = (
+            result.error or "Send unconfirmed — it may already have been delivered"
+        )
+        msg.error = claim.error
+        db.commit()
+        return "unconfirmed"
 
     claim.status = FollowerSendStatus.FAILED
     # Record which path was attempted even on failure. Without this a failed send
@@ -1021,6 +1044,9 @@ def send_all(
 
     delay = max(0.0, float(settings.bulk_linkedin_send_delay_seconds))
     sent = skipped = failed = duplicates = 0
+    # Attempts whose delivery could not be confirmed. Counted apart from
+    # ``failed`` because they are not retried: they wait for a human.
+    unconfirmed = 0
     attempted = 0
     stopped = False
 
@@ -1056,13 +1082,16 @@ def send_all(
             skipped += 1
         elif outcome == "duplicate":
             duplicates += 1
+        elif outcome == "unconfirmed":
+            unconfirmed += 1
         else:
             failed += 1
         # ``done`` follows deliveries so the bar agrees with its own "N of M"
         # label, which already reads from ``sent``. Counting attempts here would
         # fill the bar while nothing was actually being delivered.
         write_progress(
-            done=sent, sent=sent, skipped=skipped, failed=failed
+            done=sent, sent=sent, skipped=skipped, failed=failed,
+            unconfirmed=unconfirmed,
         )
         # Pace only between real sends; a skip cost the account nothing.
         if outcome == "sent" and sent < remaining and delay:
@@ -1083,6 +1112,11 @@ def send_all(
             f"Sent {sent} DM(s)."
             + (f" {skipped} not reachable." if skipped else "")
             + (f" {failed} failed." if failed else "")
+            + (
+                f" {unconfirmed} unconfirmed — check before resending."
+                if unconfirmed
+                else ""
+            )
             + (f" {duplicates} already contacted." if duplicates else "")
             + (f" {held} held for the next run (daily cap {cap})." if held else "")
             + (" Stopped early." if stopped else "")
@@ -1097,6 +1131,7 @@ def send_all(
         "sent": sent,
         "skipped": skipped,
         "failed": failed,
+        "unconfirmed": unconfirmed,
         "duplicates": duplicates,
         "held": held,
         "cap": cap,
