@@ -475,6 +475,46 @@ class UnipileLinkedInProvider(LinkedInProvider):
             "type": data.get("type"),
         }
 
+    @staticmethod
+    def _owner_identity(account: dict) -> tuple[Optional[str], Optional[str]]:
+        """(LinkedIn member id, public username) of whoever this account logs in as.
+
+        The Unipile ``account_id`` is per CONNECTION and changes when an account
+        is re-linked; the LinkedIn member id belongs to the PERSON and never
+        does. Recording it is what lets a successor connection be recognised as
+        the same human, so its outreach history keeps applying.
+
+        Unipile nests this under ``connection_params`` and has moved the exact
+        shape between versions, so every known spelling is tried and an unknown
+        one simply yields (None, None) — callers treat that as "not known yet"
+        and fall back to the account id alone.
+        """
+        params = account.get("connection_params")
+        candidates = []
+        if isinstance(params, dict):
+            for key in ("im", "linkedin", "LINKEDIN"):
+                nested = params.get(key)
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+            candidates.append(params)
+        candidates.append(account)
+        for src in candidates:
+            member = (
+                src.get("provider_id")
+                or src.get("member_id")
+                or src.get("id")
+                or ""
+            )
+            member = str(member).strip()
+            username = str(src.get("username") or src.get("public_identifier") or "").strip()
+            # An account's own ``id`` is the connection id, not the member id —
+            # accepting it would alias two genuinely different people together.
+            if member and member != str(account.get("id") or "").strip():
+                return member, (username or None)
+            if username:
+                return None, username
+        return None, None
+
     def list_accounts(self) -> list[dict]:
         """List LinkedIn accounts connected to this Unipile tenant."""
         if not (self.api_key and self.base_url):
@@ -500,12 +540,17 @@ class UnipileLinkedInProvider(LinkedInProvider):
             status = "OK"
             if isinstance(sources, list) and sources:
                 status = sources[0].get("status", "OK")
+            owner_member_id, owner_username = self._owner_identity(a)
             out.append(
                 {
                     "id": a.get("id"),
                     "name": a.get("name") or a.get("username"),
                     "type": a.get("type"),
                     "status": status,
+                    # Who this connection belongs to. Additive: the picker and
+                    # every existing caller read only the four keys above.
+                    "owner_member_id": owner_member_id,
+                    "owner_username": owner_username,
                 }
             )
         return out
@@ -518,11 +563,21 @@ class UnipileLinkedInProvider(LinkedInProvider):
         failure_redirect_url: Optional[str] = None,
         notify_url: Optional[str] = None,
         expires_minutes: int = 60,
+        reconnect_account_id: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Create a Unipile hosted-auth link to connect a LinkedIn account.
 
         Returns (url, error). Unipile's wizard handles login + 2FA/CAPTCHA, so no
         credentials ever pass through this app.
+
+        ``reconnect_account_id`` REVIVES that existing account instead of adding
+        another one. Without it Unipile answers a re-link by creating a SECOND
+        account with a NEW ``account_id`` — and every dedup scope in this app keys
+        off that id, so the whole "who have we already messaged" history silently
+        stopped applying. That is what re-DM'd Dalbir's connections on 2026-09-23:
+        the 2026-09-02 re-link minted ``CCJWKPI5...`` beside ``SxtgBQjd...`` and
+        the 7,408 rows under the old id became invisible. Omitted => the original
+        "create" behaviour, which is still what linking a NEW account wants.
         """
         if not (self.api_key and self.api_root):
             return None, "Unipile not configured."
@@ -536,6 +591,13 @@ class UnipileLinkedInProvider(LinkedInProvider):
             "expiresOn": expires,
             "name": name,
         }
+        if reconnect_account_id:
+            # Unipile's reconnect wizard takes the account to revive and keeps its
+            # id. ``providers`` is not sent with it — the provider is already
+            # fixed by the account being reconnected.
+            payload["type"] = "reconnect"
+            payload["reconnect_account"] = reconnect_account_id
+            payload.pop("providers", None)
         if success_redirect_url:
             payload["success_redirect_url"] = success_redirect_url
         if failure_redirect_url:

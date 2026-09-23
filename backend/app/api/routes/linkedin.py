@@ -35,6 +35,7 @@ from app.schemas.requests import (
     LinkedInDeleteManyRequest,
     LinkedInGenerateRequest,
     LinkedInGenerateRunRequest,
+    LinkedInLinkAccountsRequest,
     LinkedInReplyRequest,
     LinkedInSelectAccountRequest,
     LinkedInSendOpenRequest,
@@ -43,7 +44,7 @@ from app.schemas.requests import (
 )
 from app.services.app_settings import get_setting, set_setting
 from app.services.audit import log_action
-from app.services import linkedin_account_names
+from app.services import linkedin_account_identity, linkedin_account_names
 from app.services.linkedin_budget import linkedin_sent_today
 from app.services.linkedin_outreach import generate_linkedin_content
 from app.services.linkedin_providers import (
@@ -221,6 +222,12 @@ def list_accounts(db: Session = Depends(get_db)):
     # afterwards. ``accounts`` itself is passed through untouched — the picker
     # keeps showing exactly what the provider reports, nothing inferred.
     linkedin_account_names.remember_provider_names(accounts)
+    # Record whose LinkedIn profile each connection logs in as, on the same call.
+    # This is the ONLY moment an account's owner can be learned — once it is
+    # re-linked and replaced by a new id, the old one is gone from this listing.
+    # Having it is what lets a successor id inherit the outreach history instead
+    # of messaging everyone a second time.
+    linkedin_account_identity.remember_account_owners(accounts)
     # Then chase the ones the listing left out, so an account that has since
     # dropped off it still shows a name rather than an id.
     _resolve_missing_names(db, provider, accounts)
@@ -253,6 +260,49 @@ def set_account_name(payload: LinkedInAccountNameRequest):
     return {"known_names": entries}
 
 
+@router.get("/account-identities")
+def account_identities():
+    """The register of which connected accounts are the same person.
+
+    Read-only, for checking that a re-linked account is recognised as inheriting
+    its predecessor's outreach history before anything is sent.
+    """
+    return {"identities": linkedin_account_identity.entries()}
+
+
+@router.post("/link-accounts")
+def link_accounts_by_hand(payload: LinkedInLinkAccountsRequest, db: Session = Depends(get_db)):
+    """Record that ``account_id`` is the same person as ``same_person_as``.
+
+    Once linked, everything already sent from the earlier account counts as sent
+    from this one, so the same follower is never messaged twice under one
+    campaign. Needed for a predecessor that has already dropped off the provider
+    listing, where nothing can match the two automatically.
+    """
+    if not linkedin_account_identity.link_accounts(
+        payload.account_id, payload.same_person_as
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Two different account ids are required.",
+        )
+    log_action(
+        db,
+        AuditAction.LINKEDIN_SEND,
+        entity_type="linkedin_account",
+        actor="human",
+        summary=(
+            f"Linked LinkedIn account {payload.account_id} as the same person as "
+            f"{payload.same_person_as}"
+        ),
+        commit=True,
+    )
+    return {
+        "account_id": payload.account_id,
+        "siblings": linkedin_account_identity.sibling_account_ids(payload.account_id),
+    }
+
+
 @router.post("/connect-link")
 def create_connect_link(payload: LinkedInConnectRequest, db: Session = Depends(get_db)):
     """Create a Unipile hosted-auth link to connect a LinkedIn account from the UI."""
@@ -265,10 +315,16 @@ def create_connect_link(payload: LinkedInConnectRequest, db: Session = Depends(g
         )
     base = (settings.app_public_url or "").strip().rstrip("/")
     success_url = f"{base}/linkedin?connected=1" if base else None
+    # Re-linking an account Unipile already knows must REVIVE it, not add a second
+    # one: a new account_id detaches the entire "already messaged" history, which
+    # is how connections were DM'd twice in September. Only passed when the caller
+    # names an account, so linking a new one is unchanged.
+    reconnect_id = (payload.account_id or "").strip() or None
     url, error = maker(
         name=payload.name or "rse-user",
         success_redirect_url=success_url,
         failure_redirect_url=success_url,
+        reconnect_account_id=reconnect_id,
     )
     if not url:
         raise HTTPException(status_code=502, detail=error or "Could not create link")

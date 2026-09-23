@@ -597,9 +597,16 @@ export const setLinkedInAccountName = (accountId: string, name: string) =>
       { account_id: accountId, name }
     )
     .then((r) => r.data);
-export const createLinkedInConnectLink = (name?: string) =>
+// `accountId` re-links THAT account instead of adding another one, so Unipile
+// keeps its id and the "already messaged" history keeps applying. Omitted =
+// link a brand-new account, exactly as before.
+export const createLinkedInConnectLink = (name?: string, accountId?: string) =>
   api
-    .post<{ url: string }>("/api/linkedin/connect-link", { name }, { timeout: 60000 })
+    .post<{ url: string }>(
+      "/api/linkedin/connect-link",
+      { name, account_id: accountId },
+      { timeout: 60000 }
+    )
     .then((r) => r.data);
 export const selectLinkedInAccount = (accountId: string) =>
   api
