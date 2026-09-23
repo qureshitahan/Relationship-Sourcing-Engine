@@ -259,6 +259,24 @@ class LinkedInReplyRequest(BaseModel):
 class LinkedInConnectRequest(BaseModel):
     # Optional label to identify the connection in Unipile.
     name: Optional[str] = None
+    # Set to re-link THIS account rather than add another one. Unipile then keeps
+    # the same account_id, which is what every dedup and attribution scope in the
+    # app is keyed on. Omitted = link a brand-new account, as before.
+    account_id: Optional[str] = None
+
+
+class LinkedInLinkAccountsRequest(BaseModel):
+    """Declare that two connected accounts are the same person.
+
+    Automatic matching only works while both ids are still on the provider
+    listing; a predecessor Unipile has already replaced is gone from it, so that
+    link can only be stated by hand.
+    """
+
+    #: The current account (usually the newer id).
+    account_id: str
+    #: The earlier account whose outreach history it should inherit.
+    same_person_as: str
 
 
 class LinkedInSelectAccountRequest(BaseModel):

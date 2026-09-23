@@ -666,8 +666,13 @@ export default function ClassicSearchLinkedIn() {
   // Reconnecting is part of THIS page's troubleshooting: a Sales Navigator seat
   // added after the account was linked is invisible to the old session, and the
   // only fix is to link it again.
+  // `accountId` marks this as a RE-link of that same account. Unipile then keeps
+  // its id instead of minting a new one — a new id would detach every "already
+  // messaged" record, which is how connections were DM'd a second time in
+  // September. "Connect another" passes none and still creates a new account.
   const connectAccount = useMutation({
-    mutationFn: (label: string) => createLinkedInConnectLink(label),
+    mutationFn: ({ label, accountId }: { label: string; accountId?: string }) =>
+      createLinkedInConnectLink(label, accountId),
     onSuccess: (res) => {
       if (res.url) window.open(res.url, "_blank", "noopener");
       setNote(
@@ -948,11 +953,14 @@ export default function ClassicSearchLinkedIn() {
           <Button
             variant="secondary"
             onClick={() =>
-              connectAccount.mutate(
-                status?.active_account_name
+              connectAccount.mutate({
+                label: status?.active_account_name
                   ? `Reconnect ${status.active_account_name}`
-                  : "Reconnect LinkedIn account"
-              )
+                  : "Reconnect LinkedIn account",
+                // Revive this account rather than add a second one for the
+                // same person. The button is disabled without an activeId.
+                accountId: activeId ?? undefined,
+              })
             }
             disabled={busy || connectAccount.isPending || !activeId}
             title="Link this same LinkedIn account again — use it when a subscription was added after it was first connected"
@@ -961,7 +969,7 @@ export default function ClassicSearchLinkedIn() {
           </Button>
           <Button
             variant="secondary"
-            onClick={() => connectAccount.mutate("New LinkedIn account")}
+            onClick={() => connectAccount.mutate({ label: "New LinkedIn account" })}
             // Linking a DIFFERENT account cannot affect this account's running job.
             disabled={connectAccount.isPending}
             title="Link a different LinkedIn account"

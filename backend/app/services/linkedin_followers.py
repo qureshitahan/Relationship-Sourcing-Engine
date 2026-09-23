@@ -48,6 +48,7 @@ from app.models.linkedin_follower import (
 from app.models.linkedin_message import LinkedInMessage
 from app.models.principal import Principal
 from app.models.suppression import OutreachHistory
+from app.services import linkedin_account_identity
 from app.services.app_settings import get_setting, set_setting
 from app.services.audit import log_action
 from app.services.linkedin_budget import linkedin_sent_today
@@ -434,7 +435,13 @@ def _contacted_provider_ids(account_id: str, campaign_key: str):
     return nobody while the page said thousands were still to draft.
     """
     return select(LinkedInFollowerSend.follower_provider_id).where(
-        LinkedInFollowerSend.account_id == account_id,
+        # Every id belonging to the same PERSON, not just this connection. A
+        # re-link can mint a new account_id, and reading only that id made the
+        # whole contacted history vanish — see linkedin_account_identity. With no
+        # alias recorded this is exactly [account_id], i.e. the previous query.
+        LinkedInFollowerSend.account_id.in_(
+            linkedin_account_identity.sibling_account_ids(account_id)
+        ),
         LinkedInFollowerSend.campaign_key == campaign_key,
         LinkedInFollowerSend.status.in_(
             [FollowerSendStatus.SENT, FollowerSendStatus.CLAIMED]
@@ -731,6 +738,30 @@ def _claim(
             LinkedInFollowerSend.campaign_key == campaign_key,
         )
     ).scalars().first()
+    if existing is None:
+        # Nothing under THIS id — but a re-link can have moved the account to a
+        # new one, leaving the proof of an earlier send under its predecessor.
+        # Refusing here is the last line of defence: it is what would have
+        # stopped the identical DM that went out twice in September. A sibling's
+        # row is never mutated — it belongs to that connection's history — so a
+        # refusal is all this does, and it only refuses a SETTLED row, leaving a
+        # failed sibling attempt free to be tried again under this account.
+        siblings = [
+            a
+            for a in linkedin_account_identity.sibling_account_ids(account_id)
+            if a != account_id
+        ]
+        if siblings:
+            already = db.execute(
+                select(LinkedInFollowerSend).where(
+                    LinkedInFollowerSend.account_id.in_(siblings),
+                    LinkedInFollowerSend.follower_provider_id == follower.provider_id,
+                    LinkedInFollowerSend.campaign_key == campaign_key,
+                    LinkedInFollowerSend.status.not_in(FollowerSendStatus.RETRYABLE),
+                )
+            ).scalars().first()
+            if already is not None:
+                return None
     if existing is not None:
         if existing.status not in FollowerSendStatus.RETRYABLE:
             return None
@@ -922,10 +953,18 @@ def unsettled_follower_filter(account_id: str, campaign_key: str):
     offer "Approve & send all (97)" while the queue could only ever attempt 3.
     """
     settled = select(LinkedInFollowerSend.follower_provider_id).where(
-        LinkedInFollowerSend.account_id == account_id,
+        # Settled under ANY id belonging to this person — a re-link that minted a
+        # new account_id must not make an already-messaged follower look like
+        # fresh work. Identical to the old query when no alias is recorded.
+        LinkedInFollowerSend.account_id.in_(
+            linkedin_account_identity.sibling_account_ids(account_id)
+        ),
         LinkedInFollowerSend.campaign_key == campaign_key,
         LinkedInFollowerSend.status.not_in(FollowerSendStatus.RETRYABLE),
     )
+    # The ROSTER stays scoped to this account: the drafts being filtered are this
+    # account's, and a sibling's roster rows are separate people-rows for the
+    # same humans. Matching is by follower provider_id above, which is shared.
     settled_followers = select(LinkedInFollower.id).where(
         LinkedInFollower.account_id == account_id,
         LinkedInFollower.provider_id.in_(settled),
