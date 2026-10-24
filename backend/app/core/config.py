@@ -163,6 +163,10 @@ class Settings(BaseSettings):
     # Unipile DSN as host:port (e.g. api28.unipile.com:15824). The base URL is
     # built as https://{dsn}/api/v1.
     unipile_dsn: str = ""
+    # Auto-send the queued follow-up DM once a connection invite is accepted.
+    # Set LINKEDIN_AUTO_FOLLOWUP_ENABLED=false to pause only that step; invites,
+    # manual sends and reply detection are unaffected.
+    linkedin_auto_followup_enabled: bool = True
 
     # --- Voice (Vapi + ElevenLabs + Claude) ---
     # Provider: stub | vapi

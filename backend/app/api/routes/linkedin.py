@@ -1167,6 +1167,15 @@ def scan_linkedin_updates(
                 msg.network_distance = profile.network_distance
                 if profile.is_connected:
                     msg.connected = True
+                    if not settings.linkedin_auto_followup_enabled:
+                        # Auto follow-up paused: leave the DM queued.
+                        done += 1
+                        if track_progress:
+                            _set_scan_progress(
+                                db, status="running", total=total, done=done,
+                                accepted=accepted, replied=replied,
+                            )
+                        continue
                     result = provider.send_message(
                         provider_id=profile.provider_id or msg.linkedin_provider_id,
                         text=msg.body,
